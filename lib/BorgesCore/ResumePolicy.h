@@ -16,7 +16,7 @@ namespace resume {
 enum class Verdict : uint8_t {
   NoEvent,        // focus_event is null: nobody read this edition.
   Own,            // This device is the head.
-  AlreadyChosen,  // Same event answered before, and this device has not read since.
+  AlreadyChosen,  // Same event answered before.
   Invalid,        // Reported as an error. Never a prompt.
   Ask,            // Prompt, even at the same spot.
 };

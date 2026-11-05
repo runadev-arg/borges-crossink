@@ -95,7 +95,8 @@ Check: `POST /api/sync/v2/pull` with `focus_book` and `focus_only:true`. While t
 unresolved, that book's `progress.changed` is held back from upload.
 
 - Ask = false when: no `focus_event`, or the event is from this device, or a stored local choice has
-  the same fingerprint and this device has not read since.
+  the same fingerprint. Reading here afterwards does not reopen an answered question, as in
+  `resumeflow.lua`: asking again would offer Go over the pages just read.
 - Otherwise ask, even at the same spot. Fingerprint: `event:<id>`, else `seq:<n>`, else position.
   Keep the last 40 choices per book. A new event at the same spot asks again.
 - Invalid event (wrong book, missing `event_id`, missing `reading_head`) is a reported error, no prompt.

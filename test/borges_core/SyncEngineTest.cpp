@@ -994,7 +994,24 @@ TEST_F(SyncEngineTest, StayHereBecomesTheHeadWithoutJumping) {
   EXPECT_FALSE(d.engine->hasUndo(Device::book()));
 }
 
-TEST_F(SyncEngineTest, AnsweredEventDoesNotAskAgainUntilThisDeviceReads) {
+TEST_F(SyncEngineTest, ReadingAfterAnAnswerDoesNotReopenTheQuestion) {
+  // Go, read offline, reopen online: a second prompt would let Go throw away those pages.
+  d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
+  ResumeDecision decision;
+  ASSERT_EQ(open(decision).outcome, SessionOutcome::AwaitingChoice);
+  const Position here = Device::position(20);
+  const Position there = Device::position(60);
+  ASSERT_EQ(d.engine->applyChoice(decision, ResumeChoice::GoThere, here, there).outcome, SessionOutcome::Ok);
+  FinalizeInput input = d.finalizeInput(75, "/body/p[20].0", kNow + 600);
+  ASSERT_TRUE(d.engine->finalizeBook(input).progressQueued);
+
+  ResumeDecision again;
+  EXPECT_EQ(d.engine->runOpenSession(Device::bookRef(), Device::position(75), again).outcome, SessionOutcome::Ok);
+  EXPECT_FALSE(again.ask);
+  EXPECT_EQ(again.verdict, resume::Verdict::AlreadyChosen);
+}
+
+TEST_F(SyncEngineTest, AnsweredEventDoesNotAskAgain) {
   d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
   ResumeDecision decision;
   ASSERT_EQ(open(decision).outcome, SessionOutcome::AwaitingChoice);
@@ -1012,13 +1029,6 @@ TEST_F(SyncEngineTest, AnsweredEventDoesNotAskAgainUntilThisDeviceReads) {
   ResumeDecision rebooted;
   EXPECT_EQ(open(rebooted).outcome, SessionOutcome::Ok);
   EXPECT_FALSE(rebooted.ask);
-
-  // Reading here again makes the old answer stale: ask.
-  FinalizeInput input = d.finalizeInput(30, "/body/p[3].0", kNow + 50);
-  ASSERT_TRUE(d.engine->finalizeBook(input).progressQueued);
-  ResumeDecision read;
-  EXPECT_EQ(open(read).outcome, SessionOutcome::AwaitingChoice);
-  EXPECT_TRUE(read.ask);
 }
 
 TEST_F(SyncEngineTest, NewEventAtTheSameSpotAsksAgain) {

@@ -376,10 +376,9 @@ SessionReport SyncEngine::applyChoice(const ResumeDecision& decision, ResumeChoi
     if (ledger.suggestionId[0]) ledger.suggestionAction = SuggestionAction::Accept;
   } else {
     // This device becomes the head: a read that happened now.
-    ++ledger.activityGen;
     if (ledger.suggestionId[0]) ledger.suggestionAction = SuggestionAction::Dismiss;
   }
-  ledger.remember(decision.fingerprint, ledger.activityGen);
+  ledger.remember(decision.fingerprint);
   ledger.lastFinalized = position;
   ledger.hasFinalized = true;
   ledger.lastTurnEpoch = now.wall.epochSec;
@@ -1370,7 +1369,6 @@ FinalizeResult SyncEngine::finalizeBook(const FinalizeInput& input) {
   if (input.paged && !samePlace) {
     if (enqueueProgress(input.book.id, time, input.position, false)) {
       result.progressQueued = true;
-      ++ledger.activityGen;
       ledger.lastFinalized = input.position;
       ledger.hasFinalized = true;
       ledger.lastTurnEpoch = input.lastTurn.epochSec;

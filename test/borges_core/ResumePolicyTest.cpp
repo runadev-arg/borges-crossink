@@ -45,22 +45,12 @@ TEST(ResumePolicy, DecisionTable) {
        },
        Verdict::Ask},
       {"from this device", false, [](RemoteEvent& e, BookLedger&) { copyText(e.originId, sizeof(e.originId), kSelfId); }, Verdict::Own},
-      {"answered, not read since", false,
-       [](RemoteEvent& e, BookLedger& l) {
-         l.activityGen = 3;
-         l.remember(resume::fingerprint(e), 3);
-       },
+      {"answered: not asked again, whatever was read since", false,
+       [](RemoteEvent& e, BookLedger& l) { l.remember(resume::fingerprint(e)); },
        Verdict::AlreadyChosen},
-      {"answered, read since: ask again", false,
-       [](RemoteEvent& e, BookLedger& l) {
-         l.remember(resume::fingerprint(e), 3);
-         l.activityGen = 4;
-       },
-       Verdict::Ask},
       {"new event at the same spot asks again", false,
        [](RemoteEvent& e, BookLedger& l) {
-         l.activityGen = 3;
-         l.remember(resume::fingerprint(e), 3);
+         l.remember(resume::fingerprint(e));
          copyText(e.eventId, sizeof(e.eventId), "evt-2");
        },
        Verdict::Ask},
@@ -83,7 +73,7 @@ TEST(ResumePolicy, DecisionTable) {
       {"own wins over a remembered answer", false,
        [](RemoteEvent& e, BookLedger& l) {
          copyText(e.originId, sizeof(e.originId), kSelfId);
-         l.remember(resume::fingerprint(e), 0);
+         l.remember(resume::fingerprint(e));
        },
        Verdict::Own},
   };
@@ -100,17 +90,17 @@ TEST(ResumePolicy, FortyChoicesAreKeptAndTheOldestGoes) {
   auto ledger = std::make_unique<BookLedger>();
   const BookId book = Device::book();
   auto oldest = makeEvent();
-  ledger->remember(resume::fingerprint(*oldest), 0);
+  ledger->remember(resume::fingerprint(*oldest));
   for (int i = 2; i <= 40; ++i) {
     auto e = makeEvent();
     const std::string id = "evt-" + std::to_string(i);
     copyText(e->eventId, sizeof(e->eventId), id.c_str());
-    ledger->remember(resume::fingerprint(*e), 0);
+    ledger->remember(resume::fingerprint(*e));
   }
   EXPECT_EQ(resume::evaluate(oldest.get(), book, kSelfId, *ledger), Verdict::AlreadyChosen);
   auto e41 = makeEvent();
   copyText(e41->eventId, sizeof(e41->eventId), "evt-41");
-  ledger->remember(resume::fingerprint(*e41), 0);
+  ledger->remember(resume::fingerprint(*e41));
   EXPECT_EQ(resume::evaluate(oldest.get(), book, kSelfId, *ledger), Verdict::Ask);
   EXPECT_EQ(resume::evaluate(e41.get(), book, kSelfId, *ledger), Verdict::AlreadyChosen);
 }

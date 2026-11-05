@@ -12,7 +12,7 @@ namespace {
 
 constexpr uint8_t kCredVersion = 1;
 constexpr uint8_t kStateVersion = 1;
-constexpr uint8_t kBookVersion = 1;
+constexpr uint8_t kBookVersion = 2;
 constexpr uint8_t kAnnVersion = 1;
 constexpr uint8_t kInboxMagic0 = 0xB1;
 constexpr uint8_t kInboxMagic1 = 0x57;
@@ -94,28 +94,26 @@ bool HoldSet::remove(const uint8_t md5[16]) {
   return false;
 }
 
-void BookLedger::remember(uint64_t fingerprint, uint32_t gen) {
+void BookLedger::remember(uint64_t fingerprint) {
   for (uint8_t i = 0; i < choiceCount; ++i) {
-    if (choices[i].fingerprint == fingerprint) {
-      memmove(&choices[i], &choices[i + 1], sizeof(ChoiceEntry) * (choiceCount - i - 1u));
+    if (choices[i] == fingerprint) {
+      memmove(&choices[i], &choices[i + 1], sizeof(choices[0]) * (choiceCount - i - 1u));
       --choiceCount;
       break;
     }
   }
   if (choiceCount == kMaxChoices) {
-    memmove(&choices[0], &choices[1], sizeof(ChoiceEntry) * (kMaxChoices - 1));
+    memmove(&choices[0], &choices[1], sizeof(choices[0]) * (kMaxChoices - 1));
     --choiceCount;
   }
-  choices[choiceCount].fingerprint = fingerprint;
-  choices[choiceCount].activityGen = gen;
-  ++choiceCount;
+  choices[choiceCount++] = fingerprint;
 }
 
-const ChoiceEntry* BookLedger::findChoice(uint64_t fingerprint) const {
+bool BookLedger::hasChoice(uint64_t fingerprint) const {
   for (uint8_t i = 0; i < choiceCount; ++i) {
-    if (choices[i].fingerprint == fingerprint) return &choices[i];
+    if (choices[i] == fingerprint) return true;
   }
-  return nullptr;
+  return false;
 }
 
 Store::Store(IFs& fs, const uint8_t* key, size_t keyLen)
@@ -319,7 +317,6 @@ bool Store::loadBook(const BookId& id, BookLedger& out) {
     const uint16_t epoch = r.u16();
     if (version == kBookVersion && epoch == state_.accountEpoch) {
       BookLedger* l = &out;
-      l->activityGen = r.u32();
       l->inboundSeq = r.u64();
       l->head.valid = r.u8() != 0;
       l->head.serverSeq = r.u64();
@@ -337,10 +334,7 @@ bool Store::loadBook(const BookId& id, BookLedger& out) {
       const uint8_t choices = r.u8();
       if (choices <= BookLedger::kMaxChoices) {
         l->choiceCount = choices;
-        for (uint8_t i = 0; i < choices; ++i) {
-          l->choices[i].fingerprint = r.u64();
-          l->choices[i].activityGen = r.u32();
-        }
+        for (uint8_t i = 0; i < choices; ++i) l->choices[i] = r.u64();
       } else {
         delete[] buf;
         out = BookLedger{};
@@ -366,7 +360,6 @@ bool Store::saveBook(const BookLedger& l) {
   ByteWriter w(buf, 2400);
   w.u8(kBookVersion);
   w.u16(state_.accountEpoch);
-  w.u32(l.activityGen);
   w.u64(l.inboundSeq);
   w.u8(l.head.valid ? 1 : 0);
   w.u64(l.head.serverSeq);
@@ -382,10 +375,7 @@ bool Store::saveBook(const BookLedger& l) {
   w.str(l.suggestionId);
   w.u8(static_cast<uint8_t>(l.suggestionAction));
   w.u8(l.choiceCount);
-  for (uint8_t i = 0; i < l.choiceCount; ++i) {
-    w.u64(l.choices[i].fingerprint);
-    w.u32(l.choices[i].activityGen);
-  }
+  for (uint8_t i = 0; i < l.choiceCount; ++i) w.u64(l.choices[i]);
   const bool ok = w.ok() && file.save(buf, w.size());
   delete[] buf;
   return ok;

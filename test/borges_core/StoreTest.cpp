@@ -157,8 +157,6 @@ TEST(Store, BookLedgerRoundTripWithLongestValues) {
   ASSERT_TRUE(store.begin());
   BookLedger l;
   ASSERT_TRUE(store.loadBook(Device::book(), l));
-  EXPECT_EQ(l.activityGen, 0u);
-  l.activityGen = 7;
   l.inboundSeq = 99;
   const std::string longXp(kMaxXpointer - 1, 'x');
   l.head.valid = true;
@@ -175,32 +173,30 @@ TEST(Store, BookLedgerRoundTripWithLongestValues) {
   copyText(l.lastFinalized.xpointer, kMaxXpointer, longXp.c_str());
   copyText(l.suggestionId, sizeof(l.suggestionId), kOtherId);
   l.suggestionAction = SuggestionAction::Dismiss;
-  for (int i = 0; i < 45; ++i) l.remember(static_cast<uint64_t>(i + 1), static_cast<uint32_t>(i));
+  for (int i = 0; i < 45; ++i) l.remember(static_cast<uint64_t>(i + 1));
   ASSERT_TRUE(store.saveBook(l));
 
   BookLedger r;
   ASSERT_TRUE(store.loadBook(Device::book(), r));
-  EXPECT_EQ(r.activityGen, 7u);
   EXPECT_EQ(r.inboundSeq, 99u);
   EXPECT_EQ(std::string(r.head.position.xpointer), longXp);
   EXPECT_EQ(r.head.precision, TimePrecision::Anchored);
   EXPECT_EQ(r.suggestionAction, SuggestionAction::Dismiss);
   EXPECT_STREQ(r.suggestionId, kOtherId);
   EXPECT_EQ(r.choiceCount, BookLedger::kMaxChoices);
-  EXPECT_EQ(r.findChoice(1), nullptr);
-  EXPECT_EQ(r.findChoice(5), nullptr);
-  ASSERT_NE(r.findChoice(45), nullptr);
-  EXPECT_EQ(r.findChoice(45)->activityGen, 44u);
+  EXPECT_FALSE(r.hasChoice(1));
+  EXPECT_FALSE(r.hasChoice(5));
+  EXPECT_TRUE(r.hasChoice(45));
 }
 
 TEST(Store, RememberingAgainMovesToNewestAndKeepsFortyBooksOfChoices) {
   BookLedger l;
-  l.remember(1, 10);
-  l.remember(2, 20);
-  l.remember(1, 30);
+  l.remember(1);
+  l.remember(2);
+  l.remember(1);
   EXPECT_EQ(l.choiceCount, 2);
-  EXPECT_EQ(l.findChoice(1)->activityGen, 30u);
-  EXPECT_EQ(l.choices[1].fingerprint, 1u);
+  EXPECT_TRUE(l.hasChoice(1));
+  EXPECT_EQ(l.choices[1], 1u);
 }
 
 TEST(Store, AnnotationLedgerRoundTrip) {
@@ -290,7 +286,7 @@ TEST(Store, AccountChangeEmptiesQueueAndCursorButKeepsSequence) {
   ASSERT_EQ(d.appendRaw("mine"), Outbox::AppendResult::Ok);
   BookLedger l;
   ASSERT_TRUE(d.store->loadBook(Device::book(), l));
-  l.activityGen = 9;
+  l.hasUndo = true;
   ASSERT_TRUE(d.store->saveBook(l));
 
   // Same account: nothing changes.
@@ -305,7 +301,7 @@ TEST(Store, AccountChangeEmptiesQueueAndCursorButKeepsSequence) {
   EXPECT_EQ(d.store->state().holds.size(), 0);
   EXPECT_EQ(d.outbox->nextSequence(), 2u);
   ASSERT_TRUE(d.store->loadBook(Device::book(), l));
-  EXPECT_EQ(l.activityGen, 0u);
+  EXPECT_FALSE(l.hasUndo);
 }
 
 TEST(LegacyImport, ReadsThePreviousFirmwaresCredentialOnce) {

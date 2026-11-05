@@ -36,9 +36,9 @@ Verdict evaluate(const RemoteEvent* e, const BookId& book, const char* selfDevic
   const bool hasLocator = e->xpointerUsable || e->hasPct;
   if (!sameBook || !e->hasEventId || !e->originId[0] || !e->readingHead || !hasLocator) return Verdict::Invalid;
   if (selfDeviceId && strcmp(e->originId, selfDeviceId) == 0) return Verdict::Own;
-  const ChoiceEntry* choice = ledger.findChoice(fingerprint(*e));
-  if (choice && choice->activityGen == ledger.activityGen) return Verdict::AlreadyChosen;
-  return Verdict::Ask;
+  // An answer stands for that event, whatever was read here afterwards, as in
+  // resumeflow.lua:hasLocalChoice. Asking again would offer Go over pages read since.
+  return ledger.hasChoice(fingerprint(*e)) ? Verdict::AlreadyChosen : Verdict::Ask;
 }
 
 uint8_t warningsFor(bool hasRemotePct, uint32_t remotePct, bool hasLocalPct, uint32_t localPct, bool xpointerUsable) {

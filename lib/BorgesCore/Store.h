@@ -92,11 +92,6 @@ struct SyncState {
   HoldSet holds;
 };
 
-struct ChoiceEntry {
-  uint64_t fingerprint = 0;
-  uint32_t activityGen = 0;
-};
-
 enum class SuggestionAction : uint8_t { None = 0, Accept = 1, Dismiss = 2 };
 
 struct RemoteHead {
@@ -112,7 +107,6 @@ struct BookLedger {
   static constexpr uint8_t kMaxChoices = 40;
 
   BookId id;
-  uint32_t activityGen = 0;       // Bumped whenever this device reads the book.
   uint64_t inboundSeq = 0;        // Newest inbound annotation already stored.
   RemoteHead head;                // Latest progress of another device seen in pulls.
   bool hasUndo = false;
@@ -123,10 +117,10 @@ struct BookLedger {
   char suggestionId[40] = {0};    // Open suggestion for this book.
   SuggestionAction suggestionAction = SuggestionAction::None;  // Decided, not yet told to the server.
   uint8_t choiceCount = 0;
-  ChoiceEntry choices[kMaxChoices];
+  uint64_t choices[kMaxChoices] = {0};  // Fingerprints of answered events, oldest first.
 
-  void remember(uint64_t fingerprint, uint32_t gen);
-  const ChoiceEntry* findChoice(uint64_t fingerprint) const;
+  void remember(uint64_t fingerprint);
+  bool hasChoice(uint64_t fingerprint) const;
 };
 
 struct AnnotationRecord {
