@@ -37,6 +37,9 @@ constexpr uint32_t kChoiceLinkBudgetMs = 6000;
 // the link again by itself: a prompt can sit for an hour on a nightstand.
 constexpr unsigned long kPromptLinkMs = 20000;
 constexpr uint32_t kSleepExitWaitMs = 4000;
+constexpr uint32_t kLeaveWaitMs = 400;
+// Past a budget a session sees through ICancel, the one step it cannot be interrupted in.
+constexpr unsigned long kHangMarginMs = 12000;
 constexpr uint32_t kSleepBudgetMs = 15000;
 constexpr uint32_t kSleepLinkBudgetMs = 6000;
 // One uninterruptible TCP connect, about 3.5 s, on top of the budget.
@@ -199,9 +202,13 @@ void BorgesOpenActivity::loop() {
 
 void BorgesOpenActivity::openBook() {
   if (stack_) stack_->cancel.request();
-  const bool ok = worker_.finished() && session_ && session_->ran && session_->report.outcome == SessionOutcome::Ok;
-  completeSession(ok, path_, ok ? &stack_->clock : nullptr);
-  if (worker_.waitForExit(400) && stack_) stack_->bringDown();
+  // Only with the session back: a session hung inside the card would hang this too, and a reader
+  // never waits on it. Without this write the guard counts it as dead, which it is.
+  if (worker_.waitForExit(kLeaveWaitMs)) {
+    const bool ok = session_ && session_->ran && session_->report.outcome == SessionOutcome::Ok;
+    completeSession(ok, path_, ok && stack_ ? &stack_->clock : nullptr);
+    if (stack_) stack_->bringDown();
+  }
   // A reboot turns the radio off and frees everything, wherever the session stands.
   silentRestartToReader(true);
 }
@@ -306,7 +313,9 @@ void BorgesResumeActivity::loop() {
       }
       return;
     case State::Working:
-      if (mappedInput.wasAnyPressed() || worker_.finished()) leave(choiceStored_ || worker_.finished());
+      if (mappedInput.wasAnyPressed() || worker_.finished() || (workDeadlineAt_ != 0 && millis() >= workDeadlineAt_)) {
+        leave(choiceStored_ || worker_.finished());
+      }
       return;
     case State::Choosing:
       break;
@@ -430,6 +439,7 @@ void BorgesResumeActivity::stayHere() {
     mapSavedPage(work_->stayAt);
   }
   stack_->cancel.arm(kStayBudgetMs);
+  workDeadlineAt_ = millis() + kStayBudgetMs + kHangMarginMs;
   if (!worker_.start(&BorgesResumeActivity::stayMain, work_.get())) {
     stack_->engine.applyChoice(*decision_, ResumeChoice::StayHere, work_->stayAt, work_->stayAt, false);
     leave(false);
@@ -472,6 +482,7 @@ void BorgesResumeActivity::goThere() {
     }
     work_->stack = stack_.get();
     stack_->cancel.arm(kStayBudgetMs);
+    workDeadlineAt_ = millis() + kStayBudgetMs + kHangMarginMs;
     if (!worker_.start(&BorgesResumeActivity::drainMain, work_.get())) leave(true);
     return;
   }
@@ -483,7 +494,8 @@ void BorgesResumeActivity::goThere() {
 void BorgesResumeActivity::leave(const bool success) {
   if (stack_) stack_->cancel.request();
   if (back_ == Return::Reader) {
-    completeSession(success, path_, success && stack_ ? &stack_->clock : nullptr);
+    if (worker_.waitForExit(kLeaveWaitMs))
+      completeSession(success, path_, success && stack_ ? &stack_->clock : nullptr);
     silentRestartToReader(true);
     return;
   }

@@ -104,6 +104,7 @@ class BorgesResumeActivity final : public Activity {
   bool choiceStored_ = false;
   unsigned long linkDownAt_ = 0;
   unsigned long noticeUntil_ = 0;
+  unsigned long workDeadlineAt_ = 0;
   ButtonNavigator navigator_;
   SessionWorker worker_;
 };
@@ -178,6 +179,7 @@ class BorgesActivity final : public Activity {
   SessionWorker worker_;
   ButtonNavigator navigator_;
   unsigned long autoLeaveAt_ = 0;
+  unsigned long hardDeadlineAt_ = 0;
   char requestId_[40] = {0};
 };
 
@@ -218,6 +220,9 @@ class BorgesLibraryActivity final : public Activity {
   uint32_t shownPercent_ = 0;
   unsigned long lastProgressPaint_ = 0;
   unsigned long linkDownAt_ = 0;
+  unsigned long hardDeadlineAt_ = 0;  // Loading, or a cancelled download.
+  unsigned long lastProgressAt_ = 0;
+  uint32_t lastProgressPercent_ = 0;
   class Progress;
 };
 

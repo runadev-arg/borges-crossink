@@ -30,6 +30,11 @@ constexpr uint32_t kSyncLinkBudgetMs = 20000;
 constexpr uint32_t kPairLinkBudgetMs = 20000;
 constexpr uint32_t kManualBudgetMs = 120000;
 constexpr uint32_t kDisconnectBudgetMs = 30000;
+// Past a budget a session sees through ICancel, the one step it cannot be interrupted in. After
+// that it is hung, and the screen leaves without it: every way out of here ends in a reboot.
+constexpr unsigned long kHangMarginMs = 15000;
+constexpr uint32_t kPairHungMs = 60000;  // Pairing has no budget, so its loop reports it is alive.
+constexpr uint32_t kCancelWaitMs = 1500;
 constexpr unsigned long kResultOkMs = 1500;
 constexpr unsigned long kResultErrorMs = 3000;
 constexpr int kMaxCodeRenewals = 3;
@@ -59,6 +64,7 @@ struct BorgesActivity::Shared {
   std::atomic<bool> resultOk_{false};
   std::atomic<bool> needsChoice_{false};
   bool askOtherDevices_ = false;
+  std::atomic<uint32_t> pairAliveAt_{0};
 };
 
 BorgesActivity::BorgesActivity(GfxRenderer& renderer, MappedInputManager& input, const bool networkBoot,
@@ -221,6 +227,7 @@ void BorgesActivity::startSync() {
   }
   s_->stack_->cancel.arm(kManualBudgetMs);
   s_->askOtherDevices_ = start_ == NetPayload::OtherDevice;
+  hardDeadlineAt_ = millis() + kManualBudgetMs + kHangMarginMs;
   if ((start_ == NetPayload::ManualFromReader || start_ == NetPayload::OtherDevice) &&
       !APP_STATE.openEpubPath.empty()) {
     s_->bookPath_ = APP_STATE.openEpubPath;
@@ -290,6 +297,7 @@ void BorgesActivity::syncMain(void* shared) {
 
 void BorgesActivity::startDisconnect() {
   s_->stack_->cancel.arm(kDisconnectBudgetMs);
+  hardDeadlineAt_ = millis() + kDisconnectBudgetMs + kHangMarginMs;
   focus_ = 0;
   setView(View::Syncing);
   if (!worker_.start(&BorgesActivity::disconnectMain, s_.get())) {
@@ -353,6 +361,8 @@ void BorgesActivity::beginPairSession() {
     return;
   }
   s_->stack_->cancel.arm(0);
+  hardDeadlineAt_ = 0;
+  s_->pairAliveAt_.store(millis());
   setView(View::PairConnecting);
   if (!worker_.start(&BorgesActivity::pairMain, s_.get())) {
     s_->resultText_.store(StrId::STR_BORGES_ERR_LOCAL);
@@ -385,6 +395,7 @@ void BorgesActivity::pairMain(void* shared) {
   int renewals = 0;
   bool started = false;
   while (!stack.cancel.cancelled()) {
+    s->pairAliveAt_.store(millis());
     if (!started) {
       if (flow.start()) {
         started = true;
@@ -431,7 +442,7 @@ void BorgesActivity::pairMain(void* shared) {
 
 void BorgesActivity::leave() {
   if (s_->stack_) s_->stack_->cancel.request();
-  (void)worker_.waitForExit(4000);
+  (void)worker_.waitForExit(kCancelWaitMs);
   if (networkBoot_) {
     if (readerSession()) {
       silentRestartToReader(true);
@@ -472,10 +483,17 @@ void BorgesActivity::loop() {
   switch (view_) {
     case View::Syncing:
     case View::PairConnecting:
-    case View::PairCode:
+    case View::PairCode: {
+      const bool syncHung = view_ == View::Syncing && hardDeadlineAt_ != 0 && millis() >= hardDeadlineAt_;
+      const bool pairHung = view_ != View::Syncing && millis() - s_->pairAliveAt_.load() >= kPairHungMs;
+      if (syncHung || pairHung) {
+        LOG_ERR("BORGES", "Session hung: leaving without it");
+        leave();
+        return;
+      }
       if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
         s_->stack_->cancel.request();
-        if (!worker_.waitForExit(4000)) {
+        if (!worker_.waitForExit(kCancelWaitMs)) {
           leave();
           return;
         }
@@ -492,6 +510,7 @@ void BorgesActivity::loop() {
         }
       }
       return;
+    }
     case View::SyncResult:
     case View::PairResult:
       if (mappedInput.wasAnyPressed() || millis() >= autoLeaveAt_) {

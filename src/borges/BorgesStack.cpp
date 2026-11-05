@@ -85,6 +85,12 @@ bool BorgesStack::openEngine() {
 }
 
 net::LinkResult BorgesStack::bringUp(const uint32_t linkBudgetMs) {
+#ifdef SIMULATOR
+  // A session stuck where nothing can interrupt it, to prove no screen waits on one.
+  if (getenv("BORGES_SIM_HANG_WORKER")) {
+    for (;;) delay(1000);
+  }
+#endif
   const net::LinkResult result = link.connected() ? net::LinkResult::Connected : link.connect(linkBudgetMs, cancel);
   if (result != net::LinkResult::Connected) {
     // The engine never sees this one, and the Borges screen should still say why.

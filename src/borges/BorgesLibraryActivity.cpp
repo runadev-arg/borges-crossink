@@ -27,6 +27,11 @@ constexpr unsigned long kProgressPaintMs = 2500;
 constexpr uint32_t kProgressPaintStep = 5;
 // Reading a list needs no radio. The next page or download raises it again.
 constexpr unsigned long kIdleLinkMs = 30000;
+// A session past what it can see through ICancel is hung. Every way out of here is a reboot.
+constexpr unsigned long kHangMarginMs = 15000;
+constexpr unsigned long kDownloadStallMs = 120000;  // No byte for this long: past any socket timeout.
+constexpr unsigned long kCancelWaitMs = 5000;
+constexpr uint32_t kLeaveWaitMs = 1500;
 
 int rowHeightFor(const GfxRenderer& renderer) {
   return renderer.getLineHeight(UI_10_FONT_ID) + renderer.getLineHeight(SMALL_FONT_ID) + 14;
@@ -140,6 +145,7 @@ void BorgesLibraryActivity::startLoad(const uint16_t page) {
   s_->requestedPage_ = page;
   s_->hasNote_.store(false);
   s_->stack_->cancel.arm(kLoadLinkBudgetMs + kFetchBudgetMs);
+  hardDeadlineAt_ = millis() + kLoadLinkBudgetMs + kFetchBudgetMs + kHangMarginMs;
   setView(View::Loading);
   if (!worker_.start(&BorgesLibraryActivity::loadMain, s_.get())) silentRestart();
 }
@@ -196,6 +202,9 @@ void BorgesLibraryActivity::startDownload() {
   shownPercent_ = 0;
   lastProgressPaint_ = millis();
   s_->stack_->cancel.arm(kDownloadBudgetMs);
+  hardDeadlineAt_ = 0;
+  lastProgressAt_ = millis();
+  lastProgressPercent_ = 0;
   setView(View::Downloading);
   if (!worker_.start(&BorgesLibraryActivity::downloadMain, s_.get())) {
     s_->note_.store(StrId::STR_BORGES_ERR_LOCAL);
@@ -274,7 +283,7 @@ void BorgesLibraryActivity::openDownloaded() {
 
 void BorgesLibraryActivity::leave() {
   if (s_->stack_) s_->stack_->cancel.request();
-  if (!worker_.waitForExit(4000)) {
+  if (!worker_.waitForExit(kLeaveWaitMs)) {
     silentRestart();
     return;
   }
@@ -308,11 +317,28 @@ void BorgesLibraryActivity::loop() {
 
   switch (view_) {
     case View::Loading:
+      if (hardDeadlineAt_ != 0 && millis() >= hardDeadlineAt_) {
+        LOG_ERR("BORGES", "Library load hung: leaving without it");
+        silentRestart();
+        return;
+      }
       if (mappedInput.wasReleased(MappedInputManager::Button::Back)) leave();
       return;
     case View::Downloading: {
       if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
         s_->stack_->cancel.request();
+        hardDeadlineAt_ = millis() + kCancelWaitMs;
+        return;
+      }
+      const uint32_t received = s_->downloadPercent_.load(std::memory_order_relaxed);
+      if (received != lastProgressPercent_) {
+        lastProgressPercent_ = received;
+        lastProgressAt_ = millis();
+      }
+      if ((hardDeadlineAt_ != 0 && millis() >= hardDeadlineAt_) || millis() - lastProgressAt_ >= kDownloadStallMs) {
+        // The .part stays: the next try picks up where this one stopped.
+        LOG_ERR("BORGES", "Download hung: leaving without it");
+        silentRestart();
         return;
       }
       // E-ink: a bar that moves every few seconds, never one that flickers.
