@@ -30,7 +30,7 @@ namespace borges {
 
 class JsonWriter;
 
-enum class EventKind : uint8_t { Progress = 1, Annotation = 2, Session = 3 };
+enum class EventKind : uint8_t { Progress = 1, Annotation = 2, Session = 3, PageStats = 4 };
 
 class IHoldFilter {
  public:

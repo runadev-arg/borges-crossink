@@ -136,6 +136,8 @@ struct FinalizeInput {
   uint64_t lastTurnMonotonicMs = 0;
   const SessionSummary* session = nullptr;
   IClipSource* clips = nullptr;
+  // Rows that reach the queue leave the buffer, so it can stay in the reader across finalizes.
+  PageStatBuffer* pageStats = nullptr;
 };
 
 struct FinalizeResult {
@@ -145,6 +147,7 @@ struct FinalizeResult {
   uint16_t annotationsCreated = 0;
   uint16_t annotationsDeleted = 0;
   bool annotationsPending = false;  // Limit reached; the rest go at the next finalize.
+  uint8_t pageStatEvents = 0;
 };
 
 enum class DisconnectResult : uint8_t {
@@ -269,6 +272,7 @@ class SyncEngine {
 
   bool enqueueProgress(const BookId& book, const EventTime& time, const Position& position, bool explicitJump);
   bool enqueueSession(const BookId& book, const SessionSummary& session, FinalizeResult& result);
+  bool enqueuePageStats(const FinalizeInput& input, FinalizeResult& result);
   bool finalizeClips(const FinalizeInput& input, const EventTime& time, FinalizeResult& result);
   bool appendEvent(EventKind kind, const BookId& book, const char* body, size_t len, bool replace);
 

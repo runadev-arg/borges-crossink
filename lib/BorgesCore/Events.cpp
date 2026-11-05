@@ -52,6 +52,8 @@ void writeBook(JsonWriter& w, const BookRef& book) {
 // own chain of events, and still compares branches if another device touched it since.
 void writeBaseRevision(JsonWriter& w) { w.kv("base_revision", "0"); }
 
+constexpr size_t kMaxStatsText = 500;
+
 bool hasNonSpace(const char* text) {
   if (!text) return false;
   for (const char* p = text; *p; ++p) {
@@ -189,6 +191,57 @@ bool writeSession(JsonWriter& w, const BookId& book, const SessionSummary& s) {
   if (s.endPage >= 0) w.kvInt("end_page", s.endPage);
   w.objectEnd();
   return true;
+}
+
+void writePageStats(JsonWriter& w, const BookRef& book, TimePrecision precision, const PageStatRow* rows, uint8_t count,
+                    uint8_t chunkIndex) {
+  const PageStatRow& last = rows[count - 1];
+  char first[21], newest[21], index[21];
+  formatU64(rows[0].startEpoch, first);
+  formatU64(last.startEpoch, newest);
+  formatU64(chunkIndex, index);
+  // main.lua:_enqueueStatsV2. A chunk is identified by what it holds, not by when it was sent.
+  char aggregate[11 + 32 + 1 + 10 + 1 + 10 + 1 + 3 + 1];
+  JsonWriter id(aggregate, sizeof(aggregate) - 1);
+  id.raw("page-stats:");
+  id.raw(book.id.hex);
+  id.raw(":");
+  id.raw(first);
+  id.raw(":");
+  id.raw(newest);
+  id.raw(":");
+  id.raw(index);
+  aggregate[id.size()] = '\0';
+
+  EventTime time;
+  time.wall = WallTime{last.startEpoch, precision};
+  writeHead(w, "page_stat.recorded", "reading_statistics");
+  w.value(aggregate);
+  writeTail(w, book.id, time);
+  w.objectBegin();
+  w.key("rows");
+  w.arrayBegin();
+  for (uint8_t i = 0; i < count; ++i) {
+    w.objectBegin();
+    w.kv("book_md5", book.id.hex);
+    w.kvInt("page", rows[i].page);
+    w.kvInt("start_time", rows[i].startEpoch);
+    w.kvInt("duration", rows[i].seconds);
+    if (book.totalPages >= 1) w.kvInt("total_pages", book.totalPages);
+    w.objectEnd();
+  }
+  w.arrayEnd();
+  w.key("books");
+  w.arrayBegin();
+  w.objectBegin();
+  w.kv("md5", book.id.hex);
+  // Over its limit a field would get the whole chunk refused: boundedMetadata leaves it out.
+  if (book.title && *book.title && strlen(book.title) <= kMaxStatsText) w.kv("title", book.title);
+  if (book.author && *book.author && strlen(book.author) <= kMaxStatsText) w.kv("authors", book.author);
+  if (book.totalPages >= 1) w.kvInt("pages", book.totalPages);
+  w.objectEnd();
+  w.arrayEnd();
+  w.objectEnd();
 }
 
 uint64_t clipLedgerKey(const BookId& book, const ClipKey& clip) {

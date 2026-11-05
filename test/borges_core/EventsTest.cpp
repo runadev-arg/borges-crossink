@@ -244,6 +244,74 @@ TEST(Events, SyncIdIsDerivedFromTheKeyAndStable) {
   EXPECT_NE(events::clipLedgerKey(Device::book(), a), events::clipLedgerKey(Device::book(), b));
 }
 
+TEST(Events, PageStatsCarryWhatTheDashboardAndTheDocumentNeed) {
+  const PageStatRow rows[2] = {{1793800000u, 10, 60}, {1793800060u, 11, 90}};
+  auto doc = parse(render([&](JsonWriter& w) { events::writePageStats(w, Device::bookRef(), TimePrecision::Exact, rows, 2, 3); }));
+  EXPECT_EQ(doc["event_type"], "page_stat.recorded");
+  EXPECT_EQ(doc["aggregate_type"], "reading_statistics");
+  EXPECT_EQ(doc["aggregate_id"], std::string("page-stats:") + kMd5A + ":1793800000:1793800060:3");
+  EXPECT_EQ(doc["book_identifier"]["value"], kMd5A);
+  EXPECT_EQ(doc["time_precision"], "exact");
+  JsonArray out = doc["payload"]["rows"];
+  ASSERT_EQ(out.size(), 2u);
+  EXPECT_EQ(out[1]["book_md5"], kMd5A);
+  EXPECT_EQ(out[1]["page"], 11);
+  EXPECT_EQ(out[1]["start_time"], 1793800060);
+  EXPECT_EQ(out[1]["duration"], 90);
+  EXPECT_EQ(out[1]["total_pages"], 200);
+  JsonObject book = doc["payload"]["books"][0];
+  EXPECT_EQ(book["md5"], kMd5A);
+  EXPECT_EQ(book["title"], "Ficciones");
+  EXPECT_EQ(book["authors"], "Borges");
+  EXPECT_EQ(book["pages"], 200);
+}
+
+TEST(Events, ATitleOverTheServersLimitIsLeftOutNotRefused) {
+  const PageStatRow row{1793800000u, 1, 60};
+  BookRef ref = Device::bookRef();
+  const std::string longTitle(501, 't');
+  ref.title = longTitle.c_str();
+  auto doc = parse(render([&](JsonWriter& w) { events::writePageStats(w, ref, TimePrecision::Exact, &row, 1, 0); }));
+  EXPECT_TRUE(doc["payload"]["books"][0]["title"].isUnbound());
+}
+
+TEST(PageStatBuffer, FlippingPastAPageIsNotReadingIt) {
+  PageStatBuffer b;
+  b.onLeave(1, kNow, kNow + 4);
+  EXPECT_EQ(b.count(), 0);
+  b.onLeave(1, kNow, kNow + 5);
+  EXPECT_EQ(b.count(), 1);
+  b.onLeave(2, 0, kNow);
+  EXPECT_EQ(b.count(), 1) << "no clock when it was entered";
+  b.onLeave(3, kNow, kNow + 100000);
+  EXPECT_EQ(b.at(1).seconds, PageStatBuffer::kMaxSeconds) << "a nap is not reading";
+}
+
+TEST(PageStatBuffer, WhenFullItMergesAndKeepsTheTimeWithinTheDashboardsCap) {
+  PageStatBuffer b;
+  int64_t added = 0;
+  for (int i = 0; i < 400; ++i) {
+    b.onLeave(i, kNow + i * 60, kNow + i * 60 + 60);
+    added += 60;
+  }
+  int64_t kept = 0;
+  for (uint8_t i = 0; i < b.count(); ++i) {
+    EXPECT_LE(b.at(i).seconds, PageStatBuffer::kMaxSeconds);
+    kept += b.at(i).seconds;
+  }
+  EXPECT_EQ(kept, added) << "the hours on the dashboard are the point";
+  EXPECT_LE(b.count(), PageStatBuffer::kCapacity);
+  EXPECT_EQ(b.at(0).startEpoch, static_cast<uint32_t>(kNow));
+}
+
+TEST(PageStatBuffer, WithNothingLeftToMergeTheOldestGoes) {
+  PageStatBuffer b;
+  for (int i = 0; i < PageStatBuffer::kCapacity + 1; ++i) b.onLeave(i, kNow + i * 1000, kNow + i * 1000 + 600);
+  EXPECT_EQ(b.count(), PageStatBuffer::kCapacity);
+  EXPECT_EQ(b.at(0).page, 1);
+  EXPECT_EQ(b.at(b.count() - 1).page, PageStatBuffer::kCapacity);
+}
+
 TEST(Events, SessionWithinRulesAndNotOutside) {
   SessionSummary s;
   s.started = WallTime{1784880000, TimePrecision::Exact};

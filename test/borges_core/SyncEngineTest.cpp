@@ -604,6 +604,20 @@ TEST_F(SyncEngineTest, AServerTimeOutOfBoundsMovesNeitherTheClockNorTheAnchor) {
   EXPECT_EQ(d.store->state().anchorEpoch, kNow - 100);
 }
 
+TEST_F(SyncEngineTest, PageTimeOfAHeldBookIsNotHeld) {
+  // Only a position can overwrite someone's place. Time read is just true.
+  d.store->state().holds.add(Device::book().md5);
+  PageStatBuffer rows;
+  rows.onLeave(1, kNow - 100, kNow);
+  FinalizeInput input = d.finalizeInput(30);
+  input.pageStats = &rows;
+  ASSERT_TRUE(d.engine->finalizeBook(input).ok);
+  d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
+  EXPECT_EQ(d.engine->runSleepSession().outcome, SessionOutcome::Ok);
+  ASSERT_EQ(d.server.recorded.size(), 1u);
+  EXPECT_EQ(d.server.recorded[0].type, "page_stat.recorded");
+}
+
 TEST_F(SyncEngineTest, HeldEventsDoNotPowerTheRadioAtEverySleep) {
   // A book that wants a prompt, closed unanswered, with its progress held.
   d.store->state().holds.add(Device::book().md5);

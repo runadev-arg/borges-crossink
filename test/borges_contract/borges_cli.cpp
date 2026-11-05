@@ -1126,6 +1126,20 @@ class Device {
       clips = std::make_unique<TsvClips>(arg(a, "clips"));
       input.clips = clips.get();
     }
+    // page:entered:seconds,page:entered:seconds
+    PageStatBuffer pageStats;
+    if (hasArg(a, "page_stats")) {
+      std::istringstream rows(arg(a, "page_stats"));
+      std::string row;
+      while (std::getline(rows, row, ',')) {
+        int page = 0;
+        long long entered = 0, seconds = 0;
+        if (sscanf(row.c_str(), "%d:%lld:%lld", &page, &entered, &seconds) == 3) {
+          pageStats.onLeave(page, entered, entered + seconds);
+        }
+      }
+      input.pageStats = &pageStats;
+    }
     FinalizeResult r;
     {
       heap::Scope scope;
@@ -1134,7 +1148,8 @@ class Device {
     std::ostringstream o;
     o << "\"finalize\":{\"ok\":" << boolText(r.ok) << ",\"progress_queued\":" << boolText(r.progressQueued)
       << ",\"session_queued\":" << boolText(r.sessionQueued) << ",\"annotations_created\":" << r.annotationsCreated
-      << ",\"annotations_deleted\":" << r.annotationsDeleted << ",\"annotations_pending\":" << boolText(r.annotationsPending) << "}"
+      << ",\"annotations_deleted\":" << r.annotationsDeleted << ",\"annotations_pending\":" << boolText(r.annotationsPending) << ",\"page_stat_events\":" << static_cast<int>(r.pageStatEvents)
+      << ",\"page_stats_left\":" << static_cast<int>(pageStats.count()) << "}"
       << ",\"book\":" << esc(input.book.id.hex);
     return o.str();
   }

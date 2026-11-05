@@ -137,6 +137,11 @@ posiciones es chica.` · `La ubicación es aproximada: puede caer unos renglones
   from another device.
 - `session.ended`: `started_at`, `ended_at`, `duration_seconds` (60-14400, otherwise do not emit),
   `pages_read`, `start_page`, `end_page`. `aggregate_id` `session:<hash>:<started_at>`.
+- `page_stat.recorded`: `aggregate_type:"reading_statistics"`, `aggregate_id`
+  `page-stats:<hash>:<first start>:<last start>:<chunk>`, `rows:[{book_md5,page,start_time,duration,
+  total_pages}]` and `books:[{md5,title,authors,pages}]`, at most 32 rows per event. The rows live in
+  RAM while reading (`PageStatBuffer`) and go out at finalize: this table is what the dashboard's hours,
+  heatmap and streaks read, and its `books` entry creates the document for a book with no highlights.
 - All 64-bit integers are decimal strings. Ack `accepted` and `rejected` both leave the outbox.
 - Library: `GET /api/library/plugin/books?page=&limit=`; `GET …/:id/download` with Range, `ETag`,
   `X-Content-SHA256`, `X-KOReader-Partial-MD5`. Verify partial MD5 before accepting a file.

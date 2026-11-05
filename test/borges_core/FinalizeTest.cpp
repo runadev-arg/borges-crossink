@@ -177,6 +177,65 @@ TEST_F(FinalizeTest, FullQueueReportsASessionItCouldNotKeep) {
   EXPECT_TRUE(d.engine->finalizeBook(input).ok);
 }
 
+TEST_F(FinalizeTest, PageTimeGoesOutAtFinalizeAndLeavesTheBuffer) {
+  PageStatBuffer rows;
+  for (int i = 0; i < 70; ++i) rows.onLeave(10 + i, kNow - 7000 + i * 100, kNow - 7000 + i * 100 + 90);
+  FinalizeInput input = d.finalizeInput(30);
+  input.pageStats = &rows;
+  const FinalizeResult result = d.engine->finalizeBook(input);
+  EXPECT_TRUE(result.ok);
+  EXPECT_EQ(result.pageStatEvents, 3) << "32 + 32 + 6";
+  EXPECT_EQ(rows.count(), 0);
+  ASSERT_EQ(d.engine->runManualSession(nullptr, nullptr, nullptr).outcome, SessionOutcome::Ok);
+  size_t sent = 0;
+  std::set<std::string> ids;
+  for (const auto& e : d.server.recorded) {
+    if (e.type != "page_stat.recorded") continue;
+    JsonDocument doc;
+    ASSERT_FALSE(deserializeJson(doc, e.body));
+    sent += doc["payload"]["rows"].as<JsonArray>().size();
+    ids.insert(doc["aggregate_id"].as<std::string>());
+    EXPECT_EQ(doc["payload"]["books"].as<JsonArray>().size(), 1u) << "every chunk stands alone";
+  }
+  EXPECT_EQ(sent, 70u);
+  EXPECT_EQ(ids.size(), 3u);
+  EXPECT_EQ(d.server.violations, std::vector<std::string>{});
+}
+
+TEST_F(FinalizeTest, PageTimeWithAClockNobodyVouchesForIsNotReported) {
+  PageStatBuffer rows;
+  rows.onLeave(1, kNow - 100, kNow);
+  FinalizeInput input = d.finalizeInput(30);
+  input.lastTurn.precision = TimePrecision::Approximate;
+  input.pageStats = &rows;
+  EXPECT_EQ(d.engine->finalizeBook(input).pageStatEvents, 0);
+  EXPECT_EQ(rows.count(), 0);
+}
+
+TEST_F(FinalizeTest, PageTimeNeverTakesTheLastPlacesInTheQueue) {
+  for (int i = 0; i < Outbox::kMaxLiveEvents - 32; ++i) ASSERT_EQ(d.appendRaw("e"), Outbox::AppendResult::Ok);
+  PageStatBuffer rows;
+  rows.onLeave(1, kNow - 100, kNow);
+  FinalizeInput input = d.finalizeInput(30);
+  input.paged = false;
+  input.pageStats = &rows;
+  const FinalizeResult result = d.engine->finalizeBook(input);
+  EXPECT_TRUE(result.ok);
+  EXPECT_EQ(result.pageStatEvents, 0);
+  EXPECT_EQ(d.outbox->depth(), static_cast<size_t>(Outbox::kMaxLiveEvents - 32));
+}
+
+TEST_F(FinalizeTest, PageTimeThatCouldNotBeQueuedStaysForTheNextFinalize) {
+  PageStatBuffer rows;
+  rows.onLeave(1, kNow - 100, kNow);
+  d.fs.failWritesTo(std::string(kOutboxDir) + "/outbox.1.log");
+  FinalizeInput input = d.finalizeInput(30);
+  input.paged = false;
+  input.pageStats = &rows;
+  EXPECT_FALSE(d.engine->finalizeBook(input).ok);
+  EXPECT_EQ(rows.count(), 1);
+}
+
 TEST_F(FinalizeTest, ALongReadingIsSplitIntoSessionsTheServerAccepts) {
   SessionSummary s;
   s.started = WallTime{kNow - 9 * 3600, TimePrecision::Exact};

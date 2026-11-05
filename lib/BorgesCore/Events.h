@@ -15,6 +15,7 @@
 #include <cstdint>
 
 #include "JsonStream.h"
+#include "PageStats.h"
 #include "Ports.h"
 #include "Types.h"
 
@@ -86,6 +87,12 @@ void writeAnnotationDeleted(JsonWriter& w, const BookRef& book, const EventTime&
 int32_t referencePage(uint32_t pctMicro, int32_t totalPages);
 
 bool writeSession(JsonWriter& w, const BookId& book, const SessionSummary& session);
+
+// One self-contained chunk of a book's page rows. The books[] entry is also what creates a
+// document for a book with no highlights, so it goes in every chunk, as in statsync.lua.
+constexpr uint8_t kPageStatRowsPerEvent = 32;
+void writePageStats(JsonWriter& w, const BookRef& book, TimePrecision precision, const PageStatRow* rows, uint8_t count,
+                    uint8_t chunkIndex);
 
 uint64_t clipLedgerKey(const BookId& book, const ClipKey& clip);
 void deriveSyncId(const BookId& book, const ClipKey& clip, uint8_t out[16]);

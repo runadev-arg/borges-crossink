@@ -21,8 +21,9 @@ constexpr int64_t kRotateMarginSec = 14 * 24 * 3600;
 constexpr int64_t kShortestCredentialTtlSec = 60;  // normalizeRotationTtlSeconds refuses less.
 constexpr uint32_t kDisconnectBudgetMs = 15000;
 constexpr uint8_t kLinkFailuresBeforeSkipping = 2;
+constexpr uint16_t kQueueKeptFromStats = 32;
 constexpr uint8_t kLinkSkips = 5;
-constexpr size_t kPullBodyBytes = 448;  // protocol, cursor, focus book, limit and the client block.
+constexpr size_t kPullBodyBytes = 512;  // protocol, cursor, focus book, limit and the client block.
 
 bool isSequenceConflict(const ApiResult& r) { return r.status == 409 && strcmp(r.code, "client_sequence_conflict") == 0; }
 
@@ -466,6 +467,10 @@ void SyncEngine::writeClient(JsonWriter& w) const {
   w.key("capabilities");
   w.objectBegin();
   w.kvBool("atomic_sd_outbox", true);
+  w.kvBool("progress", true);
+  w.kvBool("sessions", true);
+  w.kvBool("page_stats", true);
+  w.kvBool("annotations", true);
   w.objectEnd();
   w.objectEnd();
 }
@@ -946,8 +951,9 @@ bool SyncEngine::ensureCapabilities(SessionReport& report) {
   int64_t protocol = 0;
   // An unknown version has no implicit fallback: every event type this client writes
   // must be listed with version 1, or the queue stays closed.
-  static constexpr const char* kNeeded[] = {"progress.changed",   "annotation.created", "annotation.deleted",
-                                            "bookmark.upserted", "bookmark.deleted",   "session.ended"};
+  static constexpr const char* kNeeded[] = {"progress.changed",  "annotation.created", "annotation.deleted",
+                                            "bookmark.upserted", "bookmark.deleted",   "session.ended",
+                                            "page_stat.recorded"};
   uint8_t foundMask = 0;
   char key[32];
   if (scan.enterObject()) {
@@ -957,7 +963,7 @@ bool SyncEngine::ensureCapabilities(SessionReport& report) {
       } else if (strcmp(key, "event_versions") == 0 && scan.enterObject()) {
         while (scan.nextMember(key, sizeof(key))) {
           int which = -1;
-          for (int i = 0; i < 6; ++i) {
+          for (int i = 0; i < 7; ++i) {
             if (strcmp(key, kNeeded[i]) == 0) which = i;
           }
           if (which >= 0 && scan.enterArray()) {
@@ -974,7 +980,7 @@ bool SyncEngine::ensureCapabilities(SessionReport& report) {
       }
     }
   }
-  if (scan.failed() || protocol != 2 || foundMask != 0x3F) {
+  if (scan.failed() || protocol != 2 || foundMask != 0x7F) {
     recordProtocolError(SyncStage::Capabilities, "capabilities_unsupported", r, report);
     return false;
   }
@@ -1460,6 +1466,49 @@ bool SyncEngine::enqueueSession(const BookId& book, const SessionSummary& sessio
   return queued;
 }
 
+bool SyncEngine::enqueuePageStats(const FinalizeInput& input, FinalizeResult& result) {
+  PageStatBuffer& buffer = *input.pageStats;
+  if (buffer.count() == 0) return true;
+  // Same rule as a session: a time nobody can vouch for has nothing honest to report.
+  if (input.lastTurn.precision < TimePrecision::Anchored) {
+    buffer.clear();
+    return true;
+  }
+  uint8_t done = 0;
+  uint8_t chunk = 0;
+  bool ok = true;
+  while (ok && done < buffer.count()) {
+    // Statistics never take the last places in the queue from positions and highlights.
+    if (outbox_.depth() >= Outbox::kMaxLiveEvents - kQueueKeptFromStats) {
+      buffer.clear();
+      return true;
+    }
+    PageStatRow rows[events::kPageStatRowsPerEvent];
+    uint8_t count = 0;
+    while (count < events::kPageStatRowsPerEvent && done + count < buffer.count()) {
+      rows[count] = buffer.at(static_cast<uint8_t>(done + count));
+      ++count;
+    }
+    JsonWriter counter(nullptr, 0);
+    events::writePageStats(counter, input.book, input.lastTurn.precision, rows, count, chunk);
+    char* body = new (std::nothrow) char[counter.size()];
+    ok = body != nullptr;
+    if (body) {
+      JsonWriter w(body, counter.size());
+      events::writePageStats(w, input.book, input.lastTurn.precision, rows, count, chunk);
+      ok = appendEvent(EventKind::PageStats, input.book.id, body, w.size(), false);
+      delete[] body;
+    }
+    if (ok) {
+      done = static_cast<uint8_t>(done + count);
+      ++chunk;
+      ++result.pageStatEvents;
+    }
+  }
+  buffer.dropFront(done);
+  return ok;
+}
+
 FinalizeResult SyncEngine::finalizeBook(const FinalizeInput& input) {
   FinalizeResult result;
   if (!input.book.id.valid() || !store_.creds().paired()) {
@@ -1498,6 +1547,7 @@ FinalizeResult SyncEngine::finalizeBook(const FinalizeInput& input) {
   }
 
   if (input.session && !enqueueSession(input.book.id, *input.session, result)) ok = false;
+  if (input.pageStats && !enqueuePageStats(input, result)) ok = false;
 
   if (input.clips && !finalizeClips(input, time, result)) ok = false;
   result.ok = ok;

@@ -113,6 +113,8 @@ bool PairingFlow::requestCode() {
   w.key("capabilities");
   w.objectBegin();
   w.kvBool("progress", true);
+  w.kvBool("sessions", true);
+  w.kvBool("page_stats", true);
   w.kvBool("annotations", true);
   w.kvBool("atomic_sd_outbox", true);
   w.objectEnd();
