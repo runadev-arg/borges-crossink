@@ -143,7 +143,8 @@ class Store {
   Store(IFs& fs, const uint8_t* legacyKey, size_t legacyKeyLen, ISecretBox& box);
 
   // Creates directories and loads everything. Imports the previous firmware's credential
-  // when there is none. A record in the old format is resealed here and its slots
+  // once: only when no credential record of this firmware has ever existed, so never
+  // again after a Disconnect. A record in the old format is resealed here and its slots
   // overwritten. False only on a hard IO error.
   bool begin();
 
@@ -178,6 +179,7 @@ class Store {
   // Saves, creating the shard directory the first time this book needs it.
   bool saveShardRecord(AtomicFile& file, const char* path, const void* payload, size_t len);
   bool importLegacy();
+  bool decodeLegacy(const char* path);
   void obfuscate(char* text, size_t len) const;
   bool writeCredentials(bool exclusive);
   bool readCredentialsV1(ByteReader& r);

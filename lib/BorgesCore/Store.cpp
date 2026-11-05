@@ -155,6 +155,7 @@ bool Store::begin() {
   if (credFile_.load(buf, sizeof(buf), len)) {
     ByteReader r(buf, len);
     const uint8_t version = r.u8();
+    // Any record says the import already had its turn, even one that cannot be read here.
     haveCreds = true;
     if (version == kCredVersion) {
       if (!readCredentialsV2(r)) creds_ = Credentials{};
@@ -201,7 +202,7 @@ bool Store::begin() {
   if (migrate) {
     // A failure here is retried at the next begin: the old record is still the newest.
     writeCredentials(true);
-  } else if (!creds_.paired() && !creds_.pairing.active()) {
+  } else if (!haveCreds) {
     importLegacy();
   }
   return true;
@@ -539,12 +540,22 @@ bool Store::saveAnnotations(const BookId& id, const AnnotationRecord* records, u
 // (base64 of the secret XORed with the chip MAC) are that firmware's, read-only here.
 // A file that does not decode to a printable token is ignored, not half-imported:
 // bytes from the wrong key must not go out in an Authorization header.
+//
+// Once only: a credential record is what says the import had its turn, so a file that
+// could not be used still leaves one behind. No file leaves nothing, so a card from the
+// old firmware inserted later is still welcomed.
 bool Store::importLegacy() {
   const char* path = kLegacyCredentialPath;
   if (!fs_.exists(path)) {
     path = kLegacyCredentialPathOld;
     if (!fs_.exists(path)) return false;
   }
+  const bool imported = decodeLegacy(path);
+  saveCredentials();
+  return imported;
+}
+
+bool Store::decodeLegacy(const char* path) {
   File f(fs_, path, IFs::Mode::Read);
   if (!f || f.size() > static_cast<int64_t>(kLegacyMaxBytes)) return false;
   FileByteSource source(f);
@@ -595,7 +606,7 @@ bool Store::importLegacy() {
   memset(token, 0, sizeof(token));
   copyText(creds_.serverIp, sizeof(creds_.serverIp), serverIp);
   copyText(creds_.serverIpHost, sizeof(creds_.serverIpHost), serverIpHost);
-  return saveCredentials();
+  return true;
 }
 
 }  // namespace borges

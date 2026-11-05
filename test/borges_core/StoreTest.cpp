@@ -458,6 +458,47 @@ TEST(LegacyImport, ReadsThePreviousFirmwaresCredentialOnce) {
   EXPECT_STREQ(again.creds().token, kLegacyToken);
 }
 
+TEST(LegacyImport, NeverRunsAgainAfterADisconnect) {
+  MemFs fs;
+  fs.put(kLegacyCredentialPath, std::string("{\"deviceId\":\"") + kSelfId + "\",\"token\":\"plain_token\"}");
+  {
+    Store store(fs, testKey(), 6, testBox());
+    ASSERT_TRUE(store.begin());
+    ASSERT_TRUE(store.creds().paired());
+    ASSERT_TRUE(store.forgetCredential());
+  }
+  Store again(fs, testKey(), 6, testBox());
+  ASSERT_TRUE(again.begin());
+  EXPECT_FALSE(again.creds().paired()) << "Disconnect that undoes itself at the next boot is no disconnect";
+  EXPECT_TRUE(fs.has(kLegacyCredentialPath)) << "the file stays: a rollback still needs it";
+}
+
+TEST(LegacyImport, AFileThatCouldNotBeUsedIsNotTriedAtEveryBoot) {
+  MemFs fs;
+  fs.put(kLegacyCredentialPath, "not json");
+  {
+    Store store(fs, testKey(), 6, testBox());
+    ASSERT_TRUE(store.begin());
+    EXPECT_FALSE(store.creds().paired());
+  }
+  fs.put(kLegacyCredentialPath, std::string("{\"deviceId\":\"") + kSelfId + "\",\"token\":\"t\"}");
+  Store again(fs, testKey(), 6, testBox());
+  ASSERT_TRUE(again.begin());
+  EXPECT_FALSE(again.creds().paired());
+}
+
+TEST(LegacyImport, ACardWithNoOldCredentialStaysEligible) {
+  MemFs fs;
+  {
+    Store store(fs, testKey(), 6, testBox());
+    ASSERT_TRUE(store.begin());
+  }
+  fs.put(kLegacyCredentialPath, std::string("{\"deviceId\":\"") + kSelfId + "\",\"token\":\"t\"}");
+  Store again(fs, testKey(), 6, testBox());
+  ASSERT_TRUE(again.begin());
+  EXPECT_TRUE(again.creds().paired());
+}
+
 TEST(LegacyImport, TheOlderFileNameAndAPlainTokenWork) {
   MemFs fs;
   fs.put(kLegacyCredentialPathOld, std::string("{\"deviceId\":\"") + kSelfId + "\",\"token\":\"plain_token\"}");
