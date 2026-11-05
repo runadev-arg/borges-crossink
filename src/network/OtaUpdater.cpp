@@ -28,7 +28,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback, void*, s
 
 namespace {
 #ifndef CROSSINK_OTA_RELEASE_URL
-#define CROSSINK_OTA_RELEASE_URL "https://api.github.com/repos/uxjulia/CrossInk/releases/latest"
+#define CROSSINK_OTA_RELEASE_URL "https://api.github.com/repos/runadev-arg/borges-crossink/releases/latest"
 #endif
 
 constexpr char latestReleaseUrl[] = CROSSINK_OTA_RELEASE_URL;
@@ -93,6 +93,12 @@ ParsedVersion parseVersion(const char* version) {
 
     if (*p != '.') break;
     ++p;
+  }
+
+  // Borges: "1.6.1-borges.2" is the fourth segment, or one fork release could never
+  // be newer than the one before it on the same CrossInk base.
+  if (segmentIndex == VERSION_SEGMENT_COUNT - 1 && strncmp(p, "-borges.", 8) == 0 && isDigit(p[8])) {
+    parsed.segments[segmentIndex] = atoi(p + 8);
   }
 
   parsed.valid = true;

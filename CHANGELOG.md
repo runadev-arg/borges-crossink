@@ -1,3 +1,16 @@
+## [v1.6.1-borges.1] - Unreleased
+
+### Added
+
+- Borges: connect this reader to your account with a code and QR, and pick up your reading from any device. Opening a book asks where you want to keep reading when another device is further on; any button skips the check and opens the book.
+- Pending reading progress, highlights, bookmarks and session times go out before sleep and when you open a book, within a hard time limit that never delays reading or sleep.
+- Reader menu: Sync now, and Back to where I was after a jump. Sync now can also be assigned to a button.
+- Home and Settings: a Borges screen with the connection status, the library of your account with one-press download and resume, and switches for the automatic checks.
+
+### Changed
+
+- Updates now come from the CrossInk Borges releases.
+
 ## [v1.6.1] - 2026-10-03
 
 ### Added
