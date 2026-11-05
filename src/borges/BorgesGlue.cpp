@@ -43,6 +43,7 @@ constexpr uint32_t kMinFreeForXpointer = 16 * 1024;
 constexpr uint32_t kMinBlockForXpointer = 8 * 1024;
 
 std::string cachePathFor(const std::string& path) { return Epub::cachePathForFilePath(path, kCacheRoot); }
+constexpr uint32_t kAllocationMargin = 2 * 1024;
 
 const char* fileNameOf(const std::string& path) {
   const size_t slash = path.find_last_of('/');
@@ -157,7 +158,11 @@ class ClipSource final : public IClipSource {
     out = ClipDetail{};
     if (index < clips) {
       const Clipping* clip = CLIPPINGS.clippingAt(index);
-      if (!clip || !CLIPPINGS.readClippingText(index, text_)) return false;
+      // std::string::resize aborts when it cannot grow.
+      if (!clip || ESP.getMaxAllocHeap() < clip->textLength + kAllocationMargin ||
+          !CLIPPINGS.readClippingText(index, text_)) {
+        return false;
+      }
       chapter_ = clip->chapterTitle;
       spine = clip->spineIndex;
       paragraph = clip->paragraphIndex;
