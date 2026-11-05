@@ -90,6 +90,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
+#include "borges/BorgesGlue.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/boot_sleep/ImageFolderIndex.h"
@@ -373,6 +374,8 @@ using BootResume = SleepWakePolicy::Resume;
 // device back up against the user's sleep gesture. Never cleared:
 // startDeepSleep() does not return, so a set latch only ends at the wakeup reset.
 static bool deepSleepInProgress = false;
+// Borges: a flush out of a network boot must not bracket itself again.
+static bool bootedForNetwork = false;
 
 static void restartWithSilentToken() {
   // Capture the live state for every destination without changing wake preferences.
@@ -662,6 +665,9 @@ bool handleGlobalPowerButtonAction(const CrossPointSettings::SHORT_PWRBTN action
       return true;
     case CrossPointSettings::SHORT_PWRBTN::LIBRARY:
       activityManager.goToLibrary();
+      return true;
+    case CrossPointSettings::SHORT_PWRBTN::BORGES_SYNC:
+      borges::glue::startManualFromShortcut(renderer, mappedInputManager, activityManager.isReaderActivity());
       return true;
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_FRONTLIGHT: {
       if (!Frontlight.present()) return false;
@@ -1083,6 +1089,17 @@ void mirrorWakeShortPressToNvs() {
 #endif
 }
 
+// Borges: the tail of a sleep whose image is already on the glass. No card access, so
+// nothing a flush left half-done can hold it back.
+void finishDeepSleepAfterBorgesFlush() {
+  deepSleepInProgress = true;
+  Storage.shutdown();
+  putTiltSensorToSleepForDeepSleep();
+  display.deepSleep();
+  LOG_DBG("MAIN", "Entering deep sleep after Borges flush");
+  powerManager.startDeepSleep(gpio);
+}
+
 // Enter deep sleep mode
 void enterDeepSleep(bool fromTimeout) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
@@ -1113,6 +1130,15 @@ void enterDeepSleep(bool fromTimeout) {
       // A stale Quick Resume frame must not replace the selected sleep screen during wake.
       Storage.remove(SLEEP_FRAME_FILE);
     }
+  }
+
+  // Borges: the sleep image is on the glass and everything is saved. Flush in a clean
+  // boot; finishDeepSleepAfterBorgesFlush() completes this sleep from there.
+  if (borges::glue::shouldFlushBeforeSleep(powerManager.getBatteryPercentage(), bootedForNetwork)) {
+    silentRebootTarget = static_cast<uint32_t>(NetworkBootTarget::BORGES);
+    silentRebootPayload = static_cast<uint32_t>(borges::glue::NetPayload::SleepFlush);
+    silentRebootMagic = SILENT_REBOOT_MAGIC;
+    restartWithSilentToken();
   }
 
   if (halClock.isAvailable() && SETTINGS.shouldTrackReadingStats() && SETTINGS.autoBackupStats != 0) {
@@ -1245,15 +1271,15 @@ void setup() {
   silentRebootTarget &= ~(SILENT_REBOOT_FRONTLIGHT_VALID | SILENT_REBOOT_FRONTLIGHT_ON);
   const bool isValidSilentTarget =
       silentRebootTarget <= SILENT_REBOOT_TARGET_READER || isNetworkBootTargetValue(silentRebootTarget);
-  const uint32_t snapshotTarget = (isSilentReboot && isValidSilentTarget) ? silentRebootTarget : 0;
-  const uint32_t snapshotPayload = (isSilentReboot && isValidSilentTarget) ? silentRebootPayload : 0;
+  uint32_t snapshotTarget = (isSilentReboot && isValidSilentTarget) ? silentRebootTarget : 0;
+  uint32_t snapshotPayload = (isSilentReboot && isValidSilentTarget) ? silentRebootPayload : 0;
   const bool cleanImageBaseOnEntry =
       snapshotTarget == SILENT_REBOOT_TARGET_READER && (snapshotPayload & SILENT_REBOOT_READER_CLEAN_IMAGE_BASE) != 0;
-  const bool isNetworkResume = snapshotTarget >= static_cast<uint32_t>(NetworkBootTarget::OTA);
+  bool isNetworkResume = snapshotTarget >= static_cast<uint32_t>(NetworkBootTarget::OTA);
   // Network screens need the reader-sized render stack on S3, including OTA
   // and KOReader Auth after their Wi-Fi child completes. C3 retains the smaller
   // network stack to preserve internal RAM.
-  const bool useReaderRenderStack = !isNetworkResume || FREEINK_MCU_S3;
+  bool useReaderRenderStack = !isNetworkResume || FREEINK_MCU_S3;
   silentRebootMagic = 0;
   silentRebootTarget = 0;
   silentRebootPayload = 0;
@@ -1352,6 +1378,18 @@ void setup() {
                                wakeupRouteName(wakeupReason));
   const bool isSleepWake = wakeupReason == HalGPIO::WakeupReason::PowerButton;
   I18N.setLanguage(static_cast<Language>(SETTINGS.language));
+  // Borges: a wake into a book is already a clean boot, so it runs the check as one.
+  const bool wakesIntoBook = isSleepWake && !isSilentReboot && !recoveryFirmwareMode && !rebootedFromPanic &&
+                             !APP_STATE.openEpubPath.empty() && APP_STATE.lastSleepFromReader &&
+                             !mappedInputManager.isPressed(MappedInputManager::Button::Back) &&
+                             APP_STATE.readerActivityLoadCount == 0;
+  if (wakesIntoBook && borges::glue::wakeWantsNetworkBoot(APP_STATE.openEpubPath)) {
+    snapshotTarget = static_cast<uint32_t>(NetworkBootTarget::BORGES);
+    snapshotPayload = static_cast<uint32_t>(borges::glue::NetPayload::OpenBook);
+    isNetworkResume = true;
+    useReaderRenderStack = FREEINK_MCU_S3;
+  }
+  bootedForNetwork = isNetworkResume;
   // Normal boot store deferral adapted from Sichroteph/YACP commit
   // 20af8aee8d3e1d560456753b08d1f52e5488621f (MIT). Accessors load these
   // stores when Home, reader bookkeeping, or sync actually need them.
@@ -1538,6 +1576,9 @@ void setup() {
       case NetworkBootTarget::FILE_TRANSFER:
         launched = activityManager.resumeFileTransferFromNetworkBoot(snapshotPayload);
         break;
+      case NetworkBootTarget::BORGES:
+        launched = borges::glue::launchNetworkTarget(snapshotPayload, renderer, mappedInputManager);
+        break;
       case NetworkBootTarget::MANAGE_FONTS: {
         auto fontsActivity = makeUniqueNoThrow<FontDownloadActivity>(renderer, mappedInputManager);
         if (fontsActivity) {
@@ -1578,6 +1619,7 @@ void setup() {
   } else {
     // Clear app state to avoid getting into a boot loop if the epub doesn't load
     const auto path = APP_STATE.openEpubPath;
+    borges::glue::noteOpenedWithoutSession(path);
     APP_STATE.openEpubPath = "";
     APP_STATE.readerActivityLoadCount++;
     APP_STATE.saveToFile();

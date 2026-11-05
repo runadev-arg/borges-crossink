@@ -1,5 +1,8 @@
 #include "EpubReaderDrawerActivity.h"
 
+#include "CrossPointState.h"
+#include "borges/BorgesGlue.h"
+
 #include <Epub/Page.h>
 #include <FontCacheManager.h>
 #include <FreeInkUIIcon.h>
@@ -448,7 +451,8 @@ void EpubReaderDrawerActivity::onEnter() {
 
   const ReaderDrawerCatalog catalog = makeReaderDrawerCatalog(
       {hasFootnotes, hasDictionary, hasBookmarks, hasClippings, showReadingPaceReset, stablePageCount > 0,
-       !mappedInput.hasTouchHardware(), globalStatsEnabled, bookStatsEnabled});
+       !mappedInput.hasTouchHardware(), globalStatsEnabled, bookStatsEnabled, borges::glue::isPaired(),
+       borges::glue::hasUndo(APP_STATE.openEpubPath)});
   for (size_t tab = 0; tab < rootRows.size(); ++tab) {
     rootRows[tab].reserve(catalog[tab].count);
     rootRows[tab].assign(catalog[tab].items.begin(), catalog[tab].items.begin() + catalog[tab].count);
@@ -1799,6 +1803,12 @@ void EpubReaderDrawerActivity::activateRow(const RowId row) {
     case RowId::SyncProgress:
       action = EpubReaderMenuAction::SYNC;
       break;
+    case RowId::BorgesSync:
+      action = EpubReaderMenuAction::BORGES_SYNC;
+      break;
+    case RowId::BorgesUndo:
+      action = EpubReaderMenuAction::BORGES_UNDO;
+      break;
     case RowId::NearbyPositionSync:
       action = EpubReaderMenuAction::NEARBY_POSITION_SYNC;
       break;
@@ -3047,6 +3057,10 @@ const char* EpubReaderDrawerActivity::rowLabel(const RowId row) const {
       return tr(STR_READING_STATS);
     case RowId::SyncProgress:
       return tr(STR_SYNC_PROGRESS);
+    case RowId::BorgesSync:
+      return tr(STR_BORGES_SYNC_NOW);
+    case RowId::BorgesUndo:
+      return tr(STR_BORGES_UNDO);
     case RowId::NearbyPositionSync:
       return tr(STR_NEARBY_POSITION_SYNC);
     case RowId::SendNearbyBook:
@@ -3186,6 +3200,8 @@ bool EpubReaderDrawerActivity::rowShowsNavigationCaret(const RowId row) const {
     case RowId::DeleteCache:
     case RowId::DeleteStats:
     case RowId::SyncProgress:
+    case RowId::BorgesSync:
+    case RowId::BorgesUndo:
     case RowId::NearbyPositionSync:
     case RowId::SendNearbyBook:
       return false;

@@ -35,6 +35,8 @@ enum class EpubReaderMenuAction : uint8_t {
   SET_BOOK_DICTIONARY,
   STATUS_BAR_SETTINGS,
   RESET_BOOK_READER_SETTINGS,
+  BORGES_SYNC,
+  BORGES_UNDO,
 };
 
 enum class ReaderDrawerTab : uint8_t { Font = 0, Layout = 1, More = 2, Location = 3, Settings = 4, Count };
@@ -150,6 +152,8 @@ enum class ReaderDrawerCatalogItem : uint8_t {
   SyncProgress,
   NearbyPositionSync,
   SendNearbyBook,
+  BorgesSync,
+  BorgesUndo,
 };
 
 struct ReaderDrawerAvailability {
@@ -162,6 +166,8 @@ struct ReaderDrawerAvailability {
   bool buttonDevice = false;
   bool globalStatsEnabled = true;
   bool bookStatsEnabled = true;
+  bool borgesPaired = false;
+  bool borgesHasUndo = false;
 };
 
 struct ReaderDrawerTabCatalog {
@@ -215,8 +221,11 @@ constexpr ReaderDrawerCatalog makeReaderDrawerCatalog(const ReaderDrawerAvailabi
   }
   location.add(ReaderDrawerCatalogItem::SaveClipping);
   if (available.hasClippings) location.add(ReaderDrawerCatalogItem::ViewClippings);
+  if (available.borgesPaired) location.add(ReaderDrawerCatalogItem::BorgesSync);
+  if (available.borgesHasUndo) location.add(ReaderDrawerCatalogItem::BorgesUndo);
   if (available.buttonDevice) {
-    location.add(ReaderDrawerCatalogItem::SyncProgress);
+    // Two rows that both say "sync" would ask the reader to know the difference.
+    if (!available.borgesPaired) location.add(ReaderDrawerCatalogItem::SyncProgress);
     location.add(ReaderDrawerCatalogItem::NearbyPositionSync);
     location.add(ReaderDrawerCatalogItem::SendNearbyBook);
   }

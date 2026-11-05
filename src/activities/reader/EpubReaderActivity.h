@@ -1,4 +1,5 @@
 #pragma once
+#include "borges/ReaderTracker.h"
 #include <Epub.h>
 #include <Epub/FootnoteEntry.h>
 #include <Epub/Section.h>
@@ -108,6 +109,10 @@ class EpubReaderActivity final : public Activity {
   };
 
   std::shared_ptr<Epub> epub;
+  borges::glue::ReaderTracker borgesTracker;
+  bool skipBorgesExitSave = false;
+  void finalizeForBorges();
+  void undoBorgesJump();
   ActiveBookReaderSettingsData initialBookReaderSettings;
   std::unique_ptr<Section> section = nullptr;
   int currentSpineIndex = 0;

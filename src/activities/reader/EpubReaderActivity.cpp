@@ -60,6 +60,8 @@
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
+#include "Types.h"
+#include "borges/BorgesGlue.h"
 #include "WordRef.h"
 #include "activities/home/RecentBookProgress.h"
 #include "activities/reader/ControlsOptionsActivity.h"
@@ -2450,6 +2452,7 @@ void EpubReaderActivity::onEnter() {
   armReadingPaceWarmup("reader_open");
   sessionReadingSeconds = 0;
   hasSessionStartLocalDateTime = getCurrentLocalReadingStatsDateTime(sessionStartLocalDateTime);
+  borgesTracker.onOpen();
 
   globalStats = GlobalReadingStats::load();
 
@@ -2494,9 +2497,10 @@ void EpubReaderActivity::onExit() {
   // Deactivate reader-specific front button mapping.
   mappedInput.setReaderMode(false);
 
-  if (!saveReadingProgress()) {
+  if (!skipBorgesExitSave && !saveReadingProgress()) {
     LOG_ERR("ERS", "Failed to flush debounced reader progress on exit");
   }
+  finalizeForBorges();
 
   // Reset orientation back to portrait for the rest of the UI
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
@@ -3058,7 +3062,7 @@ void EpubReaderActivity::loop() {
     std::string openPath;
     switch (endOfBookOptions->handleMenuInput(mappedInput, &openPath)) {
       case EndOfBookOptions::Action::OpenBook:
-        activityManager.goToReader(openPath);
+        activityManager.openBook(openPath);
         return;
       case EndOfBookOptions::Action::GoHome:
         onGoHome();
@@ -4216,6 +4220,16 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuAction action, const 
       }
       break;
     }
+    case EpubReaderMenuAction::BORGES_SYNC: {
+      saveProgressBeforeRestart();
+      pauseReadingPaceTimer("borges_sync");
+      activityManager.replaceActivity(
+          borges::glue::makeHandoff(renderer, mappedInput, borges::glue::NetPayload::ManualFromReader));
+      break;
+    }
+    case EpubReaderMenuAction::BORGES_UNDO:
+      undoBorgesJump();
+      break;
     case EpubReaderMenuAction::NEARBY_POSITION_SYNC: {
       const int currentPage = section ? section->currentPage : nextPageNumber;
       const int totalPages = section ? section->estimatedTotalPages() : std::max(1, cachedChapterTotalPageCount);
@@ -4932,6 +4946,9 @@ void EpubReaderActivity::startClipSelection(const DictionaryClippingRequest* dic
             clip.text, clip.tableSelection, clippingLayoutSignature);
         bool exported = false;
         if (addResult == ClippingStore::AddResult::Added) {
+          if (const Clipping* added = CLIPPINGS.clippingAt(clippingIndex)) {
+            borges::glue::stampClip(epub->getCachePath(), added->spineIndex, added->timestamp);
+          }
           exported = ClippingsManager::saveClipping(bookTitle, author, chapterTitle,
                                                     static_cast<int>(clip.sectionPage) + 1, clip.text);
           if (!exported && !CLIPPINGS.removeClippingAt(clippingIndex)) {
@@ -5982,6 +5999,7 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn, const char* source) {
     }
   }
   lastPageTurnTime = millis();
+  borgesTracker.onPageTurn(isForwardTurn);
   requestUpdate();
 }
 
@@ -8301,4 +8319,71 @@ void EpubReaderActivity::saveProgressBeforeRestart() {
   if (epub && !saveLinkStack()) {
     LOG_ERR("READER", "Failed to save link return stack before restart");
   }
+}
+
+void EpubReaderActivity::finalizeForBorges() {
+  if (!epub) return;
+  // Only a settled page is a position: a build or footnote in progress is not.
+  const bool settled = section && !activeFootnotePreview && section->pageCount > 0;
+  borges::glue::ReaderSnapshot snapshot;
+  CrossPointPosition position = {currentSpineIndex, settled ? section->currentPage : 0,
+                                 settled ? section->estimatedTotalPages() : 1};
+  if (settled) {
+    snapshot.percent = getCurrentBookProgressPercent();
+    if (const auto offset = section->getVisibleTextOffsetForPage(static_cast<uint16_t>(section->currentPage))) {
+      position.visibleTextOffset = *offset;
+      position.hasVisibleTextOffset = true;
+    }
+    std::optional<uint16_t> paragraphIndex;
+    std::optional<uint16_t> listItemIndex;
+    getSyncPageAnchors(*section, section->currentPage, paragraphIndex, listItemIndex);
+    if (paragraphIndex.has_value()) {
+      position.paragraphIndex = *paragraphIndex;
+      position.hasParagraphIndex = true;
+    }
+    if (listItemIndex.has_value()) {
+      position.liIndex = *listItemIndex;
+      position.hasLiIndex = true;
+    }
+    snapshot.mapped = &position;
+    const uint32_t stableTotal = epub->getReferencePageCount();
+    uint32_t stablePage = 0;
+    uint32_t resolvedTotal = 0;
+    const float spineRead =
+        static_cast<float>(section->currentPage) / static_cast<float>(std::max<int>(1, section->estimatedTotalPages()));
+    if (stableTotal > 0 && epub->resolveReferencePage(currentSpineIndex, spineRead, stablePage, resolvedTotal)) {
+      snapshot.page = static_cast<int32_t>(stablePage);
+      snapshot.totalPages = static_cast<int32_t>(resolvedTotal);
+    }
+  }
+  borges::glue::finalizeFromReader(borgesTracker, epub, snapshot);
+  // A second exit of this same reading has nothing new to say.
+  borgesTracker.paged = false;
+}
+
+void EpubReaderActivity::undoBorgesJump() {
+  auto target = makeUniqueNoThrow<borges::Position>();  // Too large for the stack.
+  if (!target || !epub || !borges::glue::takeUndo(epub->getPath(), *target)) {
+    drawToast(renderer, tr(STR_BORGES_CANT_LOCATE));
+    delay(1000);
+    requestUpdate();
+    return;
+  }
+  KOReaderPosition remote;
+  remote.xpath = target->xpointer;
+  remote.percentage = static_cast<float>(target->pctMicro) / 100000000.0f;
+  const int spinePages = section ? section->estimatedTotalPages() : std::max<int>(1, cachedChapterTotalPageCount);
+  const CrossPointPosition mapped = ProgressMapper::toCrossPoint(epub, remote, currentSpineIndex, spinePages);
+  const std::optional<uint32_t> offset =
+      mapped.hasVisibleTextOffset ? std::optional<uint32_t>(mapped.visibleTextOffset) : std::nullopt;
+  if (!mapped.valid || !EpubReaderUtils::saveProgress(*epub, mapped.spineIndex, mapped.pageNumber,
+                                                      std::max(mapped.totalPages, mapped.pageNumber + 1), offset)) {
+    drawToast(renderer, tr(STR_BORGES_CANT_LOCATE));
+    delay(1000);
+    requestUpdate();
+    return;
+  }
+  // The reader's exit must not write the page being left over the one just saved.
+  skipBorgesExitSave = true;
+  activityManager.goToReader(epub->getPath(), false, false, true);
 }

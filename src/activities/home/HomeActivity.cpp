@@ -1,5 +1,7 @@
 #include "HomeActivity.h"
 
+#include "borges/BorgesGlue.h"
+
 #include <Bitmap.h>
 #include <Epub.h>
 #include <FsHelpers.h>
@@ -62,6 +64,7 @@ enum class HomeMenuAction {
   Bookmarks,
   FileTransfer,
   Settings,
+  Borges,
 };
 
 struct HomeMenuEntry {
@@ -71,7 +74,7 @@ struct HomeMenuEntry {
 };
 
 struct HomeMenuEntries {
-  static constexpr int kCapacity = 8;
+  static constexpr int kCapacity = 9;
   std::array<HomeMenuEntry, kCapacity> entries{};
   int count = 0;
 
@@ -248,6 +251,7 @@ void appendHomeMenuItems(HomeMenuEntries& items, bool hasOpdsServers, bool hasRe
     items.push({savedItemsLabel(hasBookmarks, hasClippings), BookmarkIcon, HomeMenuAction::Bookmarks});
   }
 
+  items.push({tr(STR_BORGES), Book, HomeMenuAction::Borges});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   items.push({tr(STR_SETTINGS_TITLE), Settings, HomeMenuAction::Settings});
 }
@@ -276,6 +280,7 @@ HomeMenuEntries buildMinimalMenuItems(bool hasOpdsServers, bool hasReadingStats,
     items.push({tr(STR_READING_STATS), Chart, HomeMenuAction::ReadingStats});
   }
 
+  items.push({tr(STR_BORGES), Book, HomeMenuAction::Borges});
   items.push({tr(STR_FILE_TRANSFER), Transfer, HomeMenuAction::FileTransfer});
   return items;
 }
@@ -1475,6 +1480,9 @@ void HomeActivity::loop() {
           case HomeMenuAction::FileTransfer:
             onFileTransferOpen();
             break;
+          case HomeMenuAction::Borges:
+            activityManager.replaceActivity(borges::glue::makeStatusActivity(renderer, mappedInput));
+            break;
           case HomeMenuAction::ContinueReading:
           case HomeMenuAction::Settings:
             break;
@@ -1722,6 +1730,9 @@ void HomeActivity::loop() {
         break;
       case HomeMenuAction::Settings:
         onSettingsOpen();
+        break;
+      case HomeMenuAction::Borges:
+        activityManager.replaceActivity(borges::glue::makeStatusActivity(renderer, mappedInput));
         break;
     }
   };
@@ -2301,7 +2312,7 @@ void HomeActivity::onSelectBook(const std::string& path) {
   if (Storage.exists(CAROUSEL_CACHE_TMP_PATH)) {
     Storage.remove(CAROUSEL_CACHE_TMP_PATH);
   }
-  activityManager.goToReader(path);
+  activityManager.openBook(path);
 }
 
 void HomeActivity::onMinimalBrowseOpen() {

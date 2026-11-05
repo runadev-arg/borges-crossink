@@ -21,6 +21,7 @@
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "SilentRestart.h"
+#include "borges/BorgesGlue.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
@@ -1008,6 +1009,14 @@ void ActivityManager::goToReader(std::string path, const bool suppressBackReleas
   OPDS_STORE.release();
   replaceActivity(std::make_unique<ReaderActivity>(renderer, mappedInput, std::move(path), suppressBackRelease,
                                                    allowFastInitialRefresh, cleanImageBaseOnEntry));
+}
+
+void ActivityManager::openBook(std::string path) {
+  if (auto check = borges::glue::interceptOpen(renderer, mappedInput, path)) {
+    replaceActivity(std::move(check));
+    return;
+  }
+  goToReader(std::move(path));
 }
 
 void ActivityManager::goToReaderAndRunMenuAction(std::string path, const uint8_t action) {
