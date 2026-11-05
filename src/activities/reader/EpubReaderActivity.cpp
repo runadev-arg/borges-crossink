@@ -2355,6 +2355,7 @@ void EpubReaderActivity::onEnter() {
   // Activate reader-specific front button mapping (if configured).
   mappedInput.setReaderMode(true);
 
+  borges::glue::importLegacyBookmarks(*epub);
   BOOKMARKS.loadForBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), "epub");
   CLIPPINGS.loadForBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), "epub");
 

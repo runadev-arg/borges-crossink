@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "GlueState.h"
+#include "LegacyMigration.h"
 
 using namespace borges;
 using namespace borges::glue;
@@ -308,9 +309,164 @@ TEST(ClipTimes, ATornTailIsIgnored) {
   EXPECT_EQ(times.lookup(path, 1, 7), 5);
 }
 
+TEST(StaySource, LedgerOnlyWhenItStillDescribesThisPlace) {
+  Position finalized;
+  finalized.setPercent(40);
+  strcpy(finalized.xpointer, "/body/p[3]");
+  Position local;
+  local.setPercent(40.4);
+  EXPECT_EQ(chooseStaySource(true, finalized, local), StaySource::Ledger);
+  EXPECT_EQ(chooseStaySource(false, finalized, local), StaySource::MapSavedPage);
+  local.setPercent(42);
+  EXPECT_EQ(chooseStaySource(true, finalized, local), StaySource::MapSavedPage);
+  local = Position{};
+  EXPECT_EQ(chooseStaySource(true, finalized, local), StaySource::MapSavedPage);
+  local.setPercent(40);
+  finalized.xpointer[0] = '\0';
+  EXPECT_EQ(chooseStaySource(true, finalized, local), StaySource::MapSavedPage);
+}
+
+namespace {
+class FakeDirs : public IDirLister {
+ public:
+  std::vector<std::string> names;
+  bool fail = false;
+  bool listDirectories(const char*, size_t limit, std::vector<std::string>& out) override {
+    if (fail) return false;
+    for (const auto& name : names) {
+      if (out.size() < limit) out.push_back(name);
+    }
+    return true;
+  }
+};
+
+// Fails a write once, after `countdown` successful ones, as a card that fills up.
+class FlakyFs : public MemFs {
+ public:
+  int countdown = -1;
+  int32_t write(Handle h, const void* src, size_t len) override {
+    if (countdown == 0) return -1;
+    if (countdown > 0) --countdown;
+    return MemFs::write(h, src, len);
+  }
+  // The old folder exists as a key too: MemFs has no directories of its own.
+  bool mkdir(const char* path) override {
+    files[path];
+    return true;
+  }
+};
+
+void seedOldCard(MemFs& fs, FakeDirs& dirs) {
+  fs.files["/.borges"];
+  fs.files["/.borges/settings.json"] = "{\"language\":\"ES\"}";
+  fs.files["/.borges/wifi.json"] = "{\"credentials\":[]}";
+  fs.files["/.borges/recent.json"] = "{\"books\":[]}";
+  fs.files["/.borges/epub_123/progress.bin"] = "\x02\x00\x05\x00\x10\x00";
+  fs.files["/.borges/epub_456/progress.bin.bak"] = "bak";
+  fs.files["/.borges/xtc_9/progress.bin"] = "xtc!";
+  fs.files["/.borges/epub_123/section.bin"] = "not this";
+  dirs.names = {"epub_123", "epub_456", "xtc_9", "bookmarks", "borges", "epub_nothing"};
+}
+}  // namespace
+
+TEST(LegacyImport, CopiesWhatMattersAndLeavesTheOldFolderAlone) {
+  FlakyFs fs;
+  FakeDirs dirs;
+  seedOldCard(fs, dirs);
+  const auto before = fs.files;
+  EXPECT_EQ(importLegacyData(fs, dirs), LegacyImport::Done);
+  EXPECT_EQ(fs.files["/.crosspoint/settings.json"], before.at("/.borges/settings.json"));
+  EXPECT_EQ(fs.files["/.crosspoint/wifi.json"], before.at("/.borges/wifi.json"));
+  EXPECT_EQ(fs.files["/.crosspoint/recent.json"], before.at("/.borges/recent.json"));
+  EXPECT_EQ(fs.files["/.crosspoint/epub_123/progress.bin"], before.at("/.borges/epub_123/progress.bin"));
+  EXPECT_EQ(fs.files["/.crosspoint/epub_456/progress.bin"], "bak");
+  EXPECT_EQ(fs.files["/.crosspoint/xtc_9/progress.bin"], "xtc!");
+  EXPECT_FALSE(fs.exists("/.crosspoint/epub_123/section.bin"));
+  EXPECT_FALSE(fs.exists("/.crosspoint/epub_nothing"));
+  EXPECT_TRUE(fs.exists(kLegacyImportMarker));
+  // Rollback: every old file is there, byte for byte.
+  for (const auto& entry : before) EXPECT_EQ(fs.files[entry.first], entry.second) << entry.first;
+}
+
+TEST(LegacyImport, NeverOverwritesAndRunsOnce) {
+  FlakyFs fs;
+  FakeDirs dirs;
+  seedOldCard(fs, dirs);
+  fs.files["/.crosspoint/settings.json"] = "mine";
+  fs.files["/.crosspoint/epub_123/progress.bin"] = "newer";
+  EXPECT_EQ(importLegacyData(fs, dirs), LegacyImport::Done);
+  EXPECT_EQ(fs.files["/.crosspoint/settings.json"], "mine");
+  EXPECT_EQ(fs.files["/.crosspoint/epub_123/progress.bin"], "newer");
+  fs.files.erase("/.crosspoint/wifi.json");
+  EXPECT_EQ(importLegacyData(fs, dirs), LegacyImport::NothingToDo);
+  EXPECT_FALSE(fs.exists("/.crosspoint/wifi.json"));
+}
+
+TEST(LegacyImport, NoOldFolderIsNothing) {
+  FlakyFs fs;
+  FakeDirs dirs;
+  EXPECT_EQ(importLegacyData(fs, dirs), LegacyImport::NothingToDo);
+  EXPECT_TRUE(fs.files.empty());
+}
+
+TEST(LegacyImport, AFailedWriteLeavesNoHalfFileAndResumes) {
+  for (int failAfter = 0; failAfter < 8; ++failAfter) {
+    FlakyFs fs;
+    FakeDirs dirs;
+    seedOldCard(fs, dirs);
+    fs.countdown = failAfter;
+    const LegacyImport first = importLegacyData(fs, dirs);
+    if (first == LegacyImport::Incomplete) {
+      EXPECT_FALSE(fs.exists(kLegacyImportMarker));
+      // Whatever has its final name is whole.
+      if (fs.exists("/.crosspoint/settings.json")) {
+        EXPECT_EQ(fs.files["/.crosspoint/settings.json"], fs.files["/.borges/settings.json"]);
+      }
+    }
+    fs.countdown = -1;
+    if (first == LegacyImport::Incomplete) EXPECT_EQ(importLegacyData(fs, dirs), LegacyImport::Done);
+    EXPECT_EQ(fs.files["/.crosspoint/settings.json"], fs.files["/.borges/settings.json"]);
+    EXPECT_EQ(fs.files["/.crosspoint/epub_123/progress.bin"], fs.files["/.borges/epub_123/progress.bin"]);
+    EXPECT_TRUE(fs.exists(kLegacyImportMarker));
+  }
+}
+
+TEST(LegacyImport, ListingFailureKeepsItOpen) {
+  FlakyFs fs;
+  FakeDirs dirs;
+  seedOldCard(fs, dirs);
+  dirs.fail = true;
+  EXPECT_EQ(importLegacyData(fs, dirs), LegacyImport::Incomplete);
+  EXPECT_FALSE(fs.exists(kLegacyImportMarker));
+}
+
+TEST(LegacyBookmarks, PathMatchesTheOldFirmware) {
+  EXPECT_EQ(legacyBookmarkPath("/books/La invencion.de.Morel.epub"),
+            "/.borges/bookmarks/books_La invencion.de.Morel.json");
+  EXPECT_EQ(legacyBookmarkPath("/a.epub"), "/.borges/bookmarks/a.json");
+}
+
+TEST(LegacyBookmarks, Progress) {
+  EXPECT_FLOAT_EQ(legacyBookmarkProgress(10, 5), 0.5f);
+  EXPECT_FLOAT_EQ(legacyBookmarkProgress(0, 5), 0.0f);
+  EXPECT_FLOAT_EQ(legacyBookmarkProgress(4, 9), 1.0f);
+}
+
+TEST(LegacyBookmarks, Uuid) {
+  uint8_t id[16];
+  ASSERT_TRUE(parseUuid("00112233-4455-6677-8899-aabbccddeeff", id));
+  EXPECT_EQ(id[0], 0x00);
+  EXPECT_EQ(id[7], 0x77);
+  EXPECT_EQ(id[15], 0xff);
+  EXPECT_FALSE(parseUuid("", id));
+  EXPECT_FALSE(parseUuid(nullptr, id));
+  EXPECT_FALSE(parseUuid("00112233-4455-6677-8899-aabbccddeefg", id));
+  EXPECT_FALSE(parseUuid("0011223344556677-8899-aabbccddeeff00", id));
+}
+
 TEST(ClipIdentity, StableAndSpecific) {
   EXPECT_EQ(clipIdentity(1, 2, 3), clipIdentity(1, 2, 3));
   EXPECT_NE(clipIdentity(1, 2, 3), clipIdentity(2, 2, 3));
   EXPECT_NE(clipIdentity(1, 2, 3), clipIdentity(1, 3, 3));
-  EXPECT_NE(bookmarkIdentity(1, 2), bookmarkIdentity(1, 3));
+  EXPECT_NE(bookmarkIdentity(2), bookmarkIdentity(3));
 }

@@ -77,6 +77,9 @@ struct BorgesStack {
   void bringDown();
 };
 
+// How the ledger names a bookmark. Stable: its fields do not depend on when it was made.
+ClipKey bookmarkKey(uint16_t spine, uint16_t paragraph, float progress);
+
 // A network this device can try without asking the reader anything.
 bool hasSavedWifi();
 

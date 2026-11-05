@@ -141,7 +141,7 @@ class ClipTimes {
 
 // CrossInk rewrites clip files and their text offsets. These fields do not change.
 uint64_t clipIdentity(uint32_t uptime, uint16_t textLength, uint16_t wordCount);
-uint64_t bookmarkIdentity(uint32_t uptime, uint32_t progressBits);
+uint64_t bookmarkIdentity(uint32_t progressBits);
 
 }  // namespace glue
 }  // namespace borges

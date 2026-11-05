@@ -33,6 +33,13 @@ enum class NetPayload : uint32_t {
   Library = 7,
 };
 
+// --- The previous firmware's data ------------------------------------------------------
+
+// Before settings load. One exists() per boot once it is done.
+void importLegacyDataAtBoot();
+// Before the reader loads the book's bookmarks. Cheap once done, or when there were none.
+void importLegacyBookmarks(Epub& epub);
+
 // --- Opening a book -----------------------------------------------------------------
 
 // The one door every user-initiated open goes through (ActivityManager::openBook).

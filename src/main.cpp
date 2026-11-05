@@ -1369,6 +1369,7 @@ void setup() {
 
   HalSystem::checkPanic();
 
+  borges::glue::importLegacyDataAtBoot();
   SETTINGS.loadFromFile();
   Storage.installDateTimeCallback(&SETTINGS.clockUtcOffsetQ);
   APP_STATE.loadFromFile();

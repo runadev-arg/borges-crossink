@@ -73,6 +73,7 @@ OpenRoute routeBook(BorgesStack& stack, const std::string& path) {
   in.autoOnOpen = stack.glue.autoOnOpen;
   in.throttled = openThrottled(stack.glue, pathHash(path.c_str()), stack.clock.wallNow());
   OpenRoute route = routeOpen(in);
+  if (route != OpenRoute::Direct) holdBook(stack, path);
   if (route == OpenRoute::NetworkSession) {
     if (!armSession(stack.glue, PendingKind::OpenBook)) {
       LOG_INF("BORGES", "Open sessions keep failing: opening without one");
@@ -80,7 +81,6 @@ OpenRoute routeBook(BorgesStack& stack, const std::string& path) {
     }
     stack.glueStore.save(stack.glue);
   }
-  if (route != OpenRoute::Direct) holdBook(stack, path);
   return route;
 }
 
@@ -145,12 +145,7 @@ class ClipSource final : public IClipSource {
     const auto& bookmarks = BOOKMARKS.getBookmarks();
     if (index - clips >= bookmarks.size()) return false;
     const Bookmark& mark = bookmarks[index - clips];
-    uint32_t progressBits = 0;
-    memcpy(&progressBits, &mark.progress, sizeof(progressBits));
-    out.spine = mark.spineIndex;
-    out.textOffset = mark.paragraphIndex;
-    out.textHash = bookmarkIdentity(mark.timestamp, progressBits);
-    out.bookmark = true;
+    out = bookmarkKey(mark.spineIndex, mark.paragraphIndex, mark.progress);
     return true;
   }
 
@@ -203,6 +198,17 @@ class ClipSource final : public IClipSource {
 };
 
 }  // namespace
+
+ClipKey bookmarkKey(const uint16_t spine, const uint16_t paragraph, const float progress) {
+  uint32_t progressBits = 0;
+  memcpy(&progressBits, &progress, sizeof(progressBits));
+  ClipKey key;
+  key.spine = spine;
+  key.textOffset = paragraph;
+  key.textHash = bookmarkIdentity(progressBits);
+  key.bookmark = true;
+  return key;
+}
 
 std::unique_ptr<Activity> interceptOpen(GfxRenderer& renderer, MappedInputManager& input, const std::string& path) {
   if (!FsHelpers::hasEpubExtension(path) || !mayBePaired()) return nullptr;
@@ -328,13 +334,13 @@ bool finalizeFromReader(GfxRenderer& renderer, const ReaderTracker& tracker, con
   const FinalizeResult result = stack->engine.finalizeBook(*input);
   LOG_DBG("BORGES", "Finalize ok=%d progress=%d created=%u deleted=%u", result.ok ? 1 : 0,
           result.progressQueued ? 1 : 0, result.annotationsCreated, result.annotationsDeleted);
+  return budget.frameLent();
 }
 
 void stampClip(const std::string& cachePath, const uint16_t spine, const uint32_t uptimeStamp) {
   const time_t now = time(nullptr);
   if (static_cast<int64_t>(now) < kPlausibleEpoch || !mayBePaired()) return;  // Otherwise the event omits the time.
   net::BorgesFsHal fs;
-  return budget.frameLent();
   ClipStamp stamp;
   stamp.spine = spine;
   stamp.uptime = uptimeStamp;

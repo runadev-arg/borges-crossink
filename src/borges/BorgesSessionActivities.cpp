@@ -50,6 +50,19 @@ void completeSession(const bool openSucceeded, const std::string& path, IClock* 
   store.save(state);
 }
 
+bool hasSavedPlace(const std::string& path) {
+  const std::string progress = Epub::resolveCachePathForFilePath(path, "/.crosspoint") + "/progress.bin";
+  return Storage.exists(progress.c_str()) || Storage.exists((progress + ".bak").c_str());
+}
+
+float buildMetadataAndPercent(const std::string& path) {
+  auto epub = std::make_shared<Epub>(path, "/.crosspoint");
+  epub->setupCacheDir();
+  if (!epub->load(true, true, Epub::XLocationLoadMode::Skip, true)) return -1.0f;
+  epub.reset();
+  return localPercentFor(path);
+}
+
 Rect screenArea(const GfxRenderer& renderer) {
   Rect area = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
   area.x += kSideMargin;
@@ -113,9 +126,19 @@ void BorgesOpenActivity::sessionMain(void* self) {
     LOG_ERR("BORGES", "No identity for %s: opening without a check", activity->path_.c_str());
     return;
   }
+  // Also here: this boot may have been reached by a path that did not go through routeBook.
+  if (!stack.engine.onBookOpened(session.ref.id)) LOG_ERR("BORGES", "Could not hold the book");
   session.ref.title = activity->title_.c_str();
   const float percent = localPercentFor(activity->path_);
   if (percent >= 0) session.local.setPercent(percent);
+  // A place imported from the old firmware comes without the book's metadata, which is what
+  // turns it into a percent. Built here, once per book, and the reader would build it anyway:
+  // it must not look like "never opened" to the check.
+  if (percent < 0 && hasSavedPlace(activity->path_)) {
+    const float built = buildMetadataAndPercent(activity->path_);
+    if (built >= 0) session.local.setPercent(built);
+    stack.cancel.arm(kOpenBudgetMs);
+  }
 
   if (stack.bringUp(kOpenLinkBudgetMs) != net::LinkResult::Connected) return;
   session.report = stack.engine.runOpenSession(session.ref, session.local, session.decision);
@@ -127,8 +150,6 @@ void BorgesOpenActivity::sessionMain(void* self) {
   }
 }
 
-  // Also here: this boot may have been reached by a path that did not go through routeBook.
-  if (!stack.engine.onBookOpened(session.ref.id)) LOG_ERR("BORGES", "Could not hold the book");
 void BorgesOpenActivity::loop() {
   const unsigned long now = millis();
   (void)now;
@@ -350,31 +371,6 @@ bool BorgesResumeActivity::applyJump() {
   return true;
 }
 
-void BorgesResumeActivity::goThere() {
-  // Wi-Fi off before the book loads: this is the most memory the mapping can have.
-  stack_->bringDown();
-  if (applyJump()) {
-    // The place is on disk and the choice stored. A short try at sending it now, as the
-    // plugin does; any button goes on, and the next session sends it otherwise.
-    choiceStored_ = true;
-    stack_->cancel.arm(kStayBudgetMs);
-    if (!worker_.start(&BorgesResumeActivity::drainMain, this)) leave(true);
-    return;
-  }
-  state_ = State::CouldNotLocate;
-  noticeUntil_ = millis() + kNoticeMs;
-  requestUpdate(true);
-}
-
-void BorgesResumeActivity::leave(const bool success) {
-  if (stack_) stack_->cancel.request();
-  if (back_ == Return::Reader) {
-    completeSession(success, path_, success && stack_ ? &stack_->clock : nullptr);
-    silentRestartToReader(true);
-    return;
-  }
-  if (!worker_.waitForExit(1000)) {
-    silentRestart();
 void BorgesResumeActivity::stayHere() {
   stayAt_ = makeUniqueNoThrow<Position>(decision_->local);
   auto finalized = makeUniqueNoThrow<Position>();
@@ -419,6 +415,31 @@ void BorgesResumeActivity::mapSavedPage(Position& out) {
   if (mapped.xpath.size() < kMaxXpointer) strncpy(out.xpointer, mapped.xpath.c_str(), kMaxXpointer - 1);
 }
 
+void BorgesResumeActivity::goThere() {
+  // Wi-Fi off before the book loads: this is the most memory the mapping can have.
+  stack_->bringDown();
+  if (applyJump()) {
+    // The place is on disk and the choice stored. A short try at sending it now, as the
+    // plugin does; any button goes on, and the next session sends it otherwise.
+    choiceStored_ = true;
+    stack_->cancel.arm(kStayBudgetMs);
+    if (!worker_.start(&BorgesResumeActivity::drainMain, this)) leave(true);
+    return;
+  }
+  state_ = State::CouldNotLocate;
+  noticeUntil_ = millis() + kNoticeMs;
+  requestUpdate(true);
+}
+
+void BorgesResumeActivity::leave(const bool success) {
+  if (stack_) stack_->cancel.request();
+  if (back_ == Return::Reader) {
+    completeSession(success, path_, success && stack_ ? &stack_->clock : nullptr);
+    silentRestartToReader(true);
+    return;
+  }
+  if (!worker_.waitForExit(1000)) {
+    silentRestart();
     return;
   }
   if (stack_) stack_->bringDown();

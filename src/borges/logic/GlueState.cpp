@@ -237,10 +237,7 @@ uint64_t clipIdentity(const uint32_t uptime, const uint16_t textLength, const ui
   return fnv64(&wordCount, sizeof(wordCount), h);
 }
 
-uint64_t bookmarkIdentity(const uint32_t uptime, const uint32_t progressBits) {
-  const uint64_t h = fnv64(&uptime, sizeof(uptime));
-  return fnv64(&progressBits, sizeof(progressBits), h);
-}
+uint64_t bookmarkIdentity(const uint32_t progressBits) { return fnv64(&progressBits, sizeof(progressBits)); }
 
 }  // namespace glue
 }  // namespace borges
