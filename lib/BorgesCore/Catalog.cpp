@@ -411,29 +411,69 @@ bool Catalog::loadPage(uint16_t page, CatalogPage& out, ICatalogVisitor& visitor
   return true;
 }
 
-bool Catalog::isOnSd(const CatalogEntry& entry, const char* dir) {
-  char path[192];
-  JsonWriter w(path, sizeof(path) - 1);
+namespace {
+
+bool joinPath(const char* dir, const char* name, char* out, size_t cap) {
+  JsonWriter w(out, cap - 1);
   w.raw(dir);
   w.raw("/");
-  w.raw(entry.fileName);
+  w.raw(name);
   if (!w.ok()) return false;
-  path[w.size()] = '\0';
-  return fs_.exists(path);
+  out[w.size()] = '\0';
+  return true;
+}
+
+// <stem>-<8 hex of the partial MD5>.epub, for when the plain name is another book's.
+// Fits CatalogEntry::fileName and stays stable, so a resume finds its own .part.
+void hashedFileName(const CatalogEntry& entry, char* out, size_t cap) {
+  static constexpr size_t kTail = 1 + 8 + 5;  // -xxxxxxxx.epub
+  const size_t nameLen = strlen(entry.fileName);
+  const size_t stemLen = nameLen > 5 ? nameLen - 5 : 0;
+  const size_t n = utf8Copy(out, cap - kTail, entry.fileName, stemLen);
+  out[n] = '-';
+  memcpy(out + n + 1, entry.book.hex, 8);
+  memcpy(out + n + 9, ".epub", 6);
+}
+
+}  // namespace
+
+// A name on the SD card says nothing about what is inside: two books in the account can
+// share a file name, and the person can have put anything there. Only the identity counts.
+Catalog::Local Catalog::locate(const CatalogEntry& entry, const char* dir, char* name, size_t nameCap) {
+  char path[192];
+  if (!joinPath(dir, entry.fileName, path, sizeof(path))) return Local::Unreadable;
+  copyText(name, nameCap, entry.fileName);
+  if (!fs_.exists(path)) return Local::Absent;
+  BookId found;
+  if (!partialMd5(fs_, path, found)) return Local::Unreadable;
+  if (memcmp(found.md5, entry.book.md5, 16) == 0) return Local::Here;
+
+  hashedFileName(entry, name, nameCap);
+  if (!joinPath(dir, name, path, sizeof(path))) return Local::Unreadable;
+  if (!fs_.exists(path)) return Local::Absent;
+  if (!partialMd5(fs_, path, found)) return Local::Unreadable;
+  return memcmp(found.md5, entry.book.md5, 16) == 0 ? Local::Here : Local::Unreadable;
+}
+
+bool Catalog::isOnSd(const CatalogEntry& entry, const char* dir) {
+  char name[sizeof(entry.fileName)];
+  return locate(entry, dir, name, sizeof(name)) == Local::Here;
 }
 
 DownloadResult Catalog::download(const CatalogEntry& entry, const char* dir, IDownloadProgress* progress, uint32_t budgetMs) {
+  CatalogEntry copy = entry;
+  return download(copy, dir, progress, budgetMs);
+}
+
+DownloadResult Catalog::download(CatalogEntry& entry, const char* dir, IDownloadProgress* progress, uint32_t budgetMs) {
   error_.clear();
+  char finalName[sizeof(entry.fileName)];
+  const Local local = locate(entry, dir, finalName, sizeof(finalName));
+  if (local == Local::Unreadable) return DownloadResult::LocalError;
+  copyText(entry.fileName, sizeof(entry.fileName), finalName);
+  if (local == Local::Here) return DownloadResult::AlreadyPresent;
   char finalPath[192];
-  {
-    JsonWriter w(finalPath, sizeof(finalPath) - 1);
-    w.raw(dir);
-    w.raw("/");
-    w.raw(entry.fileName);
-    if (!w.ok()) return DownloadResult::LocalError;
-    finalPath[w.size()] = '\0';
-  }
-  if (fs_.exists(finalPath)) return DownloadResult::AlreadyPresent;
+  if (!joinPath(dir, entry.fileName, finalPath, sizeof(finalPath))) return DownloadResult::LocalError;
   char partPath[200];
   char metaPath[200];
   const size_t n = strlen(finalPath);

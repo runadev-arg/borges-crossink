@@ -321,6 +321,51 @@ TEST_F(DownloadTest, AlreadyThereDoesNoNetwork) {
   EXPECT_TRUE(d.http.log.empty());
 }
 
+// Found by the contract tests: two books uploaded as gemelos.epub. The second was reported
+// as already present and the reader opened the first one in its place.
+TEST_F(DownloadTest, ANameTakenByAnotherBookIsNotThatBook) {
+  std::string other = content;
+  other[5] = 'X';
+  d.fs.put("/Books/libro.epub", other);
+  EXPECT_FALSE(catalog->isOnSd(entry, "/Books"));
+  EXPECT_TRUE(d.http.log.empty());
+
+  d.http.script.push_back(full());
+  const std::string hashed = std::string("libro-") + std::string(entry.book.hex).substr(0, 8) + ".epub";
+  EXPECT_EQ(catalog->download(entry, "/Books", nullptr, 60000), DownloadResult::Done);
+  EXPECT_EQ(d.fs.content("/Books/libro.epub"), other) << "the other book is left alone";
+  EXPECT_EQ(d.fs.content("/Books/" + hashed), content);
+  EXPECT_EQ(std::string(entry.fileName), hashed) << "the caller opens the right file";
+
+  // Listed again, with the name the catalog gives it.
+  copyText(entry.fileName, sizeof(entry.fileName), "libro.epub");
+  EXPECT_TRUE(catalog->isOnSd(entry, "/Books"));
+  EXPECT_EQ(catalog->download(entry, "/Books", nullptr, 60000), DownloadResult::AlreadyPresent);
+  EXPECT_EQ(std::string(entry.fileName), hashed);
+  EXPECT_EQ(d.http.log.size(), 1u);
+}
+
+TEST_F(DownloadTest, AHashedNameStaysInsideTheField) {
+  std::string other = content;
+  other[5] = 'X';
+  const std::string longName = std::string(58, 'n') + ".epub";
+  copyText(entry.fileName, sizeof(entry.fileName), longName.c_str());
+  d.fs.put("/Books/" + longName, other);
+  d.http.script.push_back(full());
+  EXPECT_EQ(catalog->download(entry, "/Books", nullptr, 60000), DownloadResult::Done);
+  EXPECT_LT(strlen(entry.fileName), sizeof(entry.fileName));
+  EXPECT_TRUE(std::string(entry.fileName).ends_with(".epub"));
+  EXPECT_EQ(d.fs.content(std::string("/Books/") + entry.fileName), content);
+}
+
+TEST_F(DownloadTest, AFileThatCannotBeReadIsNoIdentity) {
+  d.fs.put("/Books/libro.epub", content);
+  d.fs.failOpen("/Books/libro.epub");
+  EXPECT_FALSE(catalog->isOnSd(entry, "/Books"));
+  EXPECT_EQ(catalog->download(entry, "/Books", nullptr, 60000), DownloadResult::LocalError);
+  EXPECT_TRUE(d.http.log.empty());
+}
+
 TEST_F(DownloadTest, ResumesWithRangeAfterADrop) {
   Reply cut = full();
   cut.dropAfterBytes = 2000;

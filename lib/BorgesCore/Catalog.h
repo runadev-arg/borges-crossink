@@ -72,13 +72,20 @@ class Catalog {
 
   // dir must exist. Resumes from <dir>/<fileName>.part with Range + If-Range, and only
   // renames onto the final name after the partial MD5 of the whole file matches both
-  // the header and the manifest.
+  // the header and the manifest. If another book already has that file name, this one
+  // lands as <stem>-<hash>.epub, and the overload taking a mutable entry updates fileName
+  // to where the book really is, whatever the result.
+  DownloadResult download(CatalogEntry& entry, const char* dir, IDownloadProgress* progress, uint32_t budgetMs);
   DownloadResult download(const CatalogEntry& entry, const char* dir, IDownloadProgress* progress, uint32_t budgetMs);
+  // True only if the file there really is this edition. Reads its partial MD5: at most 12 KiB.
   bool isOnSd(const CatalogEntry& entry, const char* dir);
 
   const Diagnostics& lastError() const { return error_; }
 
  private:
+  enum class Local : uint8_t { Absent, Here, Unreadable };
+  // name gets where this book is, or where it should go when Absent.
+  Local locate(const CatalogEntry& entry, const char* dir, char* name, size_t nameCap);
   void cachePath(uint16_t page, char* out) const;
   void note(const ApiResult& result, const char* code);
 
