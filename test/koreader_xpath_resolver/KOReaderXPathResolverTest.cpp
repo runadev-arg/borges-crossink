@@ -299,3 +299,119 @@ TEST(KOReaderXPathRegression, ElementPointersLandOnTheTextThatFollows) {
     EXPECT_EQ(resolved.visibleOffset, 0u) << pointer;
   }
 }
+
+// ---- Clippings: what KOReader will read between the two ends. The differential test holds these same
+// shapes to crengine (fixture hostile_cases, clip_shapes and the cases around it). ------------------
+namespace {
+ChapterXPathResolver::TextRange locate(const std::string& body, const char* clip, const uint32_t anchor = 0,
+                                       const uint16_t word = 0) {
+  ChapterXPathResolver::TextRange range;
+  EXPECT_TRUE(ChapterXPathResolver::locateText(epubWith("<html><body>" + body + "</body></html>"), 0, clip, anchor,
+                                               word, range))
+      << clip;
+  return range;
+}
+}  // namespace
+
+TEST(KOReaderClipRange, EndsAreTheFirstCharacterAndJustPastTheLast) {
+  const auto range = locate("<p>one two three</p>", "two");
+  EXPECT_EQ(range.pos0, "/body/DocFragment/body/p/text().4");
+  EXPECT_EQ(range.pos1, "/body/DocFragment/body/p/text().7");
+  EXPECT_EQ(range.text, "two");
+}
+
+TEST(KOReaderClipRange, EndsAtTheEndOfATextNode) {
+  const auto range = locate("<p>one <i>two</i> three</p>", "one two");
+  EXPECT_EQ(range.pos0, "/body/DocFragment/body/p/text()[1].0");
+  EXPECT_EQ(range.pos1, "/body/DocFragment/body/p/i/text().3");
+  EXPECT_EQ(range.text, "one two");
+}
+
+TEST(KOReaderClipRange, UsesTheDocumentsSpacingNotTheClippings) {
+  // The reader's own line and paragraph breaks are not in the source.
+  const auto range = locate("<p>word,\n   next</p><p>other</p>", "word, next\nother");
+  EXPECT_EQ(range.text, "word, next\nother");
+  // Text the reader sets apart and crengine reads together, across an inline boundary.
+  EXPECT_EQ(locate("<p>wo<b>rd</b> x</p>", "wo rd x").text, "word x");
+}
+
+TEST(KOReaderClipRange, ABlockAndABrSeparateAndInlineElementsDoNot) {
+  EXPECT_EQ(locate("<p>a</p><p>b</p>", "a\nb").text, "a\nb");
+  EXPECT_EQ(locate("<p>a<br/>b</p>", "a\nb").text, "a\nb");
+  EXPECT_EQ(locate("<p>a<i>b</i>c</p>", "abc").text, "abc");
+  // Text after a block in the same parent is boxed by crengine, which starts a new block too.
+  EXPECT_EQ(locate("<div><p>a</p>b</div>", "a\nb").text, "a\nb");
+}
+
+TEST(KOReaderClipRange, SoftHyphensAreNotReadAndNbspIsASpace) {
+  const auto hyphen = locate("<p>soft\xC2\xADhyphen word</p>", "softhyphen");
+  EXPECT_EQ(hyphen.text, "softhyphen");
+  EXPECT_EQ(hyphen.pos1, "/body/DocFragment/body/p/text().11");
+  const auto nbsp = locate(
+      "<p>a\xC2\xA0"
+      "b c</p>",
+      "a b");
+  EXPECT_EQ(nbsp.pos1, "/body/DocFragment/body/p/text().3");
+}
+
+TEST(KOReaderClipRange, TheReadersComposedLetterIsTheSourcesBaseAndMark) {
+  const auto range = locate("<p>e\xCC\x81 x</p>", "\xC3\xA9");
+  EXPECT_EQ(range.pos1, "/body/DocFragment/body/p/text().2");
+  EXPECT_EQ(range.text, "e\xCC\x81");
+}
+
+TEST(KOReaderClipRange, ListMarkersAreTheReadersAlone) {
+  EXPECT_EQ(locate("<ul><li>one</li><li>two</li></ul>", "one\n\xE2\x80\xA2 two").text, "one\ntwo");
+  EXPECT_EQ(locate("<ol><li>one</li><li>two</li></ol>", "one\n2. two").text, "one\ntwo");
+  EXPECT_EQ(locate("<ul><li>one</li></ul>", "\xE2\x80\xA2 one").text, "one");
+}
+
+TEST(KOReaderClipRange, AnImagesStandInIsNotInTheSource) {
+  const auto range = locate("<p>a<img src=\"x\" alt=\"pic\"/>b</p>", "a[Image: pic]b");
+  EXPECT_EQ(range.pos0, "/body/DocFragment/body/p/text()[1].0");
+  EXPECT_EQ(range.pos1, "/body/DocFragment/body/p/text()[2].1");
+  EXPECT_EQ(range.text, "ab");
+}
+
+TEST(KOReaderClipRange, TextTheReaderLeavesOutStaysInTheRange) {
+  // A page-break marker is not on the reader's page; crengine reads it.
+  EXPECT_EQ(locate("<p>a <span epub:type=\"pagebreak\">3</span>b</p>", "a b").text, "a 3b");
+  // Ruby annotations are the reverse: neither of them shows it here.
+  EXPECT_EQ(locate("<p>a<ruby>k<rt>note</rt></ruby>b</p>", "akb").text, "akb");
+  // And text no stylesheet would hide, kept hidden by an inline style, is read by neither.
+  EXPECT_EQ(locate("<p>a<span style=\"display:none\">x</span>b</p>", "ab").text, "ab");
+}
+
+TEST(KOReaderClipRange, ANumericReferenceInTheC1RangeIsWhatCrengineMakesOfIt) {
+  const auto range = locate("<p>a&#150;b</p>", "ab");
+  EXPECT_EQ(range.text,
+            "a\xE2\x80\x93"
+            "b");
+}
+
+TEST(KOReaderClipRange, RepeatedTextGoesByTheWordOnThePage) {
+  const std::string body = "<p>the cat and the dog and the bird</p>";
+  EXPECT_EQ(locate(body, "the", 0, 0).pos0, "/body/DocFragment/body/p/text().0");
+  EXPECT_EQ(locate(body, "the", 0, 3).pos0, "/body/DocFragment/body/p/text().12");
+  EXPECT_EQ(locate(body, "the", 0, 6).pos0, "/body/DocFragment/body/p/text().24");
+  // From the page's own start, the words before it do not count.
+  EXPECT_EQ(locate(body, "the", 12, 3).pos0, "/body/DocFragment/body/p/text().24");
+}
+
+TEST(KOReaderClipRange, WithoutAnAnchorOnlyUniqueTextIsAccepted) {
+  const auto epub = epubWith("<html><body><p>one two one</p></body></html>");
+  ChapterXPathResolver::TextRange range;
+  EXPECT_TRUE(ChapterXPathResolver::locateText(epub, 0, "two", UINT32_MAX, 0, range));
+  EXPECT_FALSE(ChapterXPathResolver::locateText(epub, 0, "one", UINT32_MAX, 0, range));
+}
+
+TEST(KOReaderClipRange, OtherTextIsRefusedRatherThanPlacedNearby) {
+  const auto epub = epubWith("<html><body><p>one two three</p></body></html>");
+  ChapterXPathResolver::TextRange range;
+  EXPECT_FALSE(ChapterXPathResolver::locateText(epub, 0, "two four", 0, 0, range));
+  EXPECT_FALSE(ChapterXPathResolver::locateText(epub, 0, "", 0, 0, range));
+  EXPECT_FALSE(ChapterXPathResolver::locateText(epub, 0, "\xE2\x80\xA2", 0, 0, range));
+  EXPECT_FALSE(ChapterXPathResolver::locateText(epub, 0, "[Image: x]", 0, 0, range));
+  // Before the anchor is not where the page says it is.
+  EXPECT_FALSE(ChapterXPathResolver::locateText(epub, 0, "one", 4, 0, range));
+}

@@ -26,6 +26,25 @@ class ChapterXPathResolver {
     bool exact = true;  // False: the element is there, but not that text node. Nearest position.
   };
 
+  struct TextRange {
+    std::string pos0;  // First character
+    std::string pos1;  // Just past the last one, as KOReader's own highlights end
+    std::string text;  // What crengine reads between the two, spacing included
+  };
+
+  /**
+   * Find a clipping's text in its chapter, for a highlight KOReader can place. Every character is
+   * checked against the source, so a false here is the only failure: never a range holding other
+   * text. Send range.text, not the clipping's own: the reader's line breaks and word spacing are
+   * not the document's, and KOReader compares what it reads there with what it is sent.
+   *
+   * @param anchorOffset Visible offset of the page the clipping starts on. UINT32_MAX: unknown,
+   *                     and then only a text found once in the chapter is accepted.
+   * @param expectedWord The clipping's first word on that page, to choose among repeats.
+   */
+  static bool locateText(const std::shared_ptr<Epub>& epub, int spineIndex, const char* text, uint32_t anchorOffset,
+                         uint16_t expectedWord, TextRange& out);
+
   /**
    * Find the position an xpointer names. False when the document does not have the element it
    * names, which is when crengine's createXPointer() refuses it too.
