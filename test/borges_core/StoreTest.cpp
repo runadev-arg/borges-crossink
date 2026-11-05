@@ -157,7 +157,6 @@ TEST(Store, BookLedgerRoundTripWithLongestValues) {
   ASSERT_TRUE(store.begin());
   BookLedger l;
   ASSERT_TRUE(store.loadBook(Device::book(), l));
-  l.inboundSeq = 99;
   const std::string longXp(kMaxXpointer - 1, 'x');
   l.head.valid = true;
   l.head.serverSeq = 77;
@@ -178,7 +177,6 @@ TEST(Store, BookLedgerRoundTripWithLongestValues) {
 
   BookLedger r;
   ASSERT_TRUE(store.loadBook(Device::book(), r));
-  EXPECT_EQ(r.inboundSeq, 99u);
   EXPECT_EQ(std::string(r.head.position.xpointer), longXp);
   EXPECT_EQ(r.head.precision, TimePrecision::Anchored);
   EXPECT_EQ(r.suggestionAction, SuggestionAction::Dismiss);
@@ -267,64 +265,6 @@ TEST(Store, AnnotationLedgerRoundTrip) {
   EXPECT_EQ(out[0].syncId[0], 0xAA);
   EXPECT_EQ(out[1].bookmark, 1);
   delete[] out;
-}
-
-namespace {
-class Collect : public IInboundVisitor {
- public:
-  std::vector<uint64_t> seqs;
-  std::vector<std::string> texts;
-  void onAnnotation(const InboundAnnotation& a) override {
-    seqs.push_back(a.serverSeq);
-    texts.push_back(a.text);
-  }
-};
-}  // namespace
-
-TEST(Store, InboxListsInOrderSkipsDuplicatesAndTornBytes) {
-  MemFs fs;
-  Store store(fs, testKey(), 6);
-  ASSERT_TRUE(store.begin());
-  const BookId book = Device::book();
-  InboundAnnotation a;
-  copyText(a.text, sizeof(a.text), "uno");
-  a.serverSeq = 10;
-  ASSERT_TRUE(store.appendInbound(book, a));
-  // Redelivery after a crash before the ledger save.
-  ASSERT_TRUE(store.appendInbound(book, a));
-  const std::string path = std::string("/.crosspoint/borges/inbox/ab/") + (kMd5A + 2);
-  fs.put(path, fs.content(path) + fs.content(path).substr(0, 15));  // Torn tail.
-  a.serverSeq = 11;
-  copyText(a.text, sizeof(a.text), "dos");
-  ASSERT_TRUE(store.appendInbound(book, a));
-
-  InboundAnnotation scratch;
-  Collect c;
-  ASSERT_TRUE(store.forEachInbound(book, scratch, c));
-  EXPECT_EQ(c.seqs, (std::vector<uint64_t>{10, 11}));
-  EXPECT_EQ(c.texts, (std::vector<std::string>{"uno", "dos"}));
-}
-
-TEST(Store, InboxRotatesAndStaysBounded) {
-  MemFs fs;
-  Store store(fs, testKey(), 6);
-  ASSERT_TRUE(store.begin());
-  const BookId book = Device::book();
-  InboundAnnotation a;
-  copyText(a.text, sizeof(a.text), std::string(1000, 't').c_str());
-  for (uint64_t i = 1; i <= 200; ++i) {
-    a.serverSeq = i;
-    ASSERT_TRUE(store.appendInbound(book, a));
-  }
-  const std::string path = std::string("/.crosspoint/borges/inbox/ab/") + (kMd5A + 2);
-  EXPECT_TRUE(fs.has(path + ".old"));
-  EXPECT_LE(fs.content(path).size(), Store::kInboxRotateBytes + 2048);
-  InboundAnnotation scratch;
-  Collect c;
-  ASSERT_TRUE(store.forEachInbound(book, scratch, c));
-  EXPECT_EQ(c.seqs.back(), 200u);
-  EXPECT_GT(c.seqs.size(), 20u);
-  EXPECT_LT(c.seqs.size(), 200u);
 }
 
 TEST(Store, AccountChangeEmptiesQueueAndCursorButKeepsSequence) {

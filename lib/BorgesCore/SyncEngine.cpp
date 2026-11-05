@@ -82,7 +82,6 @@ bool isPoisonAnswer(const ApiResult& r, IFs& fs) {
 struct SyncEngine::Scratch {
   RemoteEvent event;
   BookLedger ledger;
-  InboundAnnotation inbound;
   Batch batch;
 };
 
@@ -659,6 +658,13 @@ bool SyncEngine::applyRemote(SessionReport& report) {
   BookId book;
   if (!book.setHex(e.bookValue)) return true;
 
+  // Another device's annotations are not kept: nothing here shows them, and 500 books of
+  // them would be 32 MB on the card. Rendering them in the page is out of scope (section 9).
+  if (!e.isProgress()) {
+    ++report.eventsApplied;
+    return true;
+  }
+
   BookLedger& ledger = scratch_->ledger;
   if (!ledgerLoaded_ || memcmp(ledger.id.md5, book.md5, 16) != 0) {
     if (!flushLedger()) return false;
@@ -666,46 +672,26 @@ bool SyncEngine::applyRemote(SessionReport& report) {
     ledgerLoaded_ = true;
   }
 
-  if (e.isProgress()) {
-    // Never prompts. It only keeps the newest head per book.
-    if (e.serverSeq > ledger.head.serverSeq) {
-      ledger.head.valid = true;
-      ledger.head.serverSeq = e.serverSeq;
-      ledger.head.position = Position{};
-      ledger.head.position.hasPct = e.hasPct;
-      ledger.head.position.pctMicro = e.pctMicro;
-      ledger.head.position.page = e.page;
-      ledger.head.position.totalPages = e.totalPages;
-      if (e.xpointerUsable) copyText(ledger.head.position.xpointer, kMaxXpointer, e.xpointer);
-      ledger.head.precision = e.precision;
-      copyText(ledger.head.occurredAt, sizeof(ledger.head.occurredAt), e.occurredAt);
-      copyText(ledger.head.deviceName, sizeof(ledger.head.deviceName), e.originName);
-      ledgerDirty_ = true;
-    }
-    if (e.suggestionId[0]) {
-      copyText(ledger.suggestionId, sizeof(ledger.suggestionId), e.suggestionId);
-      ledger.suggestionAction = SuggestionAction::None;
-      ledgerDirty_ = true;
-    }
-    ++report.eventsApplied;
-    return true;
+  // Never prompts. It only keeps the newest head per book.
+  if (e.serverSeq > ledger.head.serverSeq) {
+    ledger.head.valid = true;
+    ledger.head.serverSeq = e.serverSeq;
+    ledger.head.position = Position{};
+    ledger.head.position.hasPct = e.hasPct;
+    ledger.head.position.pctMicro = e.pctMicro;
+    ledger.head.position.page = e.page;
+    ledger.head.position.totalPages = e.totalPages;
+    if (e.xpointerUsable) copyText(ledger.head.position.xpointer, kMaxXpointer, e.xpointer);
+    ledger.head.precision = e.precision;
+    copyText(ledger.head.occurredAt, sizeof(ledger.head.occurredAt), e.occurredAt);
+    copyText(ledger.head.deviceName, sizeof(ledger.head.deviceName), e.originName);
+    ledgerDirty_ = true;
   }
-
-  // Redelivery is normal; the per-book watermark is what makes it a no-op.
-  if (e.serverSeq <= ledger.inboundSeq) return true;
-  InboundAnnotation& a = scratch_->inbound;
-  a = InboundAnnotation{};
-  a.serverSeq = e.serverSeq;
-  a.deleted = e.isAnnotationDelete();
-  a.textTruncated = e.textTruncated;
-  a.page = e.annotationPage;
-  copyText(a.syncId, sizeof(a.syncId), e.syncId);
-  copyText(a.chapter, sizeof(a.chapter), e.chapter);
-  copyText(a.note, sizeof(a.note), e.note);
-  copyText(a.text, sizeof(a.text), e.text);
-  if (!store_.appendInbound(book, a)) return false;
-  ledger.inboundSeq = e.serverSeq;
-  ledgerDirty_ = true;
+  if (e.suggestionId[0]) {
+    copyText(ledger.suggestionId, sizeof(ledger.suggestionId), e.suggestionId);
+    ledger.suggestionAction = SuggestionAction::None;
+    ledgerDirty_ = true;
+  }
   ++report.eventsApplied;
   return true;
 }

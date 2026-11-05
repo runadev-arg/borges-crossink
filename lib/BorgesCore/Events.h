@@ -110,11 +110,6 @@ struct RemoteEvent {
   char suggestionId[40] = {0};
   // Annotations only.
   char syncId[40] = {0};
-  bool textTruncated = false;
-  int32_t annotationPage = -1;
-  char chapter[96] = {0};
-  char note[256] = {0};
-  char text[1024] = {0};
 
   bool isProgress() const;
   bool isAnnotation() const;

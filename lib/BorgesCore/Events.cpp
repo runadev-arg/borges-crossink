@@ -237,8 +237,6 @@ void parsePayload(JsonScanner& scan, RemoteEvent& out) {
       if (scan.readInt(number) && number >= 0 && number <= 0x7FFFFFFF) out.page = static_cast<int32_t>(number);
     } else if (strcmp(key, "total_pages") == 0) {
       if (scan.readInt(number) && number >= 1 && number <= 0x7FFFFFFF) out.totalPages = static_cast<int32_t>(number);
-    } else if (strcmp(key, "page") == 0) {
-      if (scan.readInt(number) && number >= 0 && number <= 0x7FFFFFFF) out.annotationPage = static_cast<int32_t>(number);
     } else if (strcmp(key, "xpointer") == 0) {
       bool truncated = false;
       out.xpointerUsable = scan.readString(out.xpointer, sizeof(out.xpointer), &truncated) && !truncated && out.xpointer[0];
@@ -249,12 +247,6 @@ void parsePayload(JsonScanner& scan, RemoteEvent& out) {
       bool truncated = false;
       scan.readString(out.syncId, sizeof(out.syncId), &truncated);
       if (truncated) out.syncId[0] = '\0';
-    } else if (strcmp(key, "text") == 0) {
-      scan.readString(out.text, sizeof(out.text), &out.textTruncated);
-    } else if (strcmp(key, "note") == 0) {
-      scan.readString(out.note, sizeof(out.note));
-    } else if (strcmp(key, "chapter") == 0) {
-      scan.readString(out.chapter, sizeof(out.chapter));
     } else {
       scan.skipValue();
     }

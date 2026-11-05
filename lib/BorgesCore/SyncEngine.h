@@ -6,7 +6,7 @@
 // book loaded, TLS needs 35 KB of that).
 //
 //   Heap, whole engine lifetime
-//     Scratch (one RemoteEvent, BookLedger, InboundAnnotation, Batch)   6.9 KB
+//     Scratch (one RemoteEvent, BookLedger, Batch)                      3.5 KB
 //     Outbox index                  24 B per live event, 128 at most    ~3.1 KB
 //   Heap, one request at a time
 //     Exchange body: default bound 8 KiB + one envelope. A single oversized event

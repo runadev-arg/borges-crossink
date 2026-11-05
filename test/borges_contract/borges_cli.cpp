@@ -935,8 +935,6 @@ class Device {
       body = download(a);
     } else if (cmd == "on-sd") {
       body = onSd(a);
-    } else if (cmd == "inbound") {
-      body = inbound(a);
     } else if (cmd == "remote-head") {
       body = remoteHead(a);
     } else if (cmd == "undo") {
@@ -1282,27 +1280,6 @@ class Device {
     CatalogEntry entry;
     if (!findCached(a, entry)) return "\"result\":\"not_in_cache\"";
     return std::string("\"on_sd\":") + boolText(catalogObject().isOnSd(entry, arg(a, "dir", "/books").c_str()));
-  }
-
-  class Inbound : public IInboundVisitor {
-   public:
-    void onAnnotation(const InboundAnnotation& x) override {
-      std::ostringstream o;
-      o << "{\"server_seq\":\"" << x.serverSeq << "\",\"deleted\":" << boolText(x.deleted) << ",\"truncated\":" << boolText(x.textTruncated)
-        << ",\"page\":" << x.page << ",\"sync_id\":" << esc(x.syncId) << ",\"chapter\":" << esc(x.chapter) << ",\"note\":" << esc(x.note)
-        << ",\"text\":" << esc(x.text) << "}";
-      if (!json.empty()) json += ",";
-      json += o.str();
-    }
-    std::string json;
-  };
-
-  std::string inbound(const Args& a) {
-    const BookRef book = bookRef(a);
-    Inbound visitor;
-    InboundAnnotation scratch;
-    const bool ok = store_.forEachInbound(book.id, scratch, visitor);
-    return std::string("\"read\":") + boolText(ok) + ",\"annotations\":[" + visitor.json + "]";
   }
 
   std::string remoteHead(const Args& a) {

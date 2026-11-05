@@ -144,7 +144,8 @@ compared against the ledger, keyed by a stable hash of (partial MD5, spine, text
 New ones become `annotation.created`, removed ones `annotation.deleted`. `sync_id` is derived once and
 stored. The xpointer is resolved with `ChapterXPathResolver` while the book is still loaded. Clip
 `timestamp` is uptime, so the wall time is stamped by a hook at save time, or `time` is omitted.
-Inbound annotations from other devices advance the cursor and are stored per book for a read-only list.
+Inbound annotations from other devices advance the cursor and are not stored: nothing on the device
+shows them, and keeping them would cost up to 32 MB at 500 books for a list nobody can open.
 
 ## 8. Testing
 

@@ -227,14 +227,9 @@ TEST(CrashMatrix, SequenceRepairIsAllOrNothing) {
   }
 }
 
-// Pull pages: a crash at any point leaves the cursor at a page boundary whose events
-// are all applied, and the inbound list has no duplicates.
+// Pull pages: a crash at any point leaves the cursor at a page boundary whose events are
+// all applied: the head of a book it has passed is on the card.
 TEST(CrashMatrix, CursorNeverPassesWhatWasApplied) {
-  class Count : public IInboundVisitor {
-   public:
-    std::vector<uint64_t> seqs;
-    void onAnnotation(const InboundAnnotation& a) override { seqs.push_back(a.serverSeq); }
-  };
   for (TornMode mode : {TornMode::Drop, TornMode::Half, TornMode::Keep}) {
     for (uint64_t kill = 1; kill < 120; ++kill) {
       Device d;
@@ -244,9 +239,9 @@ TEST(CrashMatrix, CursorNeverPassesWhatWasApplied) {
       for (uint64_t seq = 10; seq < 16; ++seq) {
         const std::string event =
             "{\"event_id\":\"evt-" + std::to_string(seq) + "\",\"server_sequence\":\"" + std::to_string(seq) +
-            "\",\"origin_device\":{\"id\":\"" + kOtherId + "\"},\"event_type\":\"annotation.created\","
+            "\",\"origin_device\":{\"id\":\"" + kOtherId + "\"},\"event_type\":\"progress.changed\","
             "\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"" + kMd5A + "\"},"
-            "\"payload\":{\"sync_id\":\"s\",\"text\":\"t" + std::to_string(seq) + "\"},\"directive\":\"apply_remote\",\"directive_metadata\":{}}";
+            "\"payload\":{\"percentage\":" + std::to_string(seq) + "},\"directive\":\"suggest_resume\",\"directive_metadata\":{}}";
         d.server.addFeedEvent(seq, event);
       }
       d.fs.killAtOp(d.fs.ops() + kill);
@@ -256,18 +251,17 @@ TEST(CrashMatrix, CursorNeverPassesWhatWasApplied) {
       if (crashed) {
         d.crashAndBoot();
         // What the cursor promises must be on the card.
-        auto scratch = std::make_unique<InboundAnnotation>();
-        Count c;
-        ASSERT_TRUE(d.store->forEachInbound(Device::book(), *scratch, c));
-        for (uint64_t seq = 10; seq < 16 && seq <= d.store->state().cursor; ++seq) {
-          EXPECT_NE(std::find(c.seqs.begin(), c.seqs.end(), seq), c.seqs.end()) << "kill=" << kill << " seq=" << seq;
+        const uint64_t cursor = d.store->state().cursor;
+        if (cursor >= 10) {
+          RemoteHead head;
+          ASSERT_TRUE(d.engine->remoteHead(Device::book(), head)) << "kill=" << kill;
+          EXPECT_GE(head.serverSeq, cursor > 15 ? 15 : cursor) << "kill=" << kill;
         }
       }
       for (int i = 0; i < 4; ++i) d.engine->runManualSession(nullptr, nullptr, nullptr);
-      auto scratch = std::make_unique<InboundAnnotation>();
-      Count all;
-      ASSERT_TRUE(d.store->forEachInbound(Device::book(), *scratch, all));
-      EXPECT_EQ(all.seqs, (std::vector<uint64_t>{10, 11, 12, 13, 14, 15})) << "kill=" << kill;
+      RemoteHead head;
+      ASSERT_TRUE(d.engine->remoteHead(Device::book(), head)) << "kill=" << kill;
+      EXPECT_EQ(head.serverSeq, 15u) << "kill=" << kill;
       if (!crashed) break;
     }
   }

@@ -12,10 +12,8 @@ namespace {
 
 constexpr uint8_t kCredVersion = 1;
 constexpr uint8_t kStateVersion = 1;
-constexpr uint8_t kBookVersion = 2;
+constexpr uint8_t kBookVersion = 3;
 constexpr uint8_t kAnnVersion = 1;
-constexpr uint8_t kInboxMagic0 = 0xB1;
-constexpr uint8_t kInboxMagic1 = 0x57;
 constexpr size_t kLegacyMaxBytes = 8 * 1024;
 constexpr size_t kAnnHeaderBytes = 5;  // version u8, epoch u16, count u16
 constexpr size_t kAnnRecordBytes = 25;
@@ -141,7 +139,6 @@ bool Store::begin() {
   fs_.mkdir("/.crosspoint/borges/spool");
   fs_.mkdir("/.crosspoint/borges/books");
   fs_.mkdir("/.crosspoint/borges/ann");
-  fs_.mkdir("/.crosspoint/borges/inbox");
   fs_.mkdir("/.crosspoint/borges/catalog");
 
   creds_ = Credentials{};
@@ -340,7 +337,6 @@ bool Store::loadBook(const BookId& id, BookLedger& out) {
     const uint16_t epoch = r.u16();
     if (version == kBookVersion && epoch == state_.accountEpoch) {
       BookLedger* l = &out;
-      l->inboundSeq = r.u64();
       l->head.valid = r.u8() != 0;
       l->head.serverSeq = r.u64();
       readPosition(r, l->head.position);
@@ -383,7 +379,6 @@ bool Store::saveBook(const BookLedger& l) {
   ByteWriter w(buf, 2400);
   w.u8(kBookVersion);
   w.u16(state_.accountEpoch);
-  w.u64(l.inboundSeq);
   w.u8(l.head.valid ? 1 : 0);
   w.u64(l.head.serverSeq);
   writePosition(w, l.head.position);
@@ -476,102 +471,6 @@ bool Store::saveAnnotations(const BookId& id, const AnnotationRecord* records, u
   const bool ok = w.ok() && saveShardRecord(annFile_, path, buf, w.size());
   delete[] buf;
   return ok;
-}
-
-bool Store::appendInbound(const BookId& id, const InboundAnnotation& a) {
-  char path[AtomicFile::kMaxPath];
-  bookPath("inbox", id, path);
-  {
-    File f(fs_, path, IFs::Mode::Append);
-    if (!f) return false;
-    const int64_t size = f.size();
-    if (size >= static_cast<int64_t>(kInboxRotateBytes)) {
-      f.close();
-      char old[AtomicFile::kMaxPath + 8];
-      const size_t n = strlen(path);
-      memcpy(old, path, n);
-      memcpy(old + n, ".old", 5);
-      fs_.remove(old);
-      fs_.rename(path, old);
-    }
-  }
-  const size_t cap = 64 + strlen(a.syncId) + strlen(a.chapter) + strlen(a.note) + strlen(a.text);
-  uint8_t* buf = new (std::nothrow) uint8_t[cap + 10];
-  if (!buf) return false;
-  ByteWriter w(buf + 10, cap);
-  w.u64(a.serverSeq);
-  w.u8(a.deleted ? 1 : 0);
-  w.u8(a.textTruncated ? 1 : 0);
-  w.u32(static_cast<uint32_t>(a.page));
-  w.str(a.syncId);
-  w.str(a.chapter);
-  w.str(a.note);
-  w.str(a.text);
-  bool ok = w.ok();
-  if (ok) {
-    ByteWriter h(buf, 10);
-    h.u8(kInboxMagic0);
-    h.u8(kInboxMagic1);
-    h.u32(static_cast<uint32_t>(w.size()));
-    h.u32(crc32(buf + 10, w.size()));
-    File f(fs_, path, IFs::Mode::Append);
-    ok = f && f.writeAll(buf, 10 + w.size()) && f.flush();
-  }
-  delete[] buf;
-  return ok;
-}
-
-bool Store::readInboxFile(const char* path, InboundAnnotation& scratch, IInboundVisitor& visitor, uint64_t& lastSeq) {
-  if (!fs_.exists(path)) return true;
-  File f(fs_, path, IFs::Mode::Read);
-  if (!f) return false;
-  const int64_t rawSize = f.size();
-  if (rawSize < 0) return false;
-  const uint32_t size = static_cast<uint32_t>(rawSize);
-  uint8_t* buf = new (std::nothrow) uint8_t[1536];
-  if (!buf) return false;
-  uint32_t pos = 0;
-  while (pos + 10 <= size) {
-    uint8_t header[10];
-    if (!f.seek(pos) || !f.readExact(header, 10)) break;
-    ByteReader hr(header + 2, 8);
-    const uint32_t len = hr.u32();
-    const uint32_t crc = hr.u32();
-    bool good = header[0] == kInboxMagic0 && header[1] == kInboxMagic1 && len <= 1536 && pos + 10 + len <= size;
-    if (good) good = f.readExact(buf, len) && crc32(buf, len) == crc;
-    if (!good) {
-      ++pos;  // A torn record's length cannot be trusted: resynchronize.
-      continue;
-    }
-    ByteReader r(buf, len);
-    scratch.serverSeq = r.u64();
-    scratch.deleted = r.u8() != 0;
-    scratch.textTruncated = r.u8() != 0;
-    scratch.page = static_cast<int32_t>(r.u32());
-    r.str(scratch.syncId, sizeof(scratch.syncId));
-    r.str(scratch.chapter, sizeof(scratch.chapter));
-    r.str(scratch.note, sizeof(scratch.note));
-    r.str(scratch.text, sizeof(scratch.text));
-    // A crash between the append and the ledger save stores a redelivered event twice.
-    if (r.ok() && scratch.serverSeq > lastSeq) {
-      lastSeq = scratch.serverSeq;
-      visitor.onAnnotation(scratch);
-    }
-    pos += 10 + len;
-  }
-  delete[] buf;
-  return true;
-}
-
-bool Store::forEachInbound(const BookId& id, InboundAnnotation& scratch, IInboundVisitor& visitor) {
-  char path[AtomicFile::kMaxPath];
-  bookPath("inbox", id, path);
-  char old[AtomicFile::kMaxPath + 8];
-  const size_t n = strlen(path);
-  memcpy(old, path, n);
-  memcpy(old + n, ".old", 5);
-  uint64_t lastSeq = 0;
-  return readInboxFile(old, scratch, visitor, lastSeq) && readInboxFile(path, scratch, visitor, lastSeq);
 }
 
 // The previous firmware kept its credential as JSON. Field names and the obfuscation

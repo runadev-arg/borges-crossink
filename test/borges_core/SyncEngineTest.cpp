@@ -782,51 +782,17 @@ std::string remoteAnnotation(uint64_t seq, const std::string& origin, const std:
          "\",\"chapter\":\"Uno\",\"note\":\"nota\",\"page\":7},\"directive\":\"apply_remote\",\"directive_metadata\":{}}";
 }
 
-class CollectInbound : public IInboundVisitor {
- public:
-  std::vector<std::string> texts;
-  std::vector<bool> deleted;
-  void onAnnotation(const InboundAnnotation& a) override {
-    texts.push_back(a.text);
-    deleted.push_back(a.deleted);
-  }
-};
 }  // namespace
 
-TEST_F(SyncEngineTest, InboundAnnotationsAreStoredOncePerBook) {
-  d.server.addFeedEvent(10, remoteAnnotation(10, kOtherId, "annotation.created", "subrayado"));
+TEST_F(SyncEngineTest, InboundAnnotationsMoveTheCursorAndLeaveNothingOnTheCard) {
+  d.server.addFeedEvent(10, remoteAnnotation(10, kOtherId, "annotation.created", std::string(3000, 'a')));
   d.server.addFeedEvent(11, remoteAnnotation(11, kOtherId, "annotation.deleted", ""));
   d.server.addFeedEvent(12, remoteAnnotation(12, kSelfId, "annotation.created", "propio"));
   EXPECT_EQ(manual().eventsApplied, 2);
-
-  // The same page again: a restored cursor, for instance.
-  d.store->state().cursor = 0;
-  d.store->state().committedCursor = 0;
-  EXPECT_EQ(manual().eventsApplied, 0);
-
-  auto scratch = std::make_unique<InboundAnnotation>();
-  CollectInbound c;
-  ASSERT_TRUE(d.store->forEachInbound(Device::book(), *scratch, c));
-  EXPECT_EQ(c.texts, (std::vector<std::string>{"subrayado", ""}));
-  EXPECT_EQ(c.deleted, (std::vector<bool>{false, true}));
-}
-
-TEST_F(SyncEngineTest, LongInboundTextIsTruncatedAndFlagged) {
-  d.server.addFeedEvent(10, remoteAnnotation(10, kOtherId, "annotation.created", std::string(3000, 'a')));
-  EXPECT_EQ(manual().eventsApplied, 1);
-  auto scratch = std::make_unique<InboundAnnotation>();
-  class V : public IInboundVisitor {
-   public:
-    bool truncated = false;
-    size_t size = 0;
-    void onAnnotation(const InboundAnnotation& a) override {
-      truncated = a.textTruncated;
-      size = strlen(a.text);
-    }
-  } v;
-  ASSERT_TRUE(d.store->forEachInbound(Device::book(), *scratch, v));
-  EXPECT_TRUE(v.truncated);
-  EXPECT_EQ(v.size, 1023u);
+  EXPECT_EQ(d.store->state().cursor, 12u);
+  for (const std::string& path : d.fs.paths()) {
+    if (path != kSpoolPath) EXPECT_EQ(d.fs.content(path).find("aaaaaaaa"), std::string::npos) << path;
+  }
 }
 
 // --- Focus check ------------------------------------------------------------------
@@ -1472,6 +1438,6 @@ TEST_F(SyncEngineTest, NoFileIsLeftOpen) {
 }
 
 TEST_F(SyncEngineTest, EngineMemoryStaysWithinTheBudgetNote) {
-  EXPECT_LT(sizeof(RemoteEvent) + sizeof(BookLedger) + sizeof(InboundAnnotation) + sizeof(Batch), 8u * 1024);
+  EXPECT_LT(sizeof(RemoteEvent) + sizeof(BookLedger) + sizeof(Batch), 4u * 1024);
   EXPECT_LT(sizeof(OutboxEntry) * Outbox::kMaxLiveEvents, 3200u);
 }

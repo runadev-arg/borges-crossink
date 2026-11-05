@@ -375,12 +375,12 @@ async function faults(h, t, metrics) {
   const sessionsRows = await h.sql`SELECT started_at, count(*)::int AS n FROM reading_sessions WHERE device_id = ${sweep.fw.deviceId} GROUP BY started_at`;
   t.eq(sessionsRows.length, iteration, "one reading session per finalize");
   t.eq(sessionsRows.filter((r) => r.n > 1).length, 0, "no session recorded twice");
-  const inbound = await sweep.fw.once("inbound", { ...bookArgs(b) });
-  const inboundTexts = inbound.annotations.map((x) => x.text);
-  t.eq(new Set(inboundTexts).size, inboundTexts.length, "no inbound annotation stored twice");
-  const missing = [];
-  for (let i = 1; i <= iteration; i += 1) if (!inboundTexts.includes(`KOReader subraya ${i}`)) missing.push(i);
-  t.eq(missing, [], "every KOReader annotation landed");
+  const [{ count: krEntries }] = await h.sql`
+    SELECT count(*)::int FROM entries e JOIN documents d ON d.id = e.document_id
+    WHERE d.user_id = ${sweep.account.id} AND e.text LIKE 'KOReader subraya %'`;
+  t.eq(krEntries, iteration, "every KOReader annotation landed");
+  await sweep.fw.once("manual-session");
+  t.eq((await sweep.fw.once("status")).cursor, await watermark(h, sweep.account.id), "the firmware's cursor went past all of them");
   t.eq((await sweep.kr.syncAll()).pending, 0, "KOReader's queue is empty too");
 }
 
@@ -434,7 +434,6 @@ async function repair(h, t) {
   t.eq((await fw.once("manual-session")).report.outcome, "ok", "the replayed cursor keeps going");
   const caught = await fw.once("status");
   t.eq(caught.cursor, await watermark(h, account.id), "and catches up");
-  t.eq((await fw.once("inbound", { ...bookArgs(a) })).annotations.length, 3, "replayed annotations are stored once");
 
   // Only the state files go back: the replay is longer than a session, and a checkpoint
   // older than the server's is not an error.
@@ -458,9 +457,6 @@ async function repair(h, t) {
   t.ok(BigInt((await fw.once("status")).cursor) < BigInt(server1.pull_cursor), "the client is still behind the server's checkpoint");
   for (let i = 0; i < 6; i += 1) await fw.once("manual-session");
   t.eq((await fw.once("status")).cursor, await watermark(h, account.id), "it converges");
-  const texts = (await fw.once("inbound", { ...bookArgs(b) })).annotations.map((x) => x.text);
-  t.eq(new Set(texts).size, texts.length, "replay stores nothing twice");
-  t.eq(texts.length, 6, "and loses nothing");
 
   // The server's checkpoints went back (restored database): cursor_not_delivered.
   await h.sql`UPDATE device_sync_state SET last_delivered_cursor = 0, pull_cursor = 0 WHERE device_id = ${fw.deviceId}`;
@@ -627,26 +623,19 @@ async function annotations(h, t) {
   t.eq((await finalize(remaining)).finalize.annotations_deleted, 1, "and it can be deleted once more");
   t.eq((await fw.once("sleep-session")).report.events_rejected, 0, "accepted");
 
-  // Inbound: what KOReader writes lands in the firmware's store.
+  // Inbound: what KOReader writes moves the firmware's cursor and leaves nothing on its card.
   const inboundSync = KoreaderSim.annotationSyncId(a.md5, { kind: "highlight", xpointer: xp(600), pos1: xp(601) });
   kr.enqueueAnnotation({ book: a.md5, bookInfo: bookInfo(a), text: "Desde KOReader ñ 📖", note: "nota de allá", chapter: "Capítulo 9", page: 60, xpointer: xp(600), pos1: xp(601), timeMs: 1790000001000 });
   const krUp = await kr.syncAll();
   t.eq(krUp.acks[0].status, "accepted", "KOReader's annotation accepted");
-  await fw.once("manual-session");
-  let inbound = await fw.once("inbound", { ...bookArgs(a) });
-  const landed = inbound.annotations.filter((x) => x.sync_id === inboundSync);
-  t.eq(landed.length, 1, "landed once");
-  t.eq(landed[0]?.text, "Desde KOReader ñ 📖", "text");
-  t.eq(landed[0]?.note, "nota de allá", "note");
-  t.eq(landed[0]?.chapter, "Capítulo 9", "chapter");
-  t.eq(landed[0]?.page, 60, "page");
-  t.ok(!inbound.annotations.some((x) => x.text === emoji), "own annotations are not stored as inbound");
+  t.eq((await fw.once("manual-session")).report.outcome, "ok", "the firmware pulls it");
+  t.eq((await fw.once("status")).cursor, await watermark(h, account.id), "and its cursor goes past it");
+  const onCard = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? onCard(path.join(dir, e.name)) : [path.join(dir, e.name)]));
+  t.ok(!onCard(fw.borgesDir()).some((f) => !f.endsWith("resp.json") && fs.readFileSync(f).includes("Desde KOReader")), "nothing of it is kept on the card");
   kr.enqueueAnnotationDelete({ book: a.md5, bookInfo: bookInfo(a), syncId: inboundSync });
   const krDel = await kr.syncAll();
   t.eq(krDel.acks[0].status, "accepted", `KOReader's delete accepted: ${krDel.acks[0].rejection_code}`);
-  await fw.once("manual-session");
-  inbound = await fw.once("inbound", { ...bookArgs(a) });
-  t.ok(inbound.annotations.some((x) => x.sync_id === inboundSync && x.deleted), "the delete lands as a tombstone");
+  t.eq((await fw.once("manual-session")).report.outcome, "ok", "the firmware pulls the delete");
   const pulled = await kr.syncAll();
   t.ok(pulled.events.length >= 0, "KOReader's pull works");
   const krSaw = kr.inbox.filter((e) => e.event_type.startsWith("annotation.") && e.origin_device.id === fw.deviceId);
@@ -682,16 +671,10 @@ async function annotations(h, t) {
   const afterDelete = await h.sql`SELECT id FROM entries WHERE document_id = ${docB.id}`;
   t.note(`after the firmware deletes its copy: ${afterDelete.length} entries remain for that passage (KOReader still shows it)`);
 
-  // Long text is kept short on the device, and flagged.
-  const longText = "ñ".repeat(3000);
-  kr.enqueueAnnotation({ book: a.md5, bookInfo: bookInfo(a), text: longText, page: 70, xpointer: xp(800), pos1: xp(801) });
+  // A long text from elsewhere costs nothing here.
+  kr.enqueueAnnotation({ book: a.md5, bookInfo: bookInfo(a), text: "ñ".repeat(3000), page: 70, xpointer: xp(800), pos1: xp(801) });
   await kr.syncAll();
-  await fw.once("manual-session");
-  inbound = await fw.once("inbound", { ...bookArgs(a) });
-  const long = inbound.annotations.find((x) => x.page === 70);
-  t.eq(long?.truncated, true, "a long inbound text is flagged as truncated");
-  t.ok(long && Buffer.from(long.text).length < 1024, "and fits the record");
-  t.ok(long && !long.text.includes("\uFFFD"), "without cutting a character");
+  t.eq((await fw.once("manual-session")).report.outcome, "ok", "a long inbound text is no problem");
 }
 
 
