@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <new>
 #include <string>
@@ -83,6 +84,11 @@ std::string bodyPointer(const int spineIndex, const int spineCount) {
   if (spineCount <= 1) return "/body/DocFragment/body";
   return "/body/DocFragment[" + std::to_string(spineIndex + 1) + "]/body";
 }
+
+constexpr uint16_t kWindows1252[32] = {0x20AC, 0x81,   0x201A, 0x192,  0x201E, 0x2026, 0x2020, 0x2021,
+                                       0x2C6,  0x2030, 0x160,  0x2039, 0x152,  0x8D,   0x17D,  0x8F,
+                                       0x90,   0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+                                       0x2DC,  0x2122, 0x161,  0x203A, 0x153,  0x9D,   0x17E,  0x178};
 
 uint32_t hashName(const char* s, const size_t len) {
   uint32_t h = 2166136261u;
@@ -199,10 +205,12 @@ struct ParsedPointer {
 class CreWalker final : public Print {
  public:
   enum class Mode : uint8_t {
-    Count,          // Totals only
-    EmitOffset,     // Offset to xpointer
-    EmitElement,    // Nth <p> or <li> to xpointer
-    ResolvePointer  // Xpointer to offset
+    Count,           // Totals only
+    EmitOffset,      // Offset to xpointer
+    EmitElement,     // Nth <p> or <li> to xpointer
+    ResolvePointer,  // Xpointer to offset
+    LocateText,      // A clipping's text to the offsets of its ends
+    CollectText      // What crengine reads between two offsets
   };
 
   CreWalker(const Mode mode, const int spineIndex, const int spineCount)
@@ -234,6 +242,20 @@ class CreWalker final : public Print {
     targetOrdinal_ = ordinal;
   }
   void setPointer(const ParsedPointer* pointer) { pointer_ = pointer; }
+  void setLocate(const char* text, const uint32_t anchor, const uint16_t expectedWord) {
+    locateText_ = text;
+    locateAnchored_ = anchor != UINT32_MAX;
+    targetOffset_ = locateAnchored_ ? anchor : 0;
+    expectedWord_ = expectedWord;
+  }
+  void setCollect(const uint32_t first, const uint32_t last, std::string* out) {
+    targetOffset_ = first;
+    collectLast_ = last;
+    collectOut_ = out;
+  }
+  bool located() const { return locateMatches_ > 0 && (locateAnchored_ || locateMatches_ == 1); }
+  uint32_t locatedFirst() const { return locateBestFirst_; }
+  uint32_t locatedLast() const { return locateBestLast_; }
 
   bool ok() const { return parser_ != nullptr && parseOk_; }
 
@@ -322,11 +344,23 @@ class CreWalker final : public Print {
     bool opaque : 1;
     bool svg : 1;
     bool countersFull : 1;
+    bool inTable : 1;
+    bool absentFromClip : 1;
   };
 
   struct Counter {
     uint32_t hash;
     uint16_t count;
+  };
+
+  static constexpr int kMaxAttempts = 12;
+  static constexpr uint32_t kLocateSlackWords = 64;
+  struct Attempt {
+    uint32_t position;
+    uint32_t first;
+    uint32_t last;
+    uint32_t startWord;
+    bool afterBase;
   };
 
   static constexpr int kCssMemoSize = 16;
@@ -431,6 +465,199 @@ class CreWalker final : public Print {
     return found;
   }
 
+  // ---- clippings -----------------------------------------------------------------------------
+  // What a clipping and the source may differ by: the reader and crengine each break and space
+  // the text their own way, and comparableText() in the plugin ignores a soft hyphen.
+  static bool ignoredInClip(const uint32_t cp) {
+    return isSpaceCp(cp) || (cp >= 0x80 && cp <= 0xA0) || cp == 0xAD || cp == 0xFEFF ||
+           (cp >= 0x2000 && cp <= 0x200B) || cp == 0x202F || cp == 0x205F || cp == 0x3000;
+  }
+
+  // The next character of the clipping that counts, and where the one after it starts.
+  uint32_t clipCodepointAt(uint32_t position, uint32_t& next) const {
+    const auto* base = reinterpret_cast<const unsigned char*>(locateText_);
+    for (;;) {
+      // A stand-in for an image the reader could not show is not in the source.
+      static constexpr char kImage[] = "[Image:";
+      if (strncmp(locateText_ + position, kImage, sizeof(kImage) - 1) == 0) {
+        const char* close = strchr(locateText_ + position, ']');
+        position = close ? static_cast<uint32_t>(close + 1 - locateText_) : static_cast<uint32_t>(strlen(locateText_));
+        continue;
+      }
+      const unsigned char* ptr = base + position;
+      if (*ptr == 0) {
+        next = position;
+        return 0;
+      }
+      const uint32_t cp = utf8NextCodepoint(&ptr);
+      position = static_cast<uint32_t>(ptr - base);
+      if (ignoredInClip(cp)) continue;
+      next = position;
+      return cp;
+    }
+  }
+
+  // The reader's own marker of a list item, "1." or a bullet, is in the clipping and not the source.
+  uint32_t afterListMarker(const uint32_t position) const {
+    const char* p = locateText_ + position;
+    while (*p == ' ' || *p == '\n') p++;
+    if (strncmp(p, "\xE2\x80\xA2", 3) == 0) return static_cast<uint32_t>(p + 3 - locateText_);
+    const char* digits = p;
+    while (*p >= '0' && *p <= '9') p++;
+    if (p != digits && *p == '.') return static_cast<uint32_t>(p + 1 - locateText_);
+    return position;
+  }
+
+  // One source character against what the clipping expects at a position. The reader composes
+  // what it can, so the clipping's "e acute" may be "e" and a combining mark in the source.
+  bool advance(Attempt& attempt, const uint32_t cp) const {
+    uint32_t next = 0;
+    uint32_t wanted = clipCodepointAt(attempt.position, next);
+    for (int tries = 0; tries < 2; tries++) {
+      if (wanted == cp) {
+        attempt.position = next;
+        attempt.afterBase = false;
+        return true;
+      }
+      if (wanted != 0 && utf8DecomposedBase(wanted) == cp) {
+        attempt.position = next;
+        attempt.afterBase = true;
+        return true;
+      }
+      const uint32_t skipped = afterListMarker(attempt.position);
+      if (skipped == attempt.position) return false;
+      attempt.position = skipped;
+      wanted = clipCodepointAt(attempt.position, next);
+    }
+    return false;
+  }
+
+  bool clipFinished(const uint32_t position) const {
+    uint32_t after = 0;
+    return clipCodepointAt(position, after) == 0 || clipCodepointAt(afterListMarker(position), after) == 0;
+  }
+
+  uint32_t distanceToExpected(const uint32_t word) const {
+    return word > expectedWord_ ? word - expectedWord_ : expectedWord_ - word;
+  }
+
+  void startAttempt(const uint32_t position, const uint32_t cp, const uint32_t at) {
+    Attempt attempt{position, at, at, wordsSeen_ > 0 ? wordsSeen_ - 1 : 0, false};
+    if (!advance(attempt, cp)) return;
+    if (clipFinished(attempt.position)) {
+      finishAttempt(attempt);
+      return;
+    }
+    if (attemptCount_ < kMaxAttempts) {
+      attempts_[attemptCount_++] = attempt;
+      return;
+    }
+    // Text that repeats can fill the slots. Keep the ones nearest where it should start.
+    int farthest = 0;
+    for (int i = 1; i < attemptCount_; i++) {
+      if (distanceToExpected(attempts_[i].startWord) > distanceToExpected(attempts_[farthest].startWord)) farthest = i;
+    }
+    if (distanceToExpected(attempt.startWord) < distanceToExpected(attempts_[farthest].startWord)) {
+      attempts_[farthest] = attempt;
+    }
+  }
+
+  void feedLocate(const uint32_t cp, const uint32_t at) {
+    const bool mark = cp >= 0x300 && cp <= 0x36F;
+    // A mark on the clipping's last character belongs to the range.
+    if (mark && locateMatches_ > 0 && at == locateBestLast_ + 1) locateBestLast_ = at;
+    int kept = 0;
+    for (int i = 0; i < attemptCount_; i++) {
+      Attempt attempt = attempts_[i];
+      if (mark && attempt.afterBase) {
+        attempt.last = at;
+        attempts_[kept++] = attempt;
+        continue;
+      }
+      if (!advance(attempt, cp)) continue;
+      attempt.last = at;
+      if (clipFinished(attempt.position)) {
+        finishAttempt(attempt);
+        continue;
+      }
+      attempts_[kept++] = attempt;
+    }
+    attemptCount_ = static_cast<uint8_t>(kept);
+    startAttempt(0, cp, at);
+    if (locateAnchored_) {
+      const uint32_t limit = expectedWord_ + kLocateSlackWords;
+      // Past where it could start, with nothing under way: the answer will not change.
+      if (wordsSeen_ > limit && attemptCount_ == 0) {
+        tracking_ = false;
+        stop();
+      }
+    } else if (locateMatches_ > 1) {
+      tracking_ = false;
+      stop();
+    }
+  }
+
+  void finishAttempt(const Attempt& attempt) {
+    const uint32_t distance = distanceToExpected(attempt.startWord);
+    if (locateMatches_ == 0 || distance < locateBestDistance_) {
+      locateBestDistance_ = distance;
+      locateBestFirst_ = attempt.first;
+      locateBestLast_ = attempt.last;
+    }
+    locateMatches_++;
+  }
+
+  void collectChar(const uint32_t cp, const int stored, const Frame& frame) {
+    if (cp == 0xAD || stored == 0) return;  // ldomXRange::getRangeText() removes soft hyphens
+    const uint32_t mapped = (cp >= 0x80 && cp < 0xA0) ? kWindows1252[cp - 0x80] : cp;
+    if (isSpaceCp(mapped)) {
+      collectOut_->push_back(' ');
+      return;
+    }
+    if (!collectInChunk_ && frame.runLeading && frame.afterBlock) collectNewBlock_ = true;
+    collectInChunk_ = true;
+    if (collectNewBlock_ && !collectOut_->empty()) collectOut_->push_back('\n');
+    collectNewBlock_ = false;
+    char utf8[4];
+    int n = 0;
+    if (mapped < 0x80) {
+      utf8[n++] = static_cast<char>(mapped);
+    } else if (mapped < 0x800) {
+      utf8[n++] = static_cast<char>(0xC0 | (mapped >> 6));
+      utf8[n++] = static_cast<char>(0x80 | (mapped & 0x3F));
+    } else if (mapped < 0x10000) {
+      utf8[n++] = static_cast<char>(0xE0 | (mapped >> 12));
+      utf8[n++] = static_cast<char>(0x80 | ((mapped >> 6) & 0x3F));
+      utf8[n++] = static_cast<char>(0x80 | (mapped & 0x3F));
+    } else {
+      utf8[n++] = static_cast<char>(0xF0 | (mapped >> 18));
+      utf8[n++] = static_cast<char>(0x80 | ((mapped >> 12) & 0x3F));
+      utf8[n++] = static_cast<char>(0x80 | ((mapped >> 6) & 0x3F));
+      utf8[n++] = static_cast<char>(0x80 | (mapped & 0x3F));
+    }
+    collectOut_->append(utf8, n);
+  }
+
+  static bool hasToken(const char* value, const char* token) {
+    const size_t len = strlen(token);
+    for (const char* p = value; (p = strstr(p, token)) != nullptr; p += len) {
+      const bool startsWord = p == value || p[-1] == ' ';
+      const bool endsWord = p[len] == 0 || p[len] == ' ';
+      if (startsWord && endsWord) return true;
+    }
+    return false;
+  }
+
+  // The checks ChapterHtmlSlimParser makes before it skips an element.
+  static bool leftOutByReader(const XML_Char** atts) {
+    for (int i = 0; atts && atts[i]; i += 2) {
+      if (strcmp(atts[i], "hidden") == 0) return true;
+      if (strcmp(atts[i], "role") == 0 && hasToken(atts[i + 1], "doc-pagebreak")) return true;
+      if (strcmp(atts[i], "epub:type") == 0 && hasToken(atts[i + 1], "pagebreak")) return true;
+    }
+    return false;
+  }
+
   // ---- element events ----------------------------------------------------------------------
   void onStart(const XML_Char* rawName, const XML_Char** atts) {
     if (excludedNesting_ > 0 || isVisibleOffsetExcludedTag(rawName)) excludedNesting_++;
@@ -467,6 +694,13 @@ class CreWalker final : public Print {
     bool pre;
     styleOf(name, nameLen, atts, parent.pre, display, pre);
     applyForcedDisplay(name, nameLen, display);
+    if (mode_ == Mode::CollectText) {
+      const bool isBr = nameLen == 2 && name[0] == 'b' && name[1] == 'r';
+      if (!parent.hidden && (isBr || display == Display::Block ||
+                             (display == Display::Inline && parent.runLeading && parent.afterBlock))) {
+        collectNewBlock_ = true;
+      }
+    }
     if (!parent.hidden) applyChildToParent(parent, display);
     parent.hasChild = true;
     parent.kids++;
@@ -498,6 +732,10 @@ class CreWalker final : public Print {
     }
     frame.stripNewline = (nameLen == 3 && strcmp(name, "pre") == 0) || (nameLen == 8 && strcmp(name, "textarea") == 0);
     frame.runLeading = true;
+    frame.inTable = parent.inTable || (nameLen == 5 && strcmp(name, "table") == 0);
+    // Text the reader leaves out and crengine does not: never in a clipping, always in its range.
+    frame.absentFromClip = parent.absentFromClip || (parent.inTable && nameLen == 5 && strcmp(name, "table") == 0) ||
+                           leftOutByReader(atts);
 
     noteLaterSibling(hash);
     if (found_) return;
@@ -748,6 +986,7 @@ class CreWalker final : public Print {
 
   void openChunk() {
     chunkOpen_ = true;
+    collectInChunk_ = false;
     chunkHasContent_ = false;
     chunkStored_ = 0;
     chunkRaw_ = 0;
@@ -872,6 +1111,29 @@ class CreWalker final : public Print {
     const bool excluded = excludedNesting_ > 0;
     const Frame& frame = frames_[depth_];
     const bool content = stored > 0 && !isSpaceCp(cp);
+
+    if (mode_ == Mode::LocateText) {
+      if (at >= targetOffset_ && !excluded && stored > 0 && !frame.hidden && !frame.absentFromClip && !frame.opaque) {
+        if (ignoredInClip(cp)) {
+          inWord_ = false;
+        } else {
+          if (!inWord_) wordsSeen_++;
+          inWord_ = true;
+          feedLocate(cp, at);
+        }
+      }
+      return;
+    }
+    if (mode_ == Mode::CollectText) {
+      if (at > collectLast_) {
+        tracking_ = false;
+        stop();
+      } else if (at >= targetOffset_ && !frame.hidden && !excluded) {
+        // crengine does not read ruby annotations or a <title> in a body back either.
+        collectChar(cp, stored, frame);
+      }
+      return;
+    }
 
     if (!excluded && content && !frame.opaque && depth_ >= minDepth_) {
       lastEligible_ = at;
@@ -1055,6 +1317,21 @@ class CreWalker final : public Print {
   int snapTextOffset_ = 0;
   int snapTextTotal_ = 0;
 
+  const char* locateText_ = "";
+  std::string* collectOut_ = nullptr;
+  uint32_t collectLast_ = 0;
+  uint32_t locateBestFirst_ = 0;
+  uint32_t locateBestLast_ = 0;
+  uint32_t locateBestDistance_ = 0;
+  uint32_t locateMatches_ = 0;
+  uint32_t wordsSeen_ = 0;
+  uint16_t expectedWord_ = 0;
+  uint8_t attemptCount_ = 0;
+  bool inWord_ = false;
+  bool locateAnchored_ = false;
+  bool collectNewBlock_ = false;
+  bool collectInChunk_ = false;
+  Attempt attempts_[kMaxAttempts];
   CssMemo cssMemo_[kCssMemoSize];
   Frame frames_[kMaxDepth];
   Counter counters_[kMaxCounters];
@@ -1133,6 +1410,38 @@ std::string emitElement(const std::shared_ptr<Epub>& epub, const int spineIndex,
   return walker->xpointer();
 }
 }  // namespace
+
+bool ChapterXPathResolver::locateText(const std::shared_ptr<Epub>& epub, const int spineIndex, const char* text,
+                                      const uint32_t anchorOffset, const uint16_t expectedWord, TextRange& out) {
+  if (!validSpine(epub, spineIndex) || !text || !*text) return false;
+  ScopedCss css(epub);
+  uint32_t first = 0;
+  uint32_t last = 0;
+  {
+    auto walker = makeWalker(CreWalker::Mode::LocateText, epub, spineIndex);
+    if (!walker) return false;
+    walker->setLocate(text, anchorOffset, expectedWord);
+    walker->setCssParser(css.get());
+    if (!stream(epub, spineIndex, *walker) || !walker->located()) return false;
+    first = walker->locatedFirst();
+    last = walker->locatedLast();
+  }
+  out.pos0 = emitAtOffset(epub, spineIndex, first, 0);
+  out.pos1 = emitAtOffset(epub, spineIndex, last, 0);
+  if (out.pos0.empty() || out.pos1.empty()) return false;
+  // The character itself is what emit names; a range ends just past it. A text node's end is
+  // an offset crengine takes.
+  const size_t dot = out.pos1.rfind('.');
+  if (dot == std::string::npos) return false;
+  out.pos1 = out.pos1.substr(0, dot + 1) + std::to_string(strtoul(out.pos1.c_str() + dot + 1, nullptr, 10) + 1);
+
+  out.text.clear();
+  auto walker = makeWalker(CreWalker::Mode::CollectText, epub, spineIndex);
+  if (!walker) return false;
+  walker->setCollect(first, last, &out.text);
+  walker->setCssParser(css.get());
+  return stream(epub, spineIndex, *walker) && !out.text.empty();
+}
 
 bool ChapterXPathResolver::resolve(const std::shared_ptr<Epub>& epub, const int spineIndex, const std::string& xpointer,
                                    Resolved& out) {

@@ -22,11 +22,16 @@ bool computeVisualWordOrder(const std::vector<std::string>& words, bool, std::ve
 }
 }  // namespace BidiUtils
 
+// test/borges_xpointer reads each line's words through this.
+void (*parserTextBlockHook)(const TextBlock*, const std::vector<std::string>&, const std::vector<int16_t>&,
+                            const std::vector<uint8_t>&) = nullptr;
+
 TextBlock::TextBlock(const std::vector<std::string>& words, const std::vector<int16_t>& wordXpos,
                      const std::vector<EpdFontFamily::Style>&, const std::vector<uint8_t>&,
-                     const std::vector<uint16_t>&, const std::vector<uint16_t>&, const std::vector<uint8_t>&,
+                     const std::vector<uint16_t>&, const std::vector<uint16_t>&, const std::vector<uint8_t>& wordFlags,
                      const std::vector<bool>&, const BlockStyle& blockStyle, std::vector<std::string> rubyTexts)
     : blockStyle(blockStyle), numWords(static_cast<uint16_t>(words.size())), rubyTexts(std::move(rubyTexts)) {
+  if (parserTextBlockHook) parserTextBlockHook(this, words, wordXpos, wordFlags);
   if (wordXpos.empty()) return;
   arena = std::make_unique<uint8_t[]>(wordXpos.size() * sizeof(int16_t));
   auto* positions = reinterpret_cast<int16_t*>(arena.get());

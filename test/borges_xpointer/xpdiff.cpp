@@ -271,6 +271,146 @@ std::string readFile(const std::string& path) {
   return ss.str();
 }
 
+// What the plugin compares: comparableText() in borges.koplugin/annotationadapter.lua.
+std::string comparable(const std::string& in) {
+  std::string out;
+  bool space = false;
+  for (size_t i = 0; i < in.size(); i++) {
+    const auto c = static_cast<unsigned char>(in[i]);
+    if (c == 0xC2 && i + 1 < in.size() && static_cast<unsigned char>(in[i + 1]) == 0xA0) {
+      space = true;
+      i++;
+      continue;
+    }
+    if (c == 0xC2 && i + 1 < in.size() && static_cast<unsigned char>(in[i + 1]) == 0xAD) {
+      i++;
+      continue;
+    }
+    if (c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '\f' || c == '\v') {
+      space = true;
+      continue;
+    }
+    if (space && !out.empty()) out += ' ';
+    space = false;
+    out += static_cast<char>(c);
+  }
+  return out;
+}
+
+std::string noSpaces(const std::string& in) {
+  std::string out;
+  const auto* p = reinterpret_cast<const unsigned char*>(in.c_str());
+  while (*p) {
+    const auto* start = p;
+    const uint32_t cp = utf8NextCodepoint(&p);
+    const bool ignored = isSpace(cp) || cp == 0xA0 || cp == 0xAD || cp == 0xFEFF || (cp >= 0x2000 && cp <= 0x200B) ||
+                         cp == 0x202F || cp == 0x205F || cp == 0x3000;
+    if (!ignored) out.append(reinterpret_cast<const char*>(start), p - start);
+  }
+  return out;
+}
+
+// The reader adds a bullet or "12." to a list item, and these are in the clipping alone.
+bool sameButForListMarkers(const std::string& read, const std::string& clip) {
+  size_t r = 0, c = 0;
+  while (c < clip.size()) {
+    if (r < read.size() && read[r] == clip[c]) {
+      r++;
+      c++;
+      continue;
+    }
+    if (clip.compare(c, 3, "\xE2\x80\xA2") == 0) {
+      c += 3;
+      continue;
+    }
+    size_t d = c;
+    while (d < clip.size() && clip[d] >= '0' && clip[d] <= '9') d++;
+    if (d > c && d < clip.size() && clip[d] == '.') {
+      c = d + 1;
+      continue;
+    }
+    // Backing up over digits both sides began with: "1.2" against a marker "12."
+    return false;
+  }
+  return r == read.size();
+}
+
+// Never the text: its length, and what kind of character the first difference is.
+std::string kindOf(const std::string& s, size_t i) {
+  if (i >= s.size()) return "end";
+  const auto c = static_cast<unsigned char>(s[i]);
+  if (c == ' ') return "space";
+  if (c >= 0x80) return "nonascii";
+  if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return "letter";
+  if (c >= '0' && c <= '9') return "digit";
+  return std::string("punct") + static_cast<char>(c);
+}
+
+std::string firstDifference(const std::string& a, const std::string& b) {
+  size_t i = 0;
+  while (i < a.size() && i < b.size() && a[i] == b[i]) i++;
+  return std::to_string(i) + "/" + std::to_string(a.size()) + "," + std::to_string(b.size()) + " " + kindOf(a, i) +
+         "|" + kindOf(b, i);
+}
+
+std::string clipShape(const std::string& text) {
+  std::string shape;
+  if (text.find("[Image") != std::string::npos) shape += "image-standin ";
+  if (text.find("\xC2\xAD") != std::string::npos) shape += "shy ";
+  if (text.find("\xC2\xA0") != std::string::npos) shape += "nbsp ";
+  if (text.find('\n') != std::string::npos) shape += "paragraphs ";
+  return shape.empty() ? "plain" : shape;
+}
+
+// Why a clipping was not found, in structure only: how far it matches the chapter from anywhere,
+// the kind of character on each side where it stops, and where that match is from the anchor.
+std::string whereItStops(const std::string& clip, const std::vector<FwChar>& content, const uint32_t anchor,
+                         const uint16_t word) {
+  const std::vector<uint32_t> wanted = decode(noSpaces(clip));
+  size_t best = 0, bestAt = 0;
+  for (size_t i = 0; i < content.size(); i++) {
+    size_t k = 0;
+    while (k < wanted.size() && i + k < content.size() && content[i + k].cp == wanted[k]) k++;
+    if (k > best) {
+      best = k;
+      bestAt = i;
+    }
+  }
+  const auto kind = [](const uint32_t cp) -> std::string {
+    if (cp == 0) return "end";
+    if (cp < 0x80) {
+      if ((cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z')) return "letter";
+      if (cp >= '0' && cp <= '9') return "digit";
+      return std::string("'") + static_cast<char>(cp) + "'";
+    }
+    char hex[16];
+    snprintf(hex, sizeof(hex), "U+%04X", cp);
+    return hex;
+  };
+  const uint32_t clipCp = best < wanted.size() ? wanted[best] : 0;
+  const uint32_t srcCp = bestAt + best < content.size() ? content[bestAt + best].cp : 0;
+  const long fromAnchor = best > 0 ? static_cast<long>(content[bestAt].visible) - static_cast<long>(anchor) : 0;
+  std::string shape;
+  if (getenv("XPDIFF_SHOW_SHAPE")) {
+    // Letters and digits masked: what is left is structure, safe for a book under copyright.
+    const auto mask = [](const uint32_t cp) -> char {
+      if (cp >= 'a' && cp <= 'z') return 'x';
+      if (cp >= 'A' && cp <= 'Z') return 'X';
+      if (cp >= '0' && cp <= '9') return '9';
+      if (cp < 0x80) return static_cast<char>(cp);
+      if (cp == 0xA0) return '_';
+      return cp >= 0x2000 && cp < 0x2070 ? '~' : 'u';
+    };
+    shape = " clipShape=";
+    for (size_t i = best > 12 ? best - 12 : 0; i < wanted.size() && i < best + 24; i++) shape += mask(wanted[i]);
+    shape += " srcShape=";
+    for (size_t i = bestAt + (best > 12 ? best - 12 : 0); i < content.size() && i < bestAt + best + 24; i++)
+      shape += mask(content[i].cp);
+  }
+  return "matched=" + std::to_string(best) + "/" + std::to_string(wanted.size()) + " clip=" + kind(clipCp) +
+         " src=" + kind(srcCp) + " fromAnchor=" + std::to_string(fromAnchor) + " word=" + std::to_string(word) + shape;
+}
+
 __attribute__((noinline)) size_t paintStack() {
   constexpr size_t kSize = 96 * 1024;
   volatile unsigned char* p = static_cast<volatile unsigned char*>(__builtin_alloca(kSize));
@@ -385,6 +525,9 @@ int main(int argc, char** argv) {
     unmatchedFw += alignments[static_cast<int>(s + 1)].unmatchedFw;
   }
 
+  FILE* dumpPages = nullptr;
+  if (getenv("XPDIFF_DUMP_PAGES")) dumpPages = fopen((work + "/" + name + ".dump").c_str(), "wb");
+
   // ---- KOReader to device ----------------------------------------------------------------------
   Stats k2d;
   std::string examples;
@@ -408,16 +551,18 @@ int main(int argc, char** argv) {
     const int want = alignments[frag].oracleToFw[std::min<int>(oracleOrdinal, alignments[frag].oracleToFw.size() - 1)];
     if (!got.hasVisibleTextOffset || got.spineIndex != frag - 1) {
       k2d.notFound++;
-      if (shown++ < 40) examples += "  k2d not-found " + kind + " " + xp + "\n";
+      if (shown++ < 400) examples += "  k2d not-found " + kind + " " + xp + "\n";
       return;
     }
     const int have = fwIndexAt(f, got.visibleTextOffset);
     if (have == want) {
       k2d.exact++;
+      // For checking a real layout in the simulator: where a KOReader page start lands.
+      if (kind == "page" && dumpPages) fprintf(dumpPages, "%d\t%u\n", frag, got.visibleTextOffset);
     } else {
       k2d.wrong++;
       k2d.maxDelta = std::max(k2d.maxDelta, std::abs(have - want));
-      if (shown++ < 40) {
+      if (shown++ < 400) {
         examples +=
             "  k2d wrong " + kind + " " + xp + " fw=" + std::to_string(have) + " want=" + std::to_string(want) + "\n";
       }
@@ -464,6 +609,8 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (dumpPages) fclose(dumpPages);
+
   // ---- Device to KOReader ----------------------------------------------------------------------
   struct Emitted {
     int frag;
@@ -475,6 +622,13 @@ int main(int argc, char** argv) {
   Stats d2k;
   int roundTripBad = 0, roundTripTotal = 0;
   int parserSpines = 0, parserFailed = 0, parserDelta = 0, pagesTotal = 0, pagesBad = 0;
+  struct ClipSample {
+    int spine;
+    uint32_t anchor;
+    uint16_t word;
+    std::string text;
+  };
+  std::vector<ClipSample> clips;
   std::string d2kIn = work + "/" + name + ".d2k";
   std::string d2kOut = work + "/" + name + ".d2k.out";
   {
@@ -495,7 +649,7 @@ int main(int argc, char** argv) {
         d2k.total++;
         if (xp.empty()) {
           d2k.notFound++;
-          if (shown++ < 40)
+          if (shown++ < 400)
             examples += "  d2k empty spine=" + std::to_string(s) + " visible=" + std::to_string(f[i].visible) + "\n";
           continue;
         }
@@ -507,7 +661,7 @@ int main(int argc, char** argv) {
         if (!ChapterXPathResolver::resolve(epub, static_cast<int>(s), xp, r) ||
             fwIndexAt(f, r.visibleOffset) != static_cast<int>(i)) {
           roundTripBad++;
-          if (shown++ < 40) examples += "  roundtrip " + xp + "\n";
+          if (shown++ < 400) examples += "  roundtrip " + xp + "\n";
         }
       }
       // Where the real parser starts each page, the path a saved position takes: the offset the
@@ -536,13 +690,16 @@ int main(int argc, char** argv) {
               if (fields[2] != "1") parserFailed++;
               if (strtoul(fields[1].c_str(), nullptr, 10) != scans[s]->visible) {
                 parserDelta++;
-                if (shown++ < 40) {
+                if (shown++ < 400) {
                   examples += "  count spine=" + std::to_string(s) + " parser=" + fields[1] +
                               " scan=" + std::to_string(scans[s]->visible) + "\n";
                 }
               }
             } else if (fields[0] == "P") {
               lut.push_back(strtoul(fields[2].c_str(), nullptr, 10));
+            } else if (fields[0] == "C" && fields.size() > 3) {
+              clips.push_back({static_cast<int>(s), static_cast<uint32_t>(strtoul(fields[1].c_str(), nullptr, 10)),
+                               static_cast<uint16_t>(atoi(fields[2].c_str())), unescape(fields[3])});
             }
           }
           const auto pageOf = [&](const uint32_t v) {
@@ -566,7 +723,7 @@ int main(int argc, char** argv) {
             if (xp.empty() || !ChapterXPathResolver::resolve(epub, static_cast<int>(s), xp, r) ||
                 pageOf(r.visibleOffset) != page) {
               pagesBad++;
-              if (shown++ < 40) examples += "  page round trip spine=" + std::to_string(s) + " " + xp + "\n";
+              if (shown++ < 400) examples += "  page round trip spine=" + std::to_string(s) + " " + xp + "\n";
               continue;
             }
             emitted.push_back({static_cast<int>(s + 1), index, lut[page], xp});
@@ -605,12 +762,12 @@ int main(int argc, char** argv) {
       const Emitted& e = emitted[k++];
       if (f.size() < 3 || f[2] != "1") {
         d2k.wrong++;
-        if (shown++ < 40) examples += "  d2k rejected " + e.xp + "\n";
+        if (shown++ < 400) examples += "  d2k rejected " + e.xp + "\n";
         continue;
       }
       if (f[3] == e.xp)
         d2k.canonical++;
-      else if (shown++ < 40)
+      else if (shown++ < 400)
         examples += "  d2k non-canonical " + e.xp + " vs " + f[3] + "\n";
       const int frag = atoi(f[7].c_str());
       const int ordinal = atoi(f[8].c_str());
@@ -627,12 +784,89 @@ int main(int argc, char** argv) {
       } else {
         d2k.wrong++;
         d2k.maxDelta = std::max(d2k.maxDelta, std::abs(ordinal - want));
-        if (shown++ < 40) {
+        if (shown++ < 400) {
           examples += "  d2k wrong " + e.xp + " frag=" + std::to_string(frag) + " ordinal=" + std::to_string(ordinal) +
                       " want=" + std::to_string(want) + "\n";
         }
       }
     }
+  }
+
+  // ---- Clippings ---------------------------------------------------------------------------------
+  // A selection made by the real parser and builder, located, and read back the way KOReader
+  // reads the range. Only shapes and counts are ever printed: this text is the book's.
+  int clipTotal = 0, clipRefused = 0, clipRejected = 0, clipExact = 0, clipOtherText = 0, clipSentAsIs = 0;
+  size_t clipPeakHeap = 0;
+  if (!clips.empty()) {
+    struct Located {
+      size_t clip;
+      std::string text;
+    };
+    std::vector<Located> located;
+    const std::string rangesIn = work + "/" + name + ".ranges";
+    const std::string rangesOut = rangesIn + ".out";
+    {
+      std::ofstream out(rangesIn, std::ios::binary);
+      for (size_t i = 0; i < clips.size(); i++) {
+        clipTotal++;
+        ChapterXPathResolver::TextRange range;
+        const size_t liveBefore = g_live;
+        g_peak = g_live;
+        const bool ok = ChapterXPathResolver::locateText(epub, clips[i].spine, clips[i].text.c_str(), clips[i].anchor,
+                                                         clips[i].word, range);
+        clipPeakHeap = std::max(clipPeakHeap, g_peak - liveBefore);
+        if (!ok) {
+          clipRefused++;
+          if (shown++ < 400) {
+            examples += "  clip refused spine=" + std::to_string(clips[i].spine) +
+                        " len=" + std::to_string(clips[i].text.size()) + " class=" + clipShape(clips[i].text) + " " +
+                        whereItStops(clips[i].text, scans[clips[i].spine]->content, clips[i].anchor, clips[i].word) +
+                        (getenv("XPDIFF_SHOW_TEXT") ? " [" + clips[i].text + "]" : std::string()) + "\n";
+          }
+          continue;
+        }
+        out << range.pos0 << "\t" << range.pos1 << "\n";
+        located.push_back({i, range.text});
+      }
+    }
+    cmd = "\"\"" + oracle + "\" \"" + dir + "/book.epub\"" + extra + " --ranges \"" + rangesIn + "\" --out \"" +
+          rangesOut + "\"\"";
+    if (!located.empty() && system(cmd.c_str()) == 0) {
+      std::ifstream in(rangesOut, std::ios::binary);
+      std::string line;
+      size_t k = 0;
+      while (std::getline(in, line) && k < located.size()) {
+        const auto f = split(line);
+        const Located& l = located[k++];
+        const std::string& clip = clips[l.clip].text;
+        if (f.size() < 3 || f[1] != "1") {
+          clipRejected++;
+          continue;
+        }
+        const std::string crengine = unescape(f[2]);
+        // comparableText() in borges.koplugin/annotationadapter.lua decides this on the device.
+        const std::string read = comparable(crengine);
+        if (read == comparable(l.text))
+          clipExact++;
+        else if (shown++ < 400)
+          examples += "  clip spacing differs spine=" + std::to_string(clips[l.clip].spine) +
+                      " at=" + firstDifference(read, comparable(l.text)) +
+                      (getenv("XPDIFF_SHOW_TEXT") ? " [" + read + "] vs [" + comparable(l.text) + "]" : std::string()) +
+                      "\n";
+        if (read == comparable(clip)) clipSentAsIs++;
+        // And what is sent is the clipping's text, not something else nearby.
+        if (!sameButForListMarkers(noSpaces(utf8ComposeNfc(read)), noSpaces(clip))) {
+          clipOtherText++;
+          if (shown++ < 400)
+            examples += "  clip other text spine=" + std::to_string(clips[l.clip].spine) +
+                        " len=" + std::to_string(clip.size()) + "/" + std::to_string(crengine.size()) +
+                        " at=" + firstDifference(noSpaces(crengine), noSpaces(clip)) +
+                        (getenv("XPDIFF_SHOW_TEXT") ? " [" + crengine + "] vs [" + clip + "]" : std::string()) + "\n";
+        }
+      }
+    }
+    printf("  clips total=%d exact=%d refused=%d rejected=%d otherText=%d matchedWithoutRewriting=%d peakHeap=%zu\n",
+           clipTotal, clipExact, clipRefused, clipRejected, clipOtherText, clipSentAsIs, clipPeakHeap);
   }
 
   // book  k2d: total exact notfound wrong maxdelta  d2k: total exact empty wrong canonical maxdelta  rt: total bad

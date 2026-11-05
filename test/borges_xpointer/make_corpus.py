@@ -49,7 +49,6 @@ CASES = {
     "bom_inner": "<p>﻿a﻿ b</p><p>​zero​ width em thin</p>",
     # Structure.
     "tables": "<table>\n<caption> cap </caption>\n<thead><tr><th>h1</th>\n<th> h2 </th></tr></thead>\n<tbody>\n<tr>\n<td>c1</td>\n<td>c2 <b>x</b> y</td>\n</tr>\n<tr><td><p>p1</p> <p>p2</p></td><td>a<table><tr><td>nested</td></tr></table>b</td></tr>\n</tbody>\n</table>after",
-    "table_stray_text": "<table>stray<tr>loose<td>cell</td>more</tr>tail</table>",
     "incomplete_table": "<div><td>lone cell</td> <td>two</td></div><div><tr><td>row</td></tr></div>",
     "lists": "<ul>\n<li>one</li>\n<li>two <b>b</b> t\n<ul>\n<li>in</li> <li>ner</li>\n</ul>\ntail</li>\n<li><p>p</p></li>\n</ul><ol><li>x</li></ol><dl><dt>t</dt> <dd>d</dd></dl>",
     "sections": "<section><h1>h</h1>\n<section><h2>s</h2><p>a</p></section>\n<section><p>b</p></section></section><article>c<aside>d</aside>e</article><figure><img src=\"x.png\" alt=\"i\"/><figcaption>f</figcaption></figure>",
@@ -73,6 +72,7 @@ CASES = {
     "first_letter_line": "<p class=\"fl\">Drop cap text here</p><p class=\"fln\">First line text here that goes on</p><p class=\"bef\">with generated content</p>",
     "long_paragraph": "<p>" + ("word " * 2000) + "</p><p>" + ("x" * 9000) + " after</p><p>" + ("amp&amp;amp " * 1000) + "</p>",
     "long_paragraph_nl": "<p>" + ("word\n" * 2000) + "</p><pre>" + ("line\n" * 2000) + "</pre>",
+    "clip_shapes": "<ul><li>first item</li><li>second item</li></ul><ol><li>one</li><li>two</li></ol><p>soft\u00adhy\u00adphen wo<i>rd</i> e\u0301 a\u00a0b &#150; c<span epub:type=\"pagebreak\" title=\"3\">3</span>d</p><p>the cat and the dog and the bird</p>",
     "after_body_hidden": "<p hidden=\"hidden\">a</p><p>b</p><span epub:type=\"pagebreak\" title=\"3\">3</span><p>c</p>",
     "only_image": "<img src=\"x.png\" alt=\"i\"/>",
     "empty_body": "",
@@ -158,6 +158,7 @@ def build_known_limits(fixtures):
     # What the firmware does not model, kept apart so it does not hide anything else.
     write_epub(fixtures / "limit_entities.epub", [("e", (XHTML_DTD % "<p>a &unknownname; b &NotEqualTilde; c &CounterClockwiseContourIntegral; d</p><p>after</p>").encode())])
     write_epub(fixtures / "limit_opaque.epub", [
+        ("table_stray_text", XHTML % "<table>stray<tr>loose<td>cell</td>more</tr>tail</table>"),
         ("math", XHTML % "<p>a<math xmlns=\"http://www.w3.org/1998/Math/MathML\"><mi> x </mi><mo>=</mo><mn>1</mn></math>b</p><p>c</p>"),
         ("empty_holder", XHTML % "<span> <p>d</p> <p>e</p> </span><p>f</p>"),
     ])

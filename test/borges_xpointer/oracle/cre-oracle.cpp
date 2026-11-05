@@ -205,7 +205,7 @@ int main(int argc, char** argv) {
   int height = 800;
   std::string cssPath = "D:/CrossInkBorges/crossink-tools/crengine/src/cr3gui/data/epub.css";
   std::string fontPath = "C:/Windows/Fonts/arial.ttf";
-  std::string enumPath, resolvePath, outPath;
+  std::string enumPath, resolvePath, rangesPath, outPath;
   for (int i = 2; i + 1 < argc; i += 2) {
     const std::string a = argv[i];
     const char* v = argv[i + 1];
@@ -225,6 +225,8 @@ int main(int argc, char** argv) {
       enumPath = v;
     else if (a == "--resolve")
       resolvePath = v;
+    else if (a == "--ranges")
+      rangesPath = v;
     else if (a == "--out")
       outPath = v;
     else {
@@ -328,6 +330,38 @@ int main(int argc, char** argv) {
     }
     fclose(in);
     if (out != stdout) fclose(out);
+  }
+
+  // As koreader-base cre.cpp getTextFromXPointers: "pos0<TAB>pos1" in, the text between them out.
+  if (!rangesPath.empty()) {
+    FILE* in = fopen(rangesPath.c_str(), "rb");
+    FILE* out = fopen(outPath.c_str(), "wb");
+    if (!in || !out) return 5;
+    std::string s;
+    int ch;
+    while ((ch = fgetc(in)) != EOF) {
+      if (ch != '\n') {
+        s.push_back(static_cast<char>(ch));
+        continue;
+      }
+      const size_t tab = s.find('\t');
+      ldomXPointer start = doc->createXPointer(Utf8ToUnicode(s.substr(0, tab).c_str()));
+      ldomXPointer end = doc->createXPointer(Utf8ToUnicode(s.substr(tab + 1).c_str()));
+      if (start.isNull() || end.isNull()) {
+        fprintf(out, "T\t0\t\n");
+      } else {
+        ldomXRange range(start, end);
+        range.sort();
+        if (range.getStart() == range.getEnd()) {
+          const int textLen = range.getStart().getNode()->getText().length();
+          if (range.getEnd().getOffset() < textLen - 1) range.getEnd().setOffset(range.getEnd().getOffset() + 1);
+        }
+        fprintf(out, "T\t1\t%s\n", escape(range.getRangeText('\n', 0)).c_str());
+      }
+      s.clear();
+    }
+    fclose(in);
+    fclose(out);
   }
   return 0;
 }
