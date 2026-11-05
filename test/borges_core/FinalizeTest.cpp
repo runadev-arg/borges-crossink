@@ -157,6 +157,26 @@ TEST_F(FinalizeTest, FullQueueKeepsTheProgressForTheNextFinalize) {
   EXPECT_FALSE(ledger.hasFinalized);
 }
 
+// Found by the contract tests: ok stayed true, and a caller trusting it dropped the session.
+TEST_F(FinalizeTest, FullQueueReportsASessionItCouldNotKeep) {
+  for (int i = 0; i < Outbox::kMaxLiveEvents; ++i) ASSERT_EQ(d.appendRaw("e"), Outbox::AppendResult::Ok);
+  SessionSummary good;
+  good.started = WallTime{kNow - 600, TimePrecision::Exact};
+  good.ended = WallTime{kNow, TimePrecision::Exact};
+  FinalizeInput input = d.finalizeInput(30);
+  input.paged = false;
+  input.session = &good;
+  const FinalizeResult result = d.engine->finalizeBook(input);
+  EXPECT_FALSE(result.sessionQueued);
+  EXPECT_FALSE(result.ok);
+
+  // A session the rules refuse is not a failure: there is nothing to try again.
+  SessionSummary tooShort = good;
+  tooShort.started.epochSec = kNow - 59;
+  input.session = &tooShort;
+  EXPECT_TRUE(d.engine->finalizeBook(input).ok);
+}
+
 TEST_F(FinalizeTest, SessionIsEmittedOnlyWithinTheRules) {
   SessionSummary good;
   good.started = WallTime{kNow - 600, TimePrecision::Exact};

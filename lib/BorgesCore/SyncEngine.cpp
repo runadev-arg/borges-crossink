@@ -1390,6 +1390,8 @@ FinalizeResult SyncEngine::finalizeBook(const FinalizeInput& input) {
         result.sessionQueued = appendEvent(EventKind::Session, input.book.id, body, w.size(), false);
         delete[] body;
       }
+      // Valid, and not in the queue: the caller has to keep it for the next finalize.
+      if (!result.sessionQueued) ok = false;
     }
   }
 
