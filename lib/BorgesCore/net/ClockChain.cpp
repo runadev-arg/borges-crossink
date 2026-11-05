@@ -1,5 +1,8 @@
 #include "net/ClockChain.h"
 
+#include <cstring>
+
+#include "Codec.h"
 #include "ResumePolicy.h"
 #include "net/HttpDate.h"
 
@@ -16,8 +19,32 @@ TimePrecision labelAtBoot(const ResetKind reset, const TimePrecision retained, c
   return clockpolicy::labelAfterBoot(false, rtcEpoch, storedAnchorEpoch);
 }
 
-TimePrecision labelFor(const ClockSource source) {
-  return source == ClockSource::Sntp ? TimePrecision::Exact : TimePrecision::Approximate;
+bool repairAcceptable(const int64_t epoch, const ClockTrust& trust) {
+  if (!epochInBounds(epoch) || epoch < trust.buildEpoch || epoch < trust.anchorEpoch) return false;
+  if (trust.allowLongGap) return true;
+  // A firmware newer than the anchor is itself proof that time has passed.
+  const int64_t known = trust.anchorEpoch > trust.buildEpoch ? trust.anchorEpoch : trust.buildEpoch;
+  return known == 0 || epoch - known <= kMaxClockGapSec;
+}
+
+int64_t epochOfBuildDate(const char* date) {
+  static constexpr char kMonths[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+  if (!date || strlen(date) != 11) return 0;
+  const char* found = nullptr;
+  for (const char* m = kMonths; *m && !found; m += 3) {
+    if (memcmp(m, date, 3) == 0) found = m;
+  }
+  if (!found) return 0;
+  const int month = static_cast<int>((found - kMonths) / 3) + 1;
+  const int day = (date[4] == ' ' ? 0 : date[4] - '0') * 10 + (date[5] - '0');
+  char text[21] = "0000-00-00T00:00:00Z";
+  memcpy(text, date + 7, 4);
+  text[5] = static_cast<char>('0' + month / 10);
+  text[6] = static_cast<char>('0' + month % 10);
+  text[8] = static_cast<char>('0' + day / 10);
+  text[9] = static_cast<char>('0' + day % 10);
+  int64_t epoch = 0;
+  return parseRfc3339(text, epoch) ? epoch : 0;
 }
 
 ClockPlan clockPlanFor(const uint32_t budgetMs) {
@@ -27,7 +54,7 @@ ClockPlan clockPlanFor(const uint32_t budgetMs) {
   return ClockPlan{{{ClockSource::HttpDate, 2500}, {ClockSource::HttpsDate, 5000}, {ClockSource::Sntp, kSntpMaxMs}}};
 }
 
-bool repairClock(IClock& clock, const uint32_t budgetMs, IClockSources& sources, ICancel& cancel) {
+bool repairClock(IClock& clock, const ClockTrust& trust, const uint32_t budgetMs, IClockSources& sources, ICancel& cancel) {
   const uint64_t deadline = clock.monotonicMs() + budgetMs;
   const ClockPlan plan = clockPlanFor(budgetMs);
   for (const ClockStep& step : plan.steps) {
@@ -37,22 +64,22 @@ bool repairClock(IClock& clock, const uint32_t budgetMs, IClockSources& sources,
     const uint32_t left = static_cast<uint32_t>(deadline - now);
     int64_t epoch = 0;
     if (!sources.read(step.source, left < step.maxMs ? left : step.maxMs, cancel, epoch)) continue;
-    if (!epochInBounds(epoch)) continue;
-    clock.setWall(epoch, labelFor(step.source));
+    if (!repairAcceptable(epoch, trust)) continue;
+    clock.setWall(epoch, TimePrecision::Approximate);
     return true;
   }
   return false;
 }
 
-bool ensureClock(IClock& clock, const int64_t anchorEpoch, const uint32_t budgetMs, IClockSources& sources,
+bool ensureClock(IClock& clock, const ClockTrust& trust, const uint32_t budgetMs, IClockSources& sources,
                  ICancel& cancel) {
   const WallTime now = clock.wallNow();
   if (now.precision != TimePrecision::Unknown && epochInBounds(now.epochSec)) return true;
-  if (epochInBounds(anchorEpoch)) {
-    clock.setWall(anchorEpoch, TimePrecision::Anchored);
+  if (epochInBounds(trust.anchorEpoch)) {
+    clock.setWall(trust.anchorEpoch, TimePrecision::Anchored);
     return true;
   }
-  return repairClock(clock, budgetMs, sources, cancel);
+  return repairClock(clock, trust, budgetMs, sources, cancel);
 }
 
 }  // namespace net

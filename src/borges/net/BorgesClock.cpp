@@ -184,6 +184,7 @@ bool sntp(const uint32_t budgetMs, ICancel& cancel, int64_t& epoch) {
   (void)epoch;
   return false;
 #else
+  const int64_t before = readSystemClock();
   esp_sntp_stop();
   sntp_set_sync_status(SNTP_SYNC_STATUS_RESET);
   esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
@@ -203,7 +204,12 @@ bool sntp(const uint32_t budgetMs, ICancel& cancel, int64_t& epoch) {
   // Stopped before the value is read and on every path: a late answer must not move a
   // clock that something else has since set.
   esp_sntp_stop();
-  if (synced) epoch = readSystemClock();
+  if (synced) {
+    // lwIP has already set the system clock. It goes back until repairClock() has judged
+    // the answer: this is the one source that does not wait to be believed.
+    epoch = readSystemClock();
+    writeSystemClock(before + static_cast<int64_t>((millis() - start) / 1000));
+  }
   return synced;
 #endif
 }
@@ -274,14 +280,22 @@ void BorgesClock::setWall(const int64_t epochSec, const TimePrecision precision)
   writeLabel(precision);
 }
 
+ClockTrust BorgesClock::trust() const {
+  ClockTrust t;
+  t.anchorEpoch = anchorEpoch_;
+  t.buildEpoch = epochOfBuildDate(__DATE__);
+  t.allowLongGap = allowLongGap_;
+  return t;
+}
+
 bool BorgesClock::ensure(const uint32_t budgetMs, ICancel& cancel) {
   Sources sources(dns_, host_);
-  return ensureClock(*this, anchorEpoch_, budgetMs, sources, cancel);
+  return ensureClock(*this, trust(), budgetMs, sources, cancel);
 }
 
 bool BorgesClock::repair(const uint32_t budgetMs, ICancel& cancel) {
   Sources sources(dns_, host_);
-  return repairClock(*this, budgetMs, sources, cancel);
+  return repairClock(*this, trust(), budgetMs, sources, cancel);
 }
 
 }  // namespace net

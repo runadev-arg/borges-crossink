@@ -32,9 +32,21 @@ TimePrecision labelAtBoot(ResetKind reset, TimePrecision retained, int64_t rtcEp
 
 enum class ClockSource : uint8_t { Sntp, HttpDate, HttpsDate };
 
-// SNTP is exact. A Date header read off an unverified connection only proves that
-// something answered, so it is approximate, until a verified server_time replaces it.
-TimePrecision labelFor(ClockSource source);
+// What a repaired time has to agree with. None of the sources is authenticated (SNTP and
+// the Date fallbacks can all be answered by whoever owns the network), so each one earns
+// only the approximate label, until a server_time from a verified connection replaces it,
+// and a value that would rewind the device is refused: the certificate check is what a
+// wrong clock would weaken.
+struct ClockTrust {
+  int64_t anchorEpoch = 0;     // Last server_time seen, 0 if never.
+  int64_t buildEpoch = 0;      // This firmware cannot run before it was built.
+  bool allowLongGap = false;   // A person asked: a reader left in a drawer for over a year recovers.
+};
+constexpr int64_t kMaxClockGapSec = 366 * 24 * 3600;
+bool repairAcceptable(int64_t epoch, const ClockTrust& trust);
+
+// "Nov  5 2026", as __DATE__ has it. 0 if it does not parse.
+int64_t epochOfBuildDate(const char* date);
 
 struct ClockStep {
   ClockSource source;
@@ -47,7 +59,8 @@ struct ClockPlan {
 // sdkconfig has CONFIG_LWIP_SNTP_STARTUP_DELAY=y with a 5000 ms maximum: lwIP waits a
 // random time up to 5 s before its first SNTP packet, on top of DNS. On port 80 the same
 // answer costs one TCP handshake and one round trip. So a short session asks the cheap
-// sources first and leaves SNTP for last; a roomy one asks SNTP first, for its label.
+// sources first and leaves SNTP for last; a roomy one can afford SNTP first, the one that
+// does not depend on our server being reachable.
 constexpr uint32_t kRoomyClockBudgetMs = 30000;
 constexpr uint32_t kSntpMaxMs = 10000;
 ClockPlan clockPlanFor(uint32_t budgetMs);
@@ -62,9 +75,10 @@ class IClockSources {
 
 // A clock already labelled and in bounds is left alone, then the anchor, then the
 // network. False when nothing answered.
-bool ensureClock(IClock& clock, int64_t anchorEpoch, uint32_t budgetMs, IClockSources& sources, ICancel& cancel);
-// The network only: the anchor is what just failed.
-bool repairClock(IClock& clock, uint32_t budgetMs, IClockSources& sources, ICancel& cancel);
+bool ensureClock(IClock& clock, const ClockTrust& trust, uint32_t budgetMs, IClockSources& sources, ICancel& cancel);
+// The network only: the anchor is what just failed. An answer repairAcceptable() refuses
+// counts as no answer.
+bool repairClock(IClock& clock, const ClockTrust& trust, uint32_t budgetMs, IClockSources& sources, ICancel& cancel);
 
 }  // namespace net
 }  // namespace borges

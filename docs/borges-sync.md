@@ -61,10 +61,13 @@ These are requirements. Each has a regression test named after it.
    materialized when the book is finalized (exit, sleep, session start) with `occurred_at` = last
    real page turn. A book that was not paged produces no event. At most one unattempted progress
    event per book: it may be replaced until its first attempt, then it is immutable.
-6. **Honest clock.** `time_precision`: `exact` only when the wall clock came from SNTP/HTTPS this
-   power cycle or a monotonic chain since then, `anchored` when derived from a stored server anchor
-   across deep sleep, `unknown` otherwise. Never label stale time `exact`. `settimeofday` is applied
-   from `server_time` only when the clock is invalid or worse than the anchor.
+6. **Honest clock.** `time_precision`: `exact` only when the wall clock came from a `server_time` on
+   a verified connection this power cycle or a monotonic chain since then, `anchored` when derived
+   from a stored server anchor across deep sleep, `approximate` from SNTP or an unverified Date
+   header (neither is authenticated), `unknown` otherwise. Never label stale time `exact`. A repaired
+   time must be at or past the anchor and the build date, and within a year of them unless a person
+   asked for the session. `settimeofday` is applied from `server_time` only when the clock is invalid
+   or worse than the anchor.
 7. **Trust is real.** VERIFY_PEER, a checked CA load and hostname verification, with several anchors
    (ISRG Root YE, X1, X2, GTS R1, GTS R4, plus a fallback chain), so a CA change at Cloudflare does
    not end the service. Build flags: `WOLFSSL_SP_384`, `WOLFSSL_ALT_CERT_CHAINS`, `WOLFSSL_SHA384`,

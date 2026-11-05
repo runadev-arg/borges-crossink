@@ -342,10 +342,56 @@ TEST(ClockRule6, ApproximateStaysApproximateAcrossARestart) {
   EXPECT_EQ(labelAtBoot(ResetKind::SoftwareRestart, TimePrecision::Approximate, kNow, 0), TimePrecision::Approximate);
 }
 
-TEST(ClockRule6, OnlySntpIsExact) {
-  EXPECT_EQ(labelFor(ClockSource::Sntp), TimePrecision::Exact);
-  EXPECT_EQ(labelFor(ClockSource::HttpDate), TimePrecision::Approximate);
-  EXPECT_EQ(labelFor(ClockSource::HttpsDate), TimePrecision::Approximate);
+TEST(ClockRule6, AnUnauthenticatedTimeIsOnlyEverApproximate) {
+  for (const ClockSource source : {ClockSource::Sntp, ClockSource::HttpDate, ClockSource::HttpsDate}) {
+    FakeClock clock;
+    clock.setWall(0, TimePrecision::Unknown);
+    FakeCancel cancel;
+    class One : public IClockSources {
+     public:
+      explicit One(ClockSource s) : s_(s) {}
+      bool read(const ClockSource source, uint32_t, ICancel&, int64_t& out) override {
+        if (source != s_) return false;
+        out = kNow;
+        return true;
+      }
+      ClockSource s_;
+    } sources(source);
+    ASSERT_TRUE(repairClock(clock, ClockTrust{}, 60000, sources, cancel));
+    EXPECT_EQ(clock.wallNow().precision, TimePrecision::Approximate);
+  }
+}
+
+TEST(ClockRule6, ARepairedTimeCannotRewindOrLeapTheClock) {
+  ClockTrust trust;
+  trust.anchorEpoch = kOldAnchor;
+  trust.buildEpoch = kOldAnchor - 86400;
+  EXPECT_TRUE(repairAcceptable(kNow, trust));
+  EXPECT_TRUE(repairAcceptable(kOldAnchor, trust));
+  EXPECT_FALSE(repairAcceptable(kOldAnchor - 1, trust)) << "behind the anchor";
+  EXPECT_TRUE(repairAcceptable(kOldAnchor + kMaxClockGapSec, trust));
+  EXPECT_FALSE(repairAcceptable(kOldAnchor + kMaxClockGapSec + 1, trust)) << "more than a year past it";
+  EXPECT_FALSE(repairAcceptable(1000000000, trust)) << "out of bounds";
+  ClockTrust noAnchor;
+  noAnchor.buildEpoch = kNow;
+  EXPECT_FALSE(repairAcceptable(kNow - 1, noAnchor)) << "before this firmware was built";
+  EXPECT_TRUE(repairAcceptable(kNow + 86400, noAnchor));
+}
+
+TEST(ClockRule6, APersonCanBringBackAReaderLeftInADrawer) {
+  ClockTrust trust;
+  trust.anchorEpoch = kOldAnchor;
+  trust.allowLongGap = true;
+  EXPECT_TRUE(repairAcceptable(kOldAnchor + 3 * kMaxClockGapSec, trust));
+  EXPECT_FALSE(repairAcceptable(kOldAnchor - 1, trust)) << "still never backwards";
+}
+
+TEST(ClockRule6, BuildDateParsesTheCompilersFormat) {
+  EXPECT_EQ(epochOfBuildDate("Nov  5 2026"), 1793836800);
+  EXPECT_EQ(epochOfBuildDate("Jan 01 2027"), 1798761600);
+  EXPECT_EQ(epochOfBuildDate("nonsense"), 0);
+  EXPECT_EQ(epochOfBuildDate(nullptr), 0);
+  EXPECT_GT(epochOfBuildDate(__DATE__), 0) << __DATE__;
 }
 
 namespace {
@@ -382,14 +428,16 @@ struct ClockFixture {
 TEST(ClockChain, AValidClockAsksNothing) {
   ClockFixture f;
   f.clock.setWall(kNow, TimePrecision::Anchored);
-  EXPECT_TRUE(ensureClock(f.clock, 0, 12000, f.sources, f.cancel));
+  EXPECT_TRUE(ensureClock(f.clock, ClockTrust{}, 12000, f.sources, f.cancel));
   EXPECT_TRUE(f.sources.asked.empty());
 }
 
 TEST(ClockChain, AnchorComesBeforeTheNetwork) {
   ClockFixture f;
   f.clock.setWall(0, TimePrecision::Unknown);
-  EXPECT_TRUE(ensureClock(f.clock, kOldAnchor, 12000, f.sources, f.cancel));
+  ClockTrust trust;
+  trust.anchorEpoch = kOldAnchor;
+  EXPECT_TRUE(ensureClock(f.clock, trust, 12000, f.sources, f.cancel));
   EXPECT_TRUE(f.sources.asked.empty());
   EXPECT_EQ(f.clock.wallNow().precision, TimePrecision::Anchored);
 }
@@ -398,22 +446,22 @@ TEST(ClockChain, ShortSessionAsksTheCheapSourcesFirst) {
   ClockFixture f;
   f.clock.setWall(0, TimePrecision::Unknown);
   f.sources.httpsOk = true;
-  EXPECT_TRUE(ensureClock(f.clock, 0, 12000, f.sources, f.cancel));
+  EXPECT_TRUE(ensureClock(f.clock, ClockTrust{}, 12000, f.sources, f.cancel));
   ASSERT_EQ(f.sources.asked.size(), 2u);
   EXPECT_EQ(f.sources.asked[0], ClockSource::HttpDate);
   EXPECT_EQ(f.sources.asked[1], ClockSource::HttpsDate);
   EXPECT_EQ(f.clock.wallNow().precision, TimePrecision::Approximate);
 }
 
-TEST(ClockChain, RoomySessionAsksSntpFirstForItsLabel) {
+TEST(ClockChain, RoomySessionAsksSntpFirst) {
   ClockFixture f;
   f.clock.setWall(0, TimePrecision::Unknown);
   f.sources.sntpOk = true;
-  EXPECT_TRUE(ensureClock(f.clock, 0, 120000, f.sources, f.cancel));
+  EXPECT_TRUE(ensureClock(f.clock, ClockTrust{}, 120000, f.sources, f.cancel));
   ASSERT_EQ(f.sources.asked.size(), 1u);
   EXPECT_EQ(f.sources.asked[0], ClockSource::Sntp);
   EXPECT_LE(f.sources.budgets[0], kSntpMaxMs);
-  EXPECT_EQ(f.clock.wallNow().precision, TimePrecision::Exact);
+  EXPECT_EQ(f.clock.wallNow().precision, TimePrecision::Approximate);
 }
 
 TEST(ClockChain, EveryStepStaysInsideTheBudget) {
@@ -421,7 +469,7 @@ TEST(ClockChain, EveryStepStaysInsideTheBudget) {
   f.clock.setWall(0, TimePrecision::Unknown);
   f.sources.costMs = 100000;
   const uint64_t start = f.clock.monotonicMs();
-  EXPECT_FALSE(ensureClock(f.clock, 0, 12000, f.sources, f.cancel));
+  EXPECT_FALSE(ensureClock(f.clock, ClockTrust{}, 12000, f.sources, f.cancel));
   EXPECT_LE(f.clock.monotonicMs() - start, 12000u);
 }
 
@@ -430,7 +478,7 @@ TEST(ClockChain, AnOutOfBoundsAnswerIsNotBelieved) {
   f.clock.setWall(0, TimePrecision::Unknown);
   f.sources.httpOk = true;
   f.sources.epoch = 1000000000;  // A portal stuck in 2001.
-  EXPECT_FALSE(ensureClock(f.clock, 0, 12000, f.sources, f.cancel));
+  EXPECT_FALSE(ensureClock(f.clock, ClockTrust{}, 12000, f.sources, f.cancel));
   EXPECT_EQ(f.clock.wallNow().precision, TimePrecision::Unknown);
 }
 
@@ -438,7 +486,9 @@ TEST(ClockChain, RepairIgnoresTheAnchorAndAValidClock) {
   ClockFixture f;
   f.clock.setWall(kOldAnchor, TimePrecision::Anchored);
   f.sources.httpOk = true;
-  EXPECT_TRUE(repairClock(f.clock, 5000, f.sources, f.cancel));
+  ClockTrust trust;
+  trust.anchorEpoch = kOldAnchor;
+  EXPECT_TRUE(repairClock(f.clock, trust, 5000, f.sources, f.cancel));
   EXPECT_EQ(f.sources.asked.size(), 1u);
   EXPECT_EQ(f.clock.wallNow().epochSec, kNow);
 }
@@ -447,7 +497,7 @@ TEST(ClockChain, CancelStopsTheChain) {
   ClockFixture f;
   f.clock.setWall(0, TimePrecision::Unknown);
   f.cancel.flag = true;
-  EXPECT_FALSE(ensureClock(f.clock, 0, 12000, f.sources, f.cancel));
+  EXPECT_FALSE(ensureClock(f.clock, ClockTrust{}, 12000, f.sources, f.cancel));
   EXPECT_TRUE(f.sources.asked.empty());
 }
 

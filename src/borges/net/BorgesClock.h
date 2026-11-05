@@ -6,6 +6,7 @@
 // across resets.
 
 #include "Ports.h"
+#include "net/ClockChain.h"
 
 namespace borges {
 namespace net {
@@ -34,7 +35,13 @@ class BorgesClock : public IClock {
   // Ignores the anchor and asks the network. BorgesHttp calls it, once per session.
   bool repair(uint32_t budgetMs, ICancel& cancel);
 
+  // A person asked for this session. Lets a repair move the clock more than a year past the
+  // anchor: without it, a reader left in a drawer that long could never reconnect.
+  void allowLongGap() { allowLongGap_ = true; }
+
  private:
+  ClockTrust trust() const;
+  bool allowLongGap_ = false;
   BorgesDns& dns_;
   const char* host_;
   int64_t anchorEpoch_ = 0;

@@ -593,6 +593,17 @@ TEST_F(SyncEngineTest, AHugeRetryAfterCannotSilenceTheDeviceBeyondTheCap) {
   EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::Go);
 }
 
+TEST_F(SyncEngineTest, AServerTimeOutOfBoundsMovesNeitherTheClockNorTheAnchor) {
+  d.clock.setWall(0, TimePrecision::Unknown);
+  d.clock.setCalls = 0;
+  d.store->state().anchorEpoch = kNow - 100;
+  d.http.script.push_back(jsonReply(200, "{\"protocol_version\":2,\"events\":[],\"cursor\":\"0\",\"has_more\":false,"
+                                         "\"server_time\":\"1999-01-01T00:00:00.000Z\"}"));
+  manual();
+  EXPECT_EQ(d.clock.setCalls, 0) << "not even from the server: a date out of bounds is not a date";
+  EXPECT_EQ(d.store->state().anchorEpoch, kNow - 100);
+}
+
 TEST_F(SyncEngineTest, ServerErrorsBackOffExponentiallyAndSuccessResets) {
   d.http.handler = [](const RecordedRequest&) { return apiError(503, "sync_service_unavailable"); };
   int64_t previous = 0;

@@ -5,6 +5,7 @@
 
 #include "Backoff.h"
 #include "JsonStream.h"
+#include "net/HttpDate.h"
 
 namespace borges {
 
@@ -638,7 +639,7 @@ bool SyncEngine::scanPage(File& f, PageInfo& page) {
 }
 
 void SyncEngine::noteServerTime(const PageInfo& page) {
-  if (!page.hasServerTime || page.serverTime <= 0) return;
+  if (!page.hasServerTime || !net::epochInBounds(page.serverTime)) return;
   store_.state().anchorEpoch = page.serverTime;
   if (clockpolicy::shouldApplyServerTime(clock_.wallNow())) clock_.setWall(page.serverTime, TimePrecision::Exact);
 }
