@@ -1,11 +1,14 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "GlueState.h"
 #include "LegacyMigration.h"
+#include "Positions.h"
 
 using namespace borges;
 using namespace borges::glue;
@@ -86,13 +89,46 @@ OpenInputs goodOpen() {
 
 }  // namespace
 
-TEST(LoopGuard, NeverMoreThanTwoSessionsThatDoNotComeBack) {
+TEST(LoopGuard, TheSecondPressAfterADeadSessionOpensTheBook) {
   GlueState s;
   EXPECT_TRUE(armSession(s, PendingKind::OpenBook));  // Crashes: no finish.
-  EXPECT_TRUE(armSession(s, PendingKind::OpenBook));  // Crashes again.
   EXPECT_FALSE(armSession(s, PendingKind::OpenBook)) << "The reader must open with no session.";
   EXPECT_EQ(s.pending, PendingKind::None);
+  EXPECT_FALSE(armSession(s, PendingKind::OpenBook)) << "The cooldown has one more to go.";
   EXPECT_TRUE(armSession(s, PendingKind::OpenBook)) << "A later open gets a fresh chance.";
+}
+
+TEST(LoopGuard, ASessionThatAlwaysPanicsCostsLessAndLess) {
+  GlueState s;
+  int armed = 0;
+  for (int open = 0; open < 80; ++open) {
+    if (armSession(s, PendingKind::OpenBook)) ++armed;
+  }
+  // One session, then 2, 4, 8, 16, 16... skipped.
+  EXPECT_LE(armed, 8);
+  EXPECT_EQ(s.cooldownLevel, kMaxCooldownLevel);
+  finishSession(s);
+  EXPECT_EQ(s.cooldownLevel, 0);
+  EXPECT_EQ(s.skipsLeft, 0);
+  EXPECT_TRUE(armSession(s, PendingKind::OpenBook));
+}
+
+TEST(Route, AnOpenTriesThroughBackoffEveryFewMinutes) {
+  GlueState s;
+  EXPECT_TRUE(openOutlastsBackoff(s, wall(1700000000)));
+  s.lastOpenTryEpoch = 1700000000;
+  EXPECT_FALSE(openOutlastsBackoff(s, wall(1700000000 + 60)));
+  EXPECT_TRUE(openOutlastsBackoff(s, wall(1700000000 + kOpenBackoffCapSec)));
+  EXPECT_TRUE(openOutlastsBackoff(s, wall(1700000000 - 10))) << "A clock that went back proves nothing.";
+  EXPECT_TRUE(openOutlastsBackoff(s, wall(1700000060, TimePrecision::Unknown)));
+}
+
+TEST(Route, ALowBatteryOpensWithoutASessionButHolds) {
+  OpenInputs in = goodOpen();
+  in.batteryPercent = 14;
+  EXPECT_EQ(routeOpen(in), OpenRoute::DirectWithHold);
+  in.batteryPercent = 15;
+  EXPECT_EQ(routeOpen(in), OpenRoute::NetworkSession);
 }
 
 TEST(LoopGuard, ASessionThatComesBackClearsTheCount) {
@@ -202,7 +238,7 @@ TEST(SleepFlush, OnlyWhenThereIsSomethingToSendAndTheBatteryCanPay) {
   EXPECT_TRUE(shouldFlushBeforeSleep(in));
 
   SleepInputs low = in;
-  low.batteryPercent = kMinSleepBatteryPercent - 1;
+  low.batteryPercent = kMinSessionBatteryPercent - 1;
   EXPECT_FALSE(shouldFlushBeforeSleep(low));
   SleepInputs off = in;
   off.syncOnSleep = false;
@@ -281,7 +317,8 @@ TEST(ClipTimes, FindsTheStampAndNothingElse) {
   MemFs fs;
   ClipTimes times(fs);
   const char* path = "/cache/borges_clip_times.bin";
-  EXPECT_EQ(times.lookup(path, 1, 100), 0) << "No file: no time, no failure.";
+  ClipStamp found;
+  EXPECT_FALSE(times.lookup(path, 1, 100, found)) << "No file: no time, no failure.";
   ClipStamp a;
   a.spine = 1;
   a.uptime = 100;
@@ -291,9 +328,27 @@ TEST(ClipTimes, FindsTheStampAndNothingElse) {
   b.spine = 2;
   b.epochMs = 1790000001000;
   ASSERT_TRUE(times.append(path, b));
-  EXPECT_EQ(times.lookup(path, 1, 100), 1790000000000);
-  EXPECT_EQ(times.lookup(path, 2, 100), 1790000001000);
-  EXPECT_EQ(times.lookup(path, 1, 101), 0);
+  ASSERT_TRUE(times.lookup(path, 1, 100, found));
+  EXPECT_EQ(found.epochMs, 1790000000000);
+  EXPECT_EQ(found.visibleOffset, kNoVisibleOffset);
+  ASSERT_TRUE(times.lookup(path, 2, 100, found));
+  EXPECT_EQ(found.epochMs, 1790000001000);
+  EXPECT_FALSE(times.lookup(path, 1, 101, found));
+}
+
+TEST(ClipTimes, KeepsTheVisibleOffset) {
+  MemFs fs;
+  ClipTimes times(fs);
+  const char* path = "/o.bin";
+  ClipStamp stamp;
+  stamp.spine = 3;
+  stamp.uptime = 9;
+  stamp.visibleOffset = 123456;
+  ASSERT_TRUE(times.append(path, stamp));
+  ClipStamp found;
+  ASSERT_TRUE(times.lookup(path, 3, 9, found));
+  EXPECT_EQ(found.visibleOffset, 123456u);
+  EXPECT_EQ(found.epochMs, 0);
 }
 
 TEST(ClipTimes, ATornTailIsIgnored) {
@@ -306,7 +361,9 @@ TEST(ClipTimes, ATornTailIsIgnored) {
   a.epochMs = 5;
   ASSERT_TRUE(times.append(path, a));
   fs.files[path] += "xx";
-  EXPECT_EQ(times.lookup(path, 1, 7), 5);
+  ClipStamp found;
+  ASSERT_TRUE(times.lookup(path, 1, 7, found));
+  EXPECT_EQ(found.epochMs, 5);
 }
 
 TEST(StaySource, LedgerOnlyWhenItStillDescribesThisPlace) {
@@ -462,6 +519,75 @@ TEST(LegacyBookmarks, Uuid) {
   EXPECT_FALSE(parseUuid(nullptr, id));
   EXPECT_FALSE(parseUuid("00112233-4455-6677-8899-aabbccddeefg", id));
   EXPECT_FALSE(parseUuid("0011223344556677-8899-aabbccddeeff00", id));
+}
+
+TEST(TrackedReading, RoundTripsOnceAndRejectsATornFile) {
+  MemFs fs;
+  const char* path = "/t.bin";
+  TrackedReading in;
+  in.paged = true;
+  in.pagesRead = 12;
+  in.startedEpoch = 1700000000;
+  in.lastTurnEpoch = 1700000999;
+  ASSERT_TRUE(saveTrackedReading(fs, path, in));
+  TrackedReading out;
+  ASSERT_TRUE(takeTrackedReading(fs, path, out));
+  EXPECT_TRUE(out.paged);
+  EXPECT_EQ(out.pagesRead, 12);
+  EXPECT_EQ(out.startedEpoch, 1700000000);
+  EXPECT_EQ(out.lastTurnEpoch, 1700000999);
+  EXPECT_FALSE(takeTrackedReading(fs, path, out)) << "Single use.";
+  ASSERT_TRUE(saveTrackedReading(fs, path, in));
+  fs.files[path].resize(10);
+  EXPECT_FALSE(takeTrackedReading(fs, path, out));
+  EXPECT_FALSE(fs.exists(path));
+}
+
+namespace {
+class StringSource : public IByteSource {
+ public:
+  explicit StringSource(std::string text) : text_(std::move(text)) {}
+  int32_t read(uint8_t* dst, size_t len) override {
+    const size_t n = std::min(len, text_.size() - pos_);
+    memcpy(dst, text_.data() + pos_, n);
+    pos_ += n;
+    return static_cast<int32_t>(n);
+  }
+  bool seek(uint32_t pos) override {
+    pos_ = pos;
+    return true;
+  }
+
+ private:
+  std::string text_;
+  size_t pos_ = 0;
+};
+}  // namespace
+
+TEST(Positions, PicksTheFirstOtherDeviceWithAPlace) {
+  StringSource source(R"({"protocol_version":2,"positions":[
+    {"device_id":"me","device_name":"X4","percentage":10,"is_current_device":true,"recovery_id":"a"},
+    {"device_id":"nothing","percentage":null,"xpointer":null,"is_current_device":false,"recovery_id":"b"},
+    {"book_identifier":{"kind":"x"},"device_id":"kobo","device_name":"Kobo","percentage":62.5,
+     "xpointer":"/body/p[3]","occurred_at":"2026-11-05T13:00:00.000Z","time_precision":"exact",
+     "is_current_device":false,"recovery_id":"progress:kobo:7"},
+    {"device_id":"older","percentage":1,"is_current_device":false,"recovery_id":"c"}]})");
+  JsonScanner scan(source);
+  RemoteEvent event;
+  ASSERT_TRUE(parseOtherPosition(scan, event));
+  EXPECT_STREQ(event.originName, "Kobo");
+  EXPECT_EQ(event.pctMicro, 62500000u);
+  EXPECT_TRUE(event.xpointerUsable);
+  EXPECT_STREQ(event.eventId, "progress:kobo:7");
+  EXPECT_EQ(event.precision, TimePrecision::Exact);
+}
+
+TEST(Positions, OnlyThisDeviceIsNoOffer) {
+  StringSource source(
+      R"({"positions":[{"device_id":"me","percentage":10,"is_current_device":true,"recovery_id":"a"}]})");
+  JsonScanner scan(source);
+  RemoteEvent event;
+  EXPECT_FALSE(parseOtherPosition(scan, event));
 }
 
 TEST(ClipIdentity, StableAndSpecific) {

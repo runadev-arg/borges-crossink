@@ -11,9 +11,12 @@ namespace glue {
 namespace {
 
 constexpr const char* kGlueBase = "/.crosspoint/borges/glue";
-constexpr uint8_t kFormat = 1;
-constexpr size_t kRecordBytes = 1 + 1 + 1 + 1 + 1 + 4 + 8;
-constexpr size_t kStampBytes = 2 + 4 + 8;
+constexpr uint8_t kFormat = 3;
+constexpr size_t kRecordBytes = 1 + 1 + 1 + 1 + 1 + 4 + 8 + 1 + 1 + 8;
+constexpr size_t kRecordBytesV1 = kRecordBytes - 10;
+constexpr size_t kStampBytes = 2 + 4 + 8 + 4;
+constexpr uint8_t kTrackedFormat = 1;
+constexpr size_t kTrackedBytes = 1 + 1 + 4 + 8 + 8 + 1;
 
 uint64_t fnv64(const void* data, const size_t len, uint64_t hash = 14695981039346656037ULL) {
   const auto* p = static_cast<const uint8_t*>(data);
@@ -60,9 +63,16 @@ uint32_t pathHash(const char* path) {
 }
 
 bool armSession(GlueState& state, const PendingKind kind) {
+  if (state.skipsLeft > 0) {
+    --state.skipsLeft;
+    state.pending = PendingKind::None;
+    return false;
+  }
   if (state.attempts >= kMaxAttempts) {
     state.attempts = 0;
     state.pending = PendingKind::None;
+    if (state.cooldownLevel < kMaxCooldownLevel) ++state.cooldownLevel;
+    state.skipsLeft = static_cast<uint8_t>((1u << state.cooldownLevel) - 1);
     return false;
   }
   ++state.attempts;
@@ -72,6 +82,8 @@ bool armSession(GlueState& state, const PendingKind kind) {
 
 void finishSession(GlueState& state) {
   state.attempts = 0;
+  state.cooldownLevel = 0;
+  state.skipsLeft = 0;
   state.pending = PendingKind::None;
 }
 
@@ -88,9 +100,16 @@ bool openThrottled(const GlueState& state, const uint32_t bookPathHash, const Wa
   return elapsed >= 0 && elapsed < kOpenThrottleSec;
 }
 
+bool openOutlastsBackoff(const GlueState& state, const WallTime& now) {
+  if (now.precision == TimePrecision::Unknown || state.lastOpenTryEpoch <= 0) return true;
+  const int64_t elapsed = now.epochSec - state.lastOpenTryEpoch;
+  return elapsed < 0 || elapsed >= kOpenBackoffCapSec;
+}
+
 OpenRoute routeOpen(const OpenInputs& in) {
   if (!in.isEpub || !in.paired) return OpenRoute::Direct;
-  if (in.hasPendingJump || !in.autoOnOpen || in.needsRelink || in.backedOff || !in.hasSavedWifi || in.throttled) {
+  if (in.hasPendingJump || !in.autoOnOpen || in.needsRelink || in.backedOff || !in.hasSavedWifi || in.throttled ||
+      in.batteryPercent < kMinSessionBatteryPercent) {
     return OpenRoute::DirectWithHold;
   }
   return OpenRoute::NetworkSession;
@@ -98,7 +117,7 @@ OpenRoute routeOpen(const OpenInputs& in) {
 
 bool shouldFlushBeforeSleep(const SleepInputs& in) {
   return in.paired && in.syncOnSleep && in.hasSavedWifi && in.gateGo && !in.alreadyInNetworkBoot &&
-         in.batteryPercent >= kMinSleepBatteryPercent;
+         in.batteryPercent >= kMinSessionBatteryPercent;
 }
 
 GlueStore::GlueStore(IFs& fs) : fs_(fs) {}
@@ -108,7 +127,9 @@ bool GlueStore::load(GlueState& out) {
   AtomicFile file(fs_, kGlueBase);
   uint8_t buf[kRecordBytes];
   size_t len = 0;
-  if (!file.load(buf, sizeof(buf), len) || len != kRecordBytes || buf[0] != kFormat) return false;
+  if (!file.load(buf, sizeof(buf), len)) return false;
+  const bool v1 = buf[0] == 1 && len == kRecordBytesV1;
+  if (!v1 && (buf[0] != kFormat || len != kRecordBytes)) return false;
   out.autoOnOpen = buf[1] != 0;
   out.syncOnSleep = buf[2] != 0;
   out.pending =
@@ -116,6 +137,11 @@ bool GlueStore::load(GlueState& out) {
   out.attempts = buf[4];
   out.lastOpenPathHash = getU32(buf + 5);
   out.lastOpenEpoch = getI64(buf + 9);
+  if (!v1) {
+    out.cooldownLevel = buf[17];
+    out.skipsLeft = buf[18];
+    out.lastOpenTryEpoch = getI64(buf + 19);
+  }
   return true;
 }
 
@@ -128,6 +154,9 @@ bool GlueStore::save(const GlueState& state) {
   buf[4] = state.attempts;
   putU32(buf + 5, state.lastOpenPathHash);
   putI64(buf + 9, state.lastOpenEpoch);
+  buf[17] = state.cooldownLevel;
+  buf[18] = state.skipsLeft;
+  putI64(buf + 19, state.lastOpenTryEpoch);
   fs_.mkdir("/.crosspoint");
   fs_.mkdir("/.crosspoint/borges");
   AtomicFile file(fs_, kGlueBase);
@@ -209,30 +238,67 @@ StaySource chooseStaySource(const bool hasFinalized, const Position& finalized, 
   return delta <= kStayLedgerToleranceMicro ? StaySource::Ledger : StaySource::MapSavedPage;
 }
 
+bool saveTrackedReading(IFs& fs, const char* path, const TrackedReading& reading) {
+  uint8_t rec[kTrackedBytes];
+  rec[0] = kTrackedFormat;
+  rec[1] = reading.paged ? 1 : 0;
+  putU32(rec + 2, static_cast<uint32_t>(reading.pagesRead));
+  putI64(rec + 6, reading.startedEpoch);
+  putI64(rec + 14, reading.lastTurnEpoch);
+  rec[22] = static_cast<uint8_t>(fnv64(rec, 22));
+  File f(fs, path, IFs::Mode::WriteTrunc);
+  return f && f.writeAll(rec, sizeof(rec)) && f.flush();
+}
+
+bool takeTrackedReading(IFs& fs, const char* path, TrackedReading& out) {
+  if (!fs.exists(path)) return false;
+  uint8_t rec[kTrackedBytes];
+  bool whole = false;
+  {
+    File f(fs, path, IFs::Mode::Read);
+    whole = f && f.readExact(rec, sizeof(rec)) && rec[0] == kTrackedFormat &&
+            rec[22] == static_cast<uint8_t>(fnv64(rec, 22));
+  }
+  fs.remove(path);
+  if (!whole) return false;
+  out.paged = rec[1] != 0;
+  out.pagesRead = static_cast<int32_t>(getU32(rec + 2));
+  out.startedEpoch = getI64(rec + 6);
+  out.lastTurnEpoch = getI64(rec + 14);
+  return true;
+}
+
 bool ClipTimes::append(const char* path, const ClipStamp& stamp) {
   uint8_t rec[kStampBytes];
   rec[0] = static_cast<uint8_t>(stamp.spine);
   rec[1] = static_cast<uint8_t>(stamp.spine >> 8);
   putU32(rec + 2, stamp.uptime);
   putI64(rec + 6, stamp.epochMs);
+  putU32(rec + 14, stamp.visibleOffset);
   File f(fs_, path, IFs::Mode::Append);
   return f && f.writeAll(rec, sizeof(rec)) && f.flush();
 }
 
-int64_t ClipTimes::lookup(const char* path, const uint16_t spine, const uint32_t uptime) {
+bool ClipTimes::lookup(const char* path, const uint16_t spine, const uint32_t uptime, ClipStamp& out) {
   File f(fs_, path, IFs::Mode::Read);
-  if (!f) return 0;
-  int64_t found = 0;
+  if (!f) return false;
+  bool found = false;
   uint8_t rec[kStampBytes];
   while (f.readExact(rec, sizeof(rec))) {
     const auto recSpine = static_cast<uint16_t>(rec[0] | (rec[1] << 8));
-    if (recSpine == spine && getU32(rec + 2) == uptime) found = getI64(rec + 6);  // The newest wins.
+    if (recSpine == spine && getU32(rec + 2) == uptime) {  // The newest wins.
+      out.spine = spine;
+      out.uptime = uptime;
+      out.epochMs = getI64(rec + 6);
+      out.visibleOffset = getU32(rec + 14);
+      found = true;
+    }
   }
   return found;
 }
 
-uint64_t clipIdentity(const uint32_t uptime, const uint16_t textLength, const uint16_t wordCount) {
-  uint64_t h = fnv64(&uptime, sizeof(uptime));
+uint64_t clipIdentity(const uint16_t startWord, const uint16_t textLength, const uint16_t wordCount) {
+  uint64_t h = fnv64(&startWord, sizeof(startWord));
   h = fnv64(&textLength, sizeof(textLength), h);
   return fnv64(&wordCount, sizeof(wordCount), h);
 }
