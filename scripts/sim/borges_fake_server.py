@@ -162,7 +162,8 @@ class Handler(BaseHTTPRequestHandler):
         path, _, query = self.path.partition("?")
         if path == "/api/sync/v2/capabilities":
             versions = {k: [1] for k in ("progress.changed", "annotation.created", "annotation.deleted",
-                                         "bookmark.upserted", "bookmark.deleted", "session.ended")}
+                                         "bookmark.upserted", "bookmark.deleted", "session.ended",
+                                         "page_stat.recorded")}
             self.reply(200, {"protocol_version": 2, "event_versions": versions})
         elif path == "/api/library/plugin/books":
             params = dict(p.split("=") for p in query.split("&") if "=" in p)

@@ -49,7 +49,10 @@ LinkResult BorgesLink::connect(uint32_t, ICancel& cancel) {
   return off != nullptr && off[0] != '\0' ? LinkResult::NotFound : LinkResult::Connected;
 }
 void BorgesLink::disconnect() {}
-bool BorgesLink::connected() const { return true; }
+bool BorgesLink::connected() const {
+  const char* off = getenv("BORGES_SIM_NO_WIFI");
+  return off == nullptr || off[0] == '\0';
+}
 
 #else
 

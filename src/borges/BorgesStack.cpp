@@ -110,6 +110,8 @@ void BorgesStack::bringDown() {
 
 bool hasSavedWifi() {
 #ifdef SIMULATOR
+  // BORGES_SIM_NO_SAVED_WIFI: as a card with no network yet, for the first-time picker.
+  if (getenv("BORGES_SIM_NO_SAVED_WIFI")) return false;
   if (getenv("BORGES_SIM_BASE_URL")) return true;
 #endif
   return WIFI_STORE.getCredentialCount() > 0;
