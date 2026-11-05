@@ -131,8 +131,7 @@ async function scenario6({ h, t, makeDevice }) {
   const claim = await ui.pairFromStatus(h, d, account);
   t.eq(claim.device.id, firstId, "re-pairing is the same device row");
   await d.shot("repaired-status");
-  h.proxy.clear();
-  await d.press("CONFIRM");
+  // The pairing ran the sync itself, so the queue drains without a press.
   await until("the drain", () => h.proxy.requestsTo("/api/devices/self/health").some((e) => e.status > 0), 30000);
   await wait(2000);
   await d.waitStable(500);

@@ -134,15 +134,13 @@ async function scenario1({ h, t, makeDevice }) {
   const seen = tokenSightings(d, token);
   t.eq(seen.join(","), "", "the token in the clear (plain, base64, hex or without its prefix) anywhere on the SD, temp dir or logs");
   const key = ["cred.a", "cred.b"].map((name) => d.file(`/.crosspoint/borges/${name}`)).filter((f) => fs.existsSync(f)).map((f) => findXorObfuscated(f, token)).find(Boolean);
-  t.ok(key, "the credential file holds the token XORed with a 6-byte key");
-  // How long does what the spool holds stay there? Until the next response replaces it.
-  h.proxy.clear();
-  await d.press("CONFIRM");
-  await until("the first sync", () => h.proxy.requestsTo("/api/devices/self/health").some((e) => e.status > 0), 30000);
+  t.ok(!key, "the credential file does not hold the token XORed with the chip MAC (it is boxed with a device key)");
+  // Pairing runs the first sync by itself, with the radio it already has up, and ends on the library row.
+  await until("the first sync, run by the pairing", () => h.proxy.requestsTo("/api/devices/self/health").some((e) => e.status > 0), 30000);
   await wait(500);
   t.note(`plain token after the first sync: ${JSON.stringify(tokenSightings(d, token))}`);
   await d.close();
-  t.note(`credential storage: not encrypted, XOR with a repeating key ${key}, the chip MAC 02424f524753 in the simulator: obfuscation, as the design says`);
+  t.note("credential storage: no longer XOR with the chip MAC (see 'keep the token off the card')");
 }
 
 // ---------------------------------------------------------------------------------

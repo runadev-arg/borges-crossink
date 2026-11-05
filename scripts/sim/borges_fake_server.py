@@ -138,7 +138,7 @@ class Handler(BaseHTTPRequestHandler):
                              "expires_in": 600, "interval": 2})
         elif path == "/api/devices/pairing/claim":
             self.reply(200, {"credential": {"token": "fake-token", "username": "toto"},
-                             "device": {"id": "dev1"}, "account": {"id": "acc12345-aaaa"}})
+                             "device": {"id": "dev1"}, "account": {"id": "acc12345-aaaa", "username": "toto"}})
         elif path == "/api/devices/pairing/status":
             Handler.status_calls += 1
             done = Handler.status_calls >= ARGS.approve_after

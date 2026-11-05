@@ -138,9 +138,10 @@ export async function statusToHome(d) {
   await d.waitStable(500);
 }
 
-// Status screen rows when paired: Sync now, Library, On open, On sleep, Disconnect.
-export async function statusToLibrary(d, { networkBoot = true } = {}) {
-  await d.tap("DOWN", { settleMs: 200 });
+// Status screen rows when paired: Sync now, Library, On open, On sleep, Disconnect. Pairing leaves the
+// focus on Library already (it has just run the first sync); `down` is for a status that opens on row 0.
+export async function statusToLibrary(d, { networkBoot = true, down = false } = {}) {
+  if (down) await d.tap("DOWN", { settleMs: 200 });
   const boots = d.helloCount;
   d.mark();
   await d.press("CONFIRM");
