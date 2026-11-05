@@ -474,6 +474,7 @@ int main(int argc, char** argv) {
   std::vector<Emitted> emitted;
   Stats d2k;
   int roundTripBad = 0, roundTripTotal = 0;
+  int parserSpines = 0, parserFailed = 0, parserDelta = 0, pagesTotal = 0, pagesBad = 0;
   std::string d2kIn = work + "/" + name + ".d2k";
   std::string d2kOut = work + "/" + name + ".d2k.out";
   {
@@ -507,6 +508,71 @@ int main(int argc, char** argv) {
             fwIndexAt(f, r.visibleOffset) != static_cast<int>(i)) {
           roundTripBad++;
           if (shown++ < 40) examples += "  roundtrip " + xp + "\n";
+        }
+      }
+      // Where the real parser starts each page, the path a saved position takes: the offset the
+      // reader keeps, the xpointer KOReader gets, and the page the reader finds it on again.
+      const char* pagesTool = getenv("XPDIFF_PAGES_TOOL");
+      if (pagesTool && scans[s]->bodyDepth >= 0) {
+        char spinePath[32];
+        snprintf(spinePath, sizeof(spinePath), "/spine/%04d.xhtml", static_cast<int>(s));
+        const std::string pgPath = work + "/" + name + ".pg";
+        std::string pagesCmd = "\"\"" + std::string(pagesTool) + "\" \"" + dir + spinePath + "\" \"" + pgPath + "\"";
+        for (int i = 0;; i++) {
+          char cssPath[32];
+          snprintf(cssPath, sizeof(cssPath), "/css/%04d.css", i);
+          if (!std::ifstream(dir + cssPath)) break;
+          pagesCmd += " \"" + dir + cssPath + "\"";
+        }
+        pagesCmd += "\"";
+        if (system(pagesCmd.c_str()) == 0) {
+          std::vector<uint32_t> lut;
+          std::ifstream pg(pgPath, std::ios::binary);
+          std::string line;
+          while (std::getline(pg, line)) {
+            const auto fields = split(line);
+            if (fields[0] == "T") {
+              parserSpines++;
+              if (fields[2] != "1") parserFailed++;
+              if (strtoul(fields[1].c_str(), nullptr, 10) != scans[s]->visible) {
+                parserDelta++;
+                if (shown++ < 40) {
+                  examples += "  count spine=" + std::to_string(s) + " parser=" + fields[1] +
+                              " scan=" + std::to_string(scans[s]->visible) + "\n";
+                }
+              }
+            } else if (fields[0] == "P") {
+              lut.push_back(strtoul(fields[2].c_str(), nullptr, 10));
+            }
+          }
+          const auto pageOf = [&](const uint32_t v) {
+            size_t page = 0;
+            for (size_t i = 0; i < lut.size() && lut[i] <= v; i++) {
+              page = i;
+              if (lut[i] == v) break;
+            }
+            return page;
+          };
+          for (size_t page = 0; page < lut.size(); page++) {
+            if (page > 0 && lut[page] == lut[page - 1]) continue;  // Pages with no text of their own
+            // The first character after a page start that holds one: past it, the next page.
+            const int index = fwIndexAt(f, lut[page]);
+            if (index >= static_cast<int>(f.size())) continue;
+            if (page + 1 < lut.size() && f[index].visible >= lut[page + 1]) continue;
+            pagesTotal++;
+            const std::string xp =
+                ChapterXPathResolver::findXPathForVisibleTextOffset(epub, static_cast<int>(s), lut[page]);
+            ChapterXPathResolver::Resolved r;
+            if (xp.empty() || !ChapterXPathResolver::resolve(epub, static_cast<int>(s), xp, r) ||
+                pageOf(r.visibleOffset) != page) {
+              pagesBad++;
+              if (shown++ < 40) examples += "  page round trip spine=" + std::to_string(s) + " " + xp + "\n";
+              continue;
+            }
+            emitted.push_back({static_cast<int>(s + 1), index, lut[page], xp});
+            out << xp << "\n";
+            d2k.total++;
+          }
         }
       }
       // Chapter ends, and offsets on a space.
@@ -574,6 +640,10 @@ int main(int argc, char** argv) {
   printf("%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%zu\t%zu\n", name.c_str(), k2d.total,
          k2d.exact, k2d.notFound, k2d.wrong, k2d.maxDelta, d2k.total, d2k.exact, d2k.notFound, d2k.wrong, d2k.canonical,
          d2k.maxDelta, roundTripTotal, roundTripBad, unmatchedOracle, unmatchedFw, peakHeap, peakStack);
+  if (getenv("XPDIFF_PAGES_TOOL")) {
+    printf("  pages spines=%d parseFailed=%d countDiffers=%d pageStarts=%d roundTripBad=%d\n", parserSpines,
+           parserFailed, parserDelta, pagesTotal, pagesBad);
+  }
   if (verbose) fputs(examples.c_str(), stdout);
   return 0;
 }

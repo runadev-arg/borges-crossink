@@ -65,6 +65,7 @@ CASES = {
     "white_space_inline": "<p style=\"white-space: pre\">a  b\n  c</p><p style=\"white-space:pre-wrap\"><b>d</b>  e</p><div style=\"white-space: pre-line\">f  g\nh</div><p style=\"white-space: normal\">i  j</p>",
     "pre_child_normal": "<pre>a  b<span style=\"white-space:normal\">c   d</span>e  f</pre>",
     "display_inline_style": "<div><span style=\"display:block\">a</span> <span style=\"display:block\">b</span> tail</div><div><p style=\"display:inline\">c</p> <p style=\"display:inline\">d</p> e</div><div>\n<b style=\"display:none\">f</b> g</div>",
+    "br_display_block": "<h1 class=\"blk\">\nLead words <br class=\"blk\"/>\n<br class=\"blk\"/>\nSecond part <br class=\"blk\"/>\n</h1><p>a<br style=\"display:block\"/> <br style=\"display:block\"/> b</p><p>c<br class=\"gone\"/> <br class=\"gone\"/> d</p>",
     "display_css": "<div><span class=\"blk\">a</span> <span class=\"blk\">b</span> tail</div><div><p class=\"inl\">c</p> <p class=\"inl\">d</p> e</div><div><p class=\"gone\">f</p> <p>g</p> h</div><div class=\"gone\">\n<p>i</p>\n<p>j</p></div>",
     "white_space_css": "<p class=\"keep\">a  b\n  c</p><p>d  e</p>",
     "float_inline_block": "<div><div style=\"float:left\">a</div> <p>b</p> c</div><div><span style=\"display:inline-block\">d</span> <p>e</p> f</div>",

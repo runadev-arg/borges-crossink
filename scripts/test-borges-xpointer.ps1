@@ -46,6 +46,31 @@ $xpdiff = Join-Path $Build 'xpdiff.exe'
 & clang++ -static -o $xpdiff @objs
 if ($LASTEXITCODE) { exit 1 }
 
+# The real parser and line breaker, with a fixed-width font: where each page really starts.
+$pagesObj = Join-Path $Build 'xppages'
+New-Item -ItemType Directory -Force $pagesObj | Out-Null
+$parserTest = Join-Path $repo 'test\chapter_html_slim_parser'
+$pagesInc = @("-I$here\stubs_parser", "-I$parserTest\stubs", "-I$lib", "-I$repo", "-I$lib\Epub", "-I$lib\Epub\Epub", "-I$lib\Epub\Epub\parsers", "-I$lib\Epub\Epub\css", "-I$lib\EpdFont", "-I$lib\Memory", "-I$lib\MemoryBudget", "-I$lib\MiniBidi", "-I$lib\Utf8", "-I$lib\XmlParserUtils", "-I$lib\Epub\Epub\tables", "-I$lib\expat")
+$pagesFlags = @('-std=c++20', '-O1', '-g', '-w', '-DXML_CONTEXT_BYTES=1024', '-DXML_GE=0', '-include', "$here\stubs\host_compat.h") + $pagesInc
+$pagesObjs = @()
+foreach ($s in @("$here\xppages.cpp", "$parserTest\ParserLinkStubs.cpp", "$lib\Epub\Epub\parsers\ChapterHtmlSlimParser.cpp", "$lib\Epub\Epub\css\CssParser.cpp", "$lib\Epub\Epub\ParsedText.cpp", "$lib\Epub\Epub\htmlEntities.cpp", "$lib\Utf8\Utf8.cpp")) {
+  $o = "$pagesObj\$([IO.Path]::GetFileNameWithoutExtension($s)).o"
+  if (-not (Test-Path $o) -or (Get-Item $s).LastWriteTime -gt (Get-Item $o).LastWriteTime) {
+    & clang++ @pagesFlags -c $s -o $o
+    if ($LASTEXITCODE) { exit 1 }
+  }
+  $pagesObjs += $o
+}
+foreach ($c in 'xmlparse', 'xmlrole', 'xmltok') {
+  $o = "$pagesObj\$c.o"
+  if (-not (Test-Path $o)) { & clang -O1 -w -DXML_CONTEXT_BYTES=1024 -DXML_GE=0 "-I$lib\expat" -c "$lib\expat\$c.c" -o $o; if ($LASTEXITCODE) { exit 1 } }
+  $pagesObjs += $o
+}
+$xppages = Join-Path $Build 'xppages.exe'
+& clang++ -static -o $xppages @pagesObjs
+if ($LASTEXITCODE) { exit 1 }
+$env:XPDIFF_PAGES_TOOL = $xppages
+
 $corpus = Join-Path $Build 'corpus'
 $work = Join-Path $Build 'work'
 New-Item -ItemType Directory -Force $work | Out-Null
@@ -56,9 +81,11 @@ if ($LASTEXITCODE) { exit 1 }
 $oracle = Join-Path $Build 'cre-oracle.exe'
 if ($Verbose_) { $env:XPDIFF_VERBOSE = '1' } else { Remove-Item Env:XPDIFF_VERBOSE -ErrorAction SilentlyContinue }
 $rows = @()
+$pageLines = @()
 foreach ($dir in Get-ChildItem $corpus -Directory) {
   $lines = & $xpdiff $dir.FullName $oracle $work $Points
   foreach ($l in $lines) {
+    if ($l -match '^  pages ') { $pageLines += "$($dir.Name)$l"; continue }
     if ($l -notmatch "`t") { Write-Output $l; continue }
     $f = $l -split "`t"
     if ($f.Count -lt 18) { Write-Output $l; continue }
@@ -73,6 +100,7 @@ $rows | Format-Table Book, K2DPoints, K2DExact, K2DNotFound, K2DWrong, K2DMaxDel
 $sum = { param($n) ($rows | Measure-Object $n -Sum).Sum }
 "K2D  points $(& $sum K2DPoints)  exact $(& $sum K2DExact)  not-found $(& $sum K2DNotFound)  wrong $(& $sum K2DWrong)"
 "D2K  points $(& $sum D2KPoints)  exact $(& $sum D2KExact)  empty $(& $sum D2KEmpty)  wrong/rejected $(& $sum D2KWrong)  canonical-string $(& $sum D2KCanonical)"
+$pageLines
 "Round trips $(& $sum RoundTrips)  bad $(& $sum RoundTripBad)"
 "Host peak heap $(($rows | Measure-Object PeakHeap -Maximum).Maximum) B, peak stack $(($rows | Measure-Object PeakStack -Maximum).Maximum) B"
 $bad = (& $sum K2DNotFound) + (& $sum K2DWrong) + (& $sum D2KEmpty) + (& $sum D2KWrong) + (& $sum RoundTripBad)
