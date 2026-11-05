@@ -1,7 +1,5 @@
 #include "HomeActivity.h"
 
-#include "borges/BorgesGlue.h"
-
 #include <Bitmap.h>
 #include <Epub.h>
 #include <FsHelpers.h>
@@ -37,6 +35,7 @@
 #include "RecentBookProgress.h"
 #include "RecentBooksStore.h"
 #include "SavedItemsHomeActivity.h"
+#include "borges/BorgesGlue.h"
 #include "components/UITheme.h"
 #include "components/themes/dashboard/DashboardTheme.h"
 #include "components/themes/lyra/LyraCarouselTheme.h"
@@ -536,20 +535,12 @@ static_assert(HomeActivity::kMaxCachedBooks >= LyraCarouselMetrics::values.homeR
 int HomeActivity::getMenuItemCount() const {
   if (coverGridUi) return static_cast<int>(recentBooks.size()) + (hasOpdsServers ? 5 : 4);
   const auto& metrics = UITheme::getInstance().getMetrics();
-  int count = 4;  // File Browser, Library, File transfer, Settings
+  // From the list that is drawn, so a new row cannot be painted and yet be out of reach.
+  int count = static_cast<int>(buildHomeMenuItems(hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings).size());
   if (!metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
     count += getVisibleRecentBookCount();
   } else if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
     count++;  // Continue Reading menu item
-  }
-  if (hasOpdsServers) {
-    count++;
-  }
-  if (hasReadingStats) {
-    count++;
-  }
-  if (hasBookmarks || hasClippings) {
-    count++;
   }
   return count;
 }
