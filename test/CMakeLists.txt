@@ -42,6 +42,7 @@ include(GoogleTest)
 # scripts/test-borges-core.ps1 builds this suite alone.
 option(BORGES_CORE_ONLY "Configure only the borges_core test suite" OFF)
 add_subdirectory(borges_core)
+add_subdirectory(borges_net)
 if(BORGES_CORE_ONLY)
   return()
 endif()

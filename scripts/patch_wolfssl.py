@@ -19,6 +19,15 @@ OVERRIDES = f"""
 #ifndef FREEINK_WOLFSSL_DEBUG
 #undef DEBUG_WOLFSSL
 #endif
+/* Let's Encrypt Generation Y signs the leaf and its intermediate with
+   ecdsa-with-SHA384. Without the hash, verification dies with HASH_TYPE_E (-232).
+   wolfSSL builds SHA-384 on the SHA-512 core, so it needs both. */
+#ifndef WOLFSSL_SHA384
+#define WOLFSSL_SHA384
+#endif
+#ifndef WOLFSSL_SHA512
+#define WOLFSSL_SHA512
+#endif
 """
 
 
