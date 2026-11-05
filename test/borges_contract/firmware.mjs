@@ -155,7 +155,7 @@ export class Firmware {
   writeClips(rows, fileName = "clips.tsv") {
     const esc = (v) => String(v ?? "").replace(/\\/g, "\\\\").replace(/\t/g, "\\t").replace(/\n/g, "\\n");
     const lines = rows.map((c) =>
-      [c.spine ?? 0, c.offset ?? 0, c.hash ?? 0, c.bookmark ? 1 : 0, c.text, c.note, c.chapter, c.color, c.xpointer, c.page, c.pctMicro ?? -1, c.timeMs ?? ""]
+      [c.spine ?? 0, c.offset ?? 0, c.hash ?? 0, c.bookmark ? 1 : 0, c.text, c.note, c.chapter, c.color, c.xpointer, c.page, c.pctMicro ?? -1, c.timeMs ?? "", c.xpointerEnd ?? ""]
         .map(esc)
         .join("\t")
     );

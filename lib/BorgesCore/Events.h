@@ -49,8 +49,9 @@ struct ClipDetail {
   const char* note = nullptr;
   const char* chapter = nullptr;
   const char* color = nullptr;     // Defaults to gray.
-  const char* xpointer = nullptr;  // From ChapterXPathResolver.
-  int32_t page = -1;
+  const char* xpointer = nullptr;     // From ChapterXPathResolver. Start of the selection.
+  const char* xpointerEnd = nullptr;  // Its end. KOReader cannot place a highlight without it.
+  int32_t page = -1;                  // Book-wide reference page. -1: worked out from pctMicro.
   bool hasPct = false;
   uint32_t pctMicro = 0;
   int64_t timeMs = 0;  // Wall time at save. 0 omits the field: clip timestamps are uptime.
@@ -76,8 +77,13 @@ void writeProgress(JsonWriter& w, const BookId& book, const EventTime& time, con
 bool writeAnnotation(JsonWriter& w, const BookRef& book, const EventTime& time, const ClipKey& key,
                      const ClipDetail& detail, const uint8_t syncId[16]);
 
+// baseRevision: the revision this device last saw of it, so that deleting a highlight that
+// was edited on the web is a delete and not a conflict.
 void writeAnnotationDeleted(JsonWriter& w, const BookRef& book, const EventTime& time, bool bookmark,
-                            const uint8_t syncId[16]);
+                            const uint8_t syncId[16], uint32_t baseRevision);
+
+// On the same book-wide scale as progress: page numbers of one device mean nothing on another.
+int32_t referencePage(uint32_t pctMicro, int32_t totalPages);
 
 bool writeSession(JsonWriter& w, const BookId& book, const SessionSummary& session);
 
@@ -110,6 +116,7 @@ struct RemoteEvent {
   char suggestionId[40] = {0};
   // Annotations only.
   char syncId[40] = {0};
+  uint64_t annotationRevision = 0;  // 0: the server did not say.
 
   bool isProgress() const;
   bool isAnnotation() const;

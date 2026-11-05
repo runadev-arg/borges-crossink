@@ -704,6 +704,12 @@ bool SyncEngine::applyRemote(SessionReport& report) {
   // Another device's annotations are not kept: nothing here shows them, and 500 books of
   // them would be 32 MB on the card. Rendering them in the page is out of scope (section 9).
   if (!e.isProgress()) {
+    // What is kept is the revision of the ones this device published: deleting one that
+    // was edited on the web needs it, or the server sees a stale delete and opens a conflict.
+    uint8_t syncId[16];
+    if (e.annotationRevision && uuidParse(e.syncId, syncId) && !store_.noteAnnotationRevision(book, syncId, e.annotationRevision)) {
+      return false;
+    }
     ++report.eventsApplied;
     return true;
   }
@@ -1562,6 +1568,7 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
       next[nextCount].key = ledgerKey;
       memcpy(next[nextCount].syncId, syncId, 16);
       next[nextCount].bookmark = key.bookmark ? 1 : 0;
+      next[nextCount].revision = 0;
       ++nextCount;
       changed = true;
       continue;
@@ -1582,6 +1589,7 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
     next[nextCount].key = ledgerKey;
     memcpy(next[nextCount].syncId, syncId, 16);
     next[nextCount].bookmark = key.bookmark ? 1 : 0;
+    next[nextCount].revision = 0;
     ++nextCount;
     ++published;
     ++result.annotationsCreated;
@@ -1601,7 +1609,7 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
         }
         JsonWriter counter(nullptr, 0);
         const bool bookmark = next[j].bookmark != 0;
-        events::writeAnnotationDeleted(counter, input.book, time, bookmark, next[j].syncId);
+        events::writeAnnotationDeleted(counter, input.book, time, bookmark, next[j].syncId, next[j].revision);
         char* body = new (std::nothrow) char[counter.size()];
         if (!body) {
           ok = false;
@@ -1609,7 +1617,7 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
           continue;
         }
         JsonWriter w(body, counter.size());
-        events::writeAnnotationDeleted(w, input.book, time, bookmark, next[j].syncId);
+        events::writeAnnotationDeleted(w, input.book, time, bookmark, next[j].syncId, next[j].revision);
         const bool queued = appendEvent(EventKind::Annotation, input.book.id, body, w.size(), false);
         delete[] body;
         if (!queued) {

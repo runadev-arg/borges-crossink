@@ -84,11 +84,34 @@ void writeProgress(JsonWriter& w, const BookId& book, const EventTime& time, con
   w.objectEnd();
 }
 
+int32_t referencePage(uint32_t pctMicro, int32_t totalPages) {
+  if (totalPages < 1) return -1;
+  if (pctMicro > 100000000u) pctMicro = 100000000u;
+  const int64_t page = (static_cast<int64_t>(pctMicro) * totalPages + 50000000) / 100000000;
+  return page < 1 ? 1 : static_cast<int32_t>(page);
+}
+
 bool writeAnnotation(JsonWriter& w, const BookRef& book, const EventTime& time, const ClipKey& key,
                      const ClipDetail& d, const uint8_t syncId[16]) {
-  if (!hasNonSpace(d.text)) return false;
+  const int32_t page = d.page >= 0 ? d.page : d.hasPct ? referencePage(d.pctMicro, book.totalPages) : -1;
+  // A bookmark has no selection to be without: annotationadapter.lua:annotationText.
+  char bookmarkText[32];
+  const char* text = d.text;
+  if (!hasNonSpace(text)) {
+    if (!key.bookmark) return false;
+    JsonWriter label(bookmarkText, sizeof(bookmarkText) - 1);
+    label.raw("Bookmark");
+    if (page >= 0) {
+      char number[21];
+      formatU64(static_cast<uint64_t>(page), number);
+      label.raw(" - page ");
+      label.raw(number);
+    }
+    bookmarkText[label.size()] = '\0';
+    text = bookmarkText;
+  }
   const bool hasXp = d.xpointer && *d.xpointer;
-  if (!hasXp && d.page < 0) return false;  // annotation_locator_required.
+  if (!hasXp && page < 0) return false;  // annotation_locator_required.
   writeHead(w, key.bookmark ? "bookmark.upserted" : "annotation.created", "annotation");
   w.valueUuid(syncId);
   writeTail(w, book.id, time);
@@ -96,15 +119,23 @@ bool writeAnnotation(JsonWriter& w, const BookRef& book, const EventTime& time, 
   w.key("sync_id");
   w.valueUuid(syncId);
   w.kv("kind", key.bookmark ? "bookmark" : "highlight");
-  w.kv("text", d.text);
+  w.key("text");
+  w.valueNormalizedText(text);
   if (d.note && *d.note) w.kv("note", d.note);
   if (d.chapter && *d.chapter) w.kv("chapter", d.chapter);
-  if (d.page >= 0) w.kvInt("page", d.page);
+  if (page >= 0) w.kvInt("page", page);
   if (book.totalPages >= 1) w.kvInt("total_pages", book.totalPages);
   if (d.timeMs > 0) w.kvInt("time", d.timeMs);
   w.kv("color", d.color && *d.color ? d.color : "gray");
   w.kv("drawer", key.bookmark ? "bookmark" : "lighten");
   if (hasXp) w.kv("xpointer", d.xpointer);
+  if (hasXp && d.xpointerEnd && *d.xpointerEnd) {
+    w.key("position");
+    w.objectBegin();
+    w.kv("pos0", d.xpointer);
+    w.kv("pos1", d.xpointerEnd);
+    w.objectEnd();
+  }
   if (d.hasPct) {
     w.key("percentage");
     w.valuePercent(d.pctMicro > 100000000u ? 100000000u : d.pctMicro);
@@ -116,14 +147,14 @@ bool writeAnnotation(JsonWriter& w, const BookRef& book, const EventTime& time, 
 }
 
 void writeAnnotationDeleted(JsonWriter& w, const BookRef& book, const EventTime& time, bool bookmark,
-                            const uint8_t syncId[16]) {
+                            const uint8_t syncId[16], uint32_t baseRevision) {
   writeHead(w, bookmark ? "bookmark.deleted" : "annotation.deleted", "annotation");
   w.valueUuid(syncId);
   writeTail(w, book.id, time);
   w.objectBegin();
   w.key("sync_id");
   w.valueUuid(syncId);
-  writeBaseRevision(w);
+  w.kvSeq("base_revision", baseRevision);
   writeBook(w, book);
   w.objectEnd();
 }
@@ -262,6 +293,8 @@ void parseDirectiveMetadata(JsonScanner& scan, RemoteEvent& out) {
   while (scan.nextMember(key, sizeof(key))) {
     if (strcmp(key, "reading_head") == 0) {
       scan.readBool(out.readingHead);
+    } else if (strcmp(key, "annotation_revision") == 0) {
+      if (!scan.readSequence(out.annotationRevision)) out.annotationRevision = 0;
     } else if (strcmp(key, "suggestion") == 0) {
       if (scan.enterObject()) {
         char inner[12];

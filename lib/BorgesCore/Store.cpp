@@ -14,12 +14,12 @@ constexpr uint8_t kCredVersionXor = 1;  // Token and nonce XORed with the MAC. R
 constexpr uint8_t kCredVersion = 2;
 constexpr uint8_t kStateVersion = 2;  // 1 is still read: it ends before the checked mask.
 constexpr uint8_t kBookVersion = 3;
-constexpr uint8_t kAnnVersion = 1;
+constexpr uint8_t kAnnVersion = 2;
 constexpr size_t kLegacyMaxBytes = 8 * 1024;
 // Token (127) + nonce (43), their length prefixes and the box's overhead.
 constexpr size_t kSealedBytes = 127 + 43 + 4 + ISecretBox::kOverhead;
 constexpr size_t kAnnHeaderBytes = 5;  // version u8, epoch u16, count u16
-constexpr size_t kAnnRecordBytes = 25;
+constexpr size_t kAnnRecordBytes = 29;
 
 void writePosition(ByteWriter& w, const Position& p) {
   w.u8(p.hasPct ? 1 : 0);
@@ -549,6 +549,7 @@ bool Store::loadAnnotations(const BookId& id, AnnotationRecord** records, uint16
       out[i].key = r.u64();
       r.bytes(out[i].syncId, 16);
       out[i].bookmark = r.u8();
+      out[i].revision = r.u32();
     }
   }
   delete[] buf;
@@ -573,9 +574,28 @@ bool Store::saveAnnotations(const BookId& id, const AnnotationRecord* records, u
     w.u64(records[i].key);
     w.bytes(records[i].syncId, 16);
     w.u8(records[i].bookmark);
+    w.u32(records[i].revision);
   }
   const bool ok = w.ok() && saveShardRecord(annFile_, path, buf, w.size());
   delete[] buf;
+  return ok;
+}
+
+bool Store::noteAnnotationRevision(const BookId& id, const uint8_t syncId[16], uint64_t revision) {
+  AnnotationRecord* records = nullptr;
+  uint16_t count = 0;
+  if (!loadAnnotations(id, &records, &count)) return false;
+  bool ok = true;
+  for (uint16_t i = 0; i < count; ++i) {
+    if (memcmp(records[i].syncId, syncId, 16) != 0) continue;
+    const uint32_t value = revision > 0xFFFFFFFFu ? 0xFFFFFFFFu : static_cast<uint32_t>(revision);
+    if (records[i].revision != value) {
+      records[i].revision = value;
+      ok = saveAnnotations(id, records, count);
+    }
+    break;
+  }
+  delete[] records;
   return ok;
 }
 

@@ -740,7 +740,7 @@ TimePrecision parsePrecision(const std::string& s) {
 
 // ---------------------------------------------------------------------------------
 // The book's clippings, from a TSV prepared by the test. One row per clip:
-// spine offset hash bookmark text note chapter color xpointer page pctMicro timeMs
+// spine offset hash bookmark text note chapter color xpointer page pctMicro timeMs xpointerEnd
 // \t, \n and \\ are escaped. A first line UNREADABLE makes count() fail.
 // ---------------------------------------------------------------------------------
 
@@ -777,7 +777,7 @@ class TsvClips : public IClipSource {
         if (tab == std::string::npos) break;
         start = tab + 1;
       }
-      f.resize(12);
+      f.resize(13);
       rows_.push_back(std::move(f));
     }
   }
@@ -804,6 +804,7 @@ class TsvClips : public IClipSource {
     out.chapter = f[6].c_str();
     out.color = f[7].empty() ? nullptr : f[7].c_str();
     out.xpointer = f[8].empty() ? nullptr : f[8].c_str();
+    out.xpointerEnd = f[12].empty() ? nullptr : f[12].c_str();
     out.page = f[9].empty() ? -1 : atoi(f[9].c_str());
     if (!f[10].empty() && f[10] != "-1") {
       out.hasPct = true;

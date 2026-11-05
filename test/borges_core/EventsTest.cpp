@@ -124,6 +124,66 @@ TEST(Events, AnnotationHasAllTheFieldsAndDefaultsToGray) {
   EXPECT_TRUE(payload["note"].isUnbound());
 }
 
+TEST(Events, AHighlightCarriesBothEndsSoItCrossesIntoKoreader) {
+  ClipKey key;
+  ClipDetail detail;
+  detail.text = "texto";
+  detail.xpointer = "/body/p[3]/text().10";
+  detail.xpointerEnd = "/body/p[3]/text().15";
+  uint8_t syncId[16] = {0};
+  auto doc = parse(render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
+  EXPECT_EQ(doc["payload"]["xpointer"], "/body/p[3]/text().10");
+  EXPECT_EQ(doc["payload"]["position"]["pos0"], "/body/p[3]/text().10");
+  EXPECT_EQ(doc["payload"]["position"]["pos1"], "/body/p[3]/text().15");
+  detail.xpointerEnd = nullptr;
+  auto single = parse(render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
+  EXPECT_TRUE(single["payload"]["position"].isUnbound());
+}
+
+TEST(Events, ThePageIsTheBookWideOneWorkedOutFromThePercent) {
+  ClipKey key;
+  ClipDetail detail;
+  detail.text = "texto";
+  detail.hasPct = true;
+  detail.pctMicro = 37500000;  // 37.5% of 200.
+  uint8_t syncId[16] = {0};
+  auto doc = parse(render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
+  EXPECT_EQ(doc["payload"]["page"], 75);
+  EXPECT_EQ(events::referencePage(0, 200), 1);
+  EXPECT_EQ(events::referencePage(100000000, 200), 200);
+  EXPECT_EQ(events::referencePage(100000001, 200), 200);
+  EXPECT_EQ(events::referencePage(50000000, 0), -1);
+}
+
+TEST(Events, ABookmarkAlwaysHasAPageAndText) {
+  ClipKey key;
+  key.bookmark = true;
+  ClipDetail detail;
+  detail.text = "";
+  detail.hasPct = true;
+  detail.pctMicro = 10000000;
+  uint8_t syncId[16] = {0};
+  auto doc = parse(render([&](JsonWriter& w) { EXPECT_TRUE(events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId)); }));
+  EXPECT_EQ(doc["payload"]["page"], 20);
+  EXPECT_EQ(doc["payload"]["text"], "Bookmark - page 20");
+}
+
+TEST(Events, TextIsNormalizedAsKoreaderDoes) {
+  ClipKey key;
+  ClipDetail detail;
+  detail.text = "uno\r\ndos\rtres\n\"cuatro\"";
+  detail.page = 1;
+  uint8_t syncId[16] = {0};
+  auto doc = parse(render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
+  EXPECT_EQ(doc["payload"]["text"], "uno\ndos\ntres\n\"cuatro\"");
+}
+
+TEST(Events, DeleteCarriesTheRevisionItLastSaw) {
+  uint8_t syncId[16] = {0};
+  auto doc = parse(render([&](JsonWriter& w) { events::writeAnnotationDeleted(w, Device::bookRef(), exactTime(), false, syncId, 7); }));
+  EXPECT_EQ(doc["payload"]["base_revision"], "7");
+}
+
 TEST(Events, BookmarksUseTheirOwnEventTypes) {
   ClipKey key;
   key.bookmark = true;
@@ -135,7 +195,7 @@ TEST(Events, BookmarksUseTheirOwnEventTypes) {
   EXPECT_EQ(doc["event_type"], "bookmark.upserted");
   EXPECT_EQ(doc["payload"]["drawer"], "bookmark");
   EXPECT_EQ(doc["payload"]["kind"], "bookmark");
-  auto del = parse(render([&](JsonWriter& w) { events::writeAnnotationDeleted(w, Device::bookRef(), exactTime(), true, syncId); }));
+  auto del = parse(render([&](JsonWriter& w) { events::writeAnnotationDeleted(w, Device::bookRef(), exactTime(), true, syncId, 0); }));
   EXPECT_EQ(del["event_type"], "bookmark.deleted");
 }
 
@@ -149,7 +209,7 @@ TEST(Events, AnnotationsCarryABaseRevisionAsKOReaderDoes) {
   uint8_t syncId[16] = {1};
   auto created = parse(render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
   EXPECT_STREQ(created["payload"]["base_revision"] | "", "0");
-  auto deleted = parse(render([&](JsonWriter& w) { events::writeAnnotationDeleted(w, Device::bookRef(), exactTime(), false, syncId); }));
+  auto deleted = parse(render([&](JsonWriter& w) { events::writeAnnotationDeleted(w, Device::bookRef(), exactTime(), false, syncId, 0); }));
   EXPECT_STREQ(deleted["payload"]["base_revision"] | "", "0");
 }
 

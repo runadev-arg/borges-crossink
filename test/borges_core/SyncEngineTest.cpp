@@ -923,6 +923,48 @@ std::string remoteAnnotation(uint64_t seq, const std::string& origin, const std:
 
 }  // namespace
 
+TEST_F(SyncEngineTest, AWebEditIsRememberedSoDeletingItIsNotAConflict) {
+  AnnotationRecord record{};
+  record.key = 5;
+  uint8_t syncId[16];
+  ASSERT_TRUE(uuidParse("50000000-0000-4000-8000-000000000001", syncId));
+  memcpy(record.syncId, syncId, 16);
+  ASSERT_TRUE(d.store->saveAnnotations(Device::book(), &record, 1));
+
+  std::string edited = remoteAnnotation(10, kOtherId, "annotation.updated", "editado");
+  const std::string empty = "\"directive_metadata\":{}";
+  edited.replace(edited.find(empty), empty.size(), "\"directive_metadata\":{\"annotation_revision\":\"4\"}");
+  d.server.addFeedEvent(10, edited);
+  EXPECT_EQ(manual().eventsApplied, 1);
+
+  AnnotationRecord* loaded = nullptr;
+  uint16_t count = 0;
+  ASSERT_TRUE(d.store->loadAnnotations(Device::book(), &loaded, &count));
+  ASSERT_EQ(count, 1);
+  EXPECT_EQ(loaded[0].revision, 4u);
+  delete[] loaded;
+
+  // The reader deletes it: the event builds on what the web left.
+  class NoClips : public IClipSource {
+   public:
+    bool count(size_t& out) override {
+      out = 0;
+      return true;
+    }
+    bool key(size_t, ClipKey&) override { return false; }
+    bool detail(size_t, ClipDetail&) override { return false; }
+  } none;
+  FinalizeInput input = d.finalizeInput(30);
+  input.paged = false;
+  input.clips = &none;
+  ASSERT_EQ(d.engine->finalizeBook(input).annotationsDeleted, 1);
+  ASSERT_EQ(manual().outcome, SessionOutcome::Ok);
+  ASSERT_EQ(d.server.recorded.size(), 1u);
+  JsonDocument doc;
+  ASSERT_FALSE(deserializeJson(doc, d.server.recorded[0].body));
+  EXPECT_EQ(doc["payload"]["base_revision"], "4");
+}
+
 TEST_F(SyncEngineTest, InboundAnnotationsMoveTheCursorAndLeaveNothingOnTheCard) {
   d.server.addFeedEvent(10, remoteAnnotation(10, kOtherId, "annotation.created", std::string(3000, 'a')));
   d.server.addFeedEvent(11, remoteAnnotation(11, kOtherId, "annotation.deleted", ""));

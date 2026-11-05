@@ -522,6 +522,11 @@ void JsonWriter::arrayEnd() {
 
 void JsonWriter::escaped(const char* text, size_t len) {
   put("\"", 1);
+  escapedRun(text, len);
+  put("\"", 1);
+}
+
+void JsonWriter::escapedRun(const char* text, size_t len) {
   size_t runStart = 0;
   for (size_t i = 0; i < len; ++i) {
     const unsigned char c = static_cast<unsigned char>(text[i]);
@@ -540,7 +545,6 @@ void JsonWriter::escaped(const char* text, size_t len) {
     }
   }
   put(text + runStart, len - runStart);
-  put("\"", 1);
 }
 
 void JsonWriter::key(const char* name) {
@@ -555,6 +559,21 @@ void JsonWriter::value(const char* text) { value(text, strlen(text)); }
 void JsonWriter::value(const char* text, size_t len) {
   sep();
   escaped(text, len);
+  needComma_ = true;
+}
+
+void JsonWriter::valueNormalizedText(const char* text) {
+  sep();
+  put("\"", 1);
+  const char* run = text;
+  for (const char* p = text;; ++p) {
+    if (*p != '\0' && *p != '\r') continue;
+    escapedRun(run, static_cast<size_t>(p - run));
+    if (*p == '\0') break;
+    if (p[1] != '\n') put("\\n", 2);
+    run = p + 1;
+  }
+  put("\"", 1);
   needComma_ = true;
 }
 

@@ -121,6 +121,8 @@ class JsonWriter {
   void valueInt(int64_t v);
   void valueBool(bool v);
   void valueNull();
+  // As annotationadapter.lua:normalizedText: CRLF and a lone CR become LF.
+  void valueNormalizedText(const char* text);
   void valuePercent(uint32_t micro);  // 0..100000000 as a JSON number with up to 6 decimals.
   void valueUuid(const uint8_t bytes[16]);
   void markValue() { needComma_ = true; }  // After rawBytes() wrote a complete value.
@@ -151,6 +153,7 @@ class JsonWriter {
   void put(const char* data, size_t len);
   void sep();
   void escaped(const char* text, size_t len);
+  void escapedRun(const char* text, size_t len);
   char* buf_;
   size_t cap_;
   size_t len_ = 0;

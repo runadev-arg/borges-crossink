@@ -130,7 +130,11 @@ posiciones es chica.` · `La ubicación es aproximada: puede caer unos renglones
 - Annotation: `aggregate_type:"annotation"`, `aggregate_id` = `payload.sync_id` (UUID), `text`
   required, at least one of `xpointer`/`position`/`page`. Optional `chapter`, `note`, `color`
   (default **gray**), `drawer` (`lighten`, `bookmark`), `time` (epoch ms), `percentage`,
-  `book:{title,author,file,total_pages}` (required so the server can create the document).
+  `book:{title,author,file,total_pages}` (required so the server can create the document). A highlight
+  crosses into KOReader only with `xpointer` and `position:{pos0,pos1}`, both resolving, and text
+  matching that range (`annotationadapter.lua`, `buildItem`); a bookmark needs `xpointer`. `page` is
+  the book-wide reference page, as in progress. `base_revision` on a delete is the last revision seen
+  from another device.
 - `session.ended`: `started_at`, `ended_at`, `duration_seconds` (60-14400, otherwise do not emit),
   `pages_read`, `start_page`, `end_page`. `aggregate_id` `session:<hash>:<started_at>`.
 - All 64-bit integers are decimal strings. Ack `accepted` and `rejected` both leave the outbox.

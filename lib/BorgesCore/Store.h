@@ -144,6 +144,7 @@ struct AnnotationRecord {
   uint64_t key;
   uint8_t syncId[16];
   uint8_t bookmark;
+  uint32_t revision;  // Newest revision seen from another device. 0: only ever touched here.
 };
 
 class Store {
@@ -185,6 +186,9 @@ class Store {
   // *records must be released with delete[].
   bool loadAnnotations(const BookId& id, AnnotationRecord** records, uint16_t* count);
   bool saveAnnotations(const BookId& id, const AnnotationRecord* records, uint16_t count);
+  // Someone else changed this annotation. A clipping this device never published is not its
+  // business, so that costs no write. False only on IO.
+  bool noteAnnotationRevision(const BookId& id, const uint8_t syncId[16], uint64_t revision);
 
   IFs& fs() { return fs_; }
 
