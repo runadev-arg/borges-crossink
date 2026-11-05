@@ -44,9 +44,9 @@ enum class PositionCoordinateSpace : uint8_t {
  * CrossPoint tracks position as (spineIndex, pageNumber).
  * KOReader uses XPath-like strings + percentage.
  *
- * Since CrossPoint discards HTML structure during parsing, we generate
- * synthetic XPath strings based on spine index, using percentage as the
- * primary sync mechanism.
+ * The mapping goes through the visible text offset, the coordinate the section
+ * cache keeps per page, and ChapterXPathResolver, which is held to KOReader's
+ * real engine by test/borges_xpointer.
  */
 class ProgressMapper {
  public:
@@ -64,8 +64,10 @@ class ProgressMapper {
   /**
    * Convert KOReader position to CrossPoint format.
    *
-   * Note: The returned pageNumber may be approximate since different
-   * rendering settings produce different page counts.
+   * The exact position is visibleTextOffset. pageNumber is an estimate until the
+   * section cache turns that offset into a page, and is all there is when the
+   * xpointer is not in this book: then the percentage is used, inside the chapter
+   * the xpointer names.
    *
    * @param epub The EPUB book
    * @param koPos KOReader position
@@ -91,13 +93,4 @@ class ProgressMapper {
    */
   static std::optional<CrossPointPosition> fromRichPosition(const std::shared_ptr<Epub>& epub,
                                                             const KOReaderRichPosition& rich, GfxRenderer& renderer);
-
- private:
-  /**
-   * Generate a fallback XPath by streaming the spine item's XHTML and resolving
-   * a paragraph/text position from intra-spine progress.
-   * Produces a full ancestry path such as
-   * /body/DocFragment[3]/body/p[42]/text().17.
-   */
-  static std::string generateXPath(const std::shared_ptr<Epub>& epub, int spineIndex, float intraSpineProgress);
 };

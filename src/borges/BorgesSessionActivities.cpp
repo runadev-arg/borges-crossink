@@ -12,6 +12,7 @@
 #include "BorgesUi.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "Epub/Section.h"
 #include "MappedInputManager.h"
 #include "ProgressMapper.h"
 #include "SilentRestart.h"
@@ -304,8 +305,18 @@ bool BorgesResumeActivity::applyJump() {
   KOReaderPosition target;
   target.xpath = request.xpointer;
   target.percentage = request.fraction;
-  const CrossPointPosition mapped =
-      ProgressMapper::toCrossPoint(epub, target, hasLocal ? progress.spineIndex : -1, pageCount);
+  CrossPointPosition mapped = ProgressMapper::toCrossPoint(epub, target, hasLocal ? progress.spineIndex : -1, pageCount);
+  if (mapped.valid && mapped.hasVisibleTextOffset) {
+    // With a layout on disk the page is known now. Without one the reader finds it from the saved
+    // offset once it has laid the chapter out, so a book just downloaded opens at the same place.
+    Section section(epub, mapped.spineIndex, renderer);
+    if (const auto pages = section.getCachedPageCount(); pages && *pages > 0) {
+      mapped.totalPages = *pages;
+      if (const auto page = section.getPageForVisibleTextOffset(mapped.visibleTextOffset, true)) {
+        mapped.pageNumber = *page;
+      }
+    }
+  }
   SavedPosition saved;
   if (!mapped.valid ||
       !normalizeForSave(mapped.spineIndex, mapped.pageNumber, mapped.totalPages, epub->getSpineItemsCount(), saved)) {
