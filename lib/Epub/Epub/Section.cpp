@@ -33,7 +33,7 @@ constexpr uint32_t SECTION_CACHE_MAGIC = 0x535843FF;  // bytes: 0xFF, "CXS"
 // v81: HTML and body text indents now inherit into descendant blocks.
 // v82: Scalable headings and blocks serialize point size and line height.
 // v83: Nested blocks inherit bold and italic styles, changing glyphs and wrapping.
-constexpr uint8_t SECTION_FILE_VERSION = 83;
+constexpr uint8_t SECTION_FILE_VERSION = 84;
 // Suspended incremental build: valid pages plus LUTs and a parse-watermark trailer.
 // Change this with layout or payload changes so stale partial pages cannot resume
 // under a different layout contract.

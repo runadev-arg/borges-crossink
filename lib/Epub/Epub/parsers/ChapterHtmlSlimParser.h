@@ -67,6 +67,7 @@ class ChapterHtmlSlimParser {
   bool referenceWhitespacePending = false;
   bool trackReferenceCharacters = false;
   int referenceExcludedUntilDepth = INT_MAX;
+  uint16_t visibleExcludedNesting = 0;  // Inside what the visible text offset does not count
   uint16_t currentTextRunBytes = 0;
   bool nextWordContinues = false;  // true when next flushed word attaches to previous (inline element boundary)
   std::unique_ptr<ParsedText> currentTextBlock = nullptr;

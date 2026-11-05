@@ -32,6 +32,7 @@
 #include "Epub/htmlEntities.h"
 #include "Epub/tables/TableColumnLayout.h"
 #include "PreviewBlockLocator.h"
+#include "VisibleOffsetRules.h"
 
 // Minimum file size (in bytes) to show indexing popup - smaller chapters don't benefit from it
 constexpr size_t MIN_SIZE_FOR_POPUP = 10 * 1024;  // 10KB
@@ -1825,6 +1826,9 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
   if (self->previewStopRequested) {
     return;
   }
+  if (self->visibleExcludedNesting > 0 || isVisibleOffsetExcludedTag(name)) {
+    self->visibleExcludedNesting++;
+  }
   if (self->shouldAbortForLowMemory("element start")) {
     return;
   }
@@ -3196,17 +3200,11 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
 
   const bool countReferenceCharacters = self->trackReferenceCharacters && !self->syntheticCharacterData &&
                                         self->referenceExcludedUntilDepth >= self->depth;
-  const bool contentIsSkipped = self->tableDepth > 1 || self->skipUntilDepth < self->depth;
-  if ((contentIsSkipped || self->collectingRubyText) && countReferenceCharacters) {
-    self->consumeReferenceCharacters(s, len);
-  }
-  if (contentIsSkipped) return;
-
-  // Keep the source coordinate independent of wrapping, fonts, and orientation.
-  // `head`/`rp` are skipped above; synthetic table labels and ruby annotations do
-  // not represent the document body position.
+  // Keep the source coordinate independent of wrapping, fonts, orientation and of whether this
+  // text reaches a page: the KOReader mapper recounts it from the XHTML alone, with no stylesheet
+  // and no layout (see VisibleOffsetRules.h). Synthetic table labels are not in the document.
   const uint32_t callbackVisibleOffset = self->visibleTextOffset;
-  const bool countVisibleOffsets = !self->syntheticCharacterData && !self->collectingRubyText;
+  const bool countVisibleOffsets = !self->syntheticCharacterData && self->visibleExcludedNesting == 0;
   if (countVisibleOffsets) {
     const auto* ptr = reinterpret_cast<const unsigned char*>(s);
     const auto* const end = ptr + len;
@@ -3215,6 +3213,12 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
       self->visibleTextOffset++;
     }
   }
+
+  const bool contentIsSkipped = self->tableDepth > 1 || self->skipUntilDepth < self->depth;
+  if ((contentIsSkipped || self->collectingRubyText) && countReferenceCharacters) {
+    self->consumeReferenceCharacters(s, len);
+  }
+  if (contentIsSkipped) return;
 
   // Collect ruby text instead of normal word processing
   if (self->collectingRubyText) {
@@ -3439,6 +3443,9 @@ void XMLCALL ChapterHtmlSlimParser::endElement(void* userData, const XML_Char* n
   }
   if (self->previewStopRequested) {
     return;
+  }
+  if (self->visibleExcludedNesting > 0) {
+    self->visibleExcludedNesting--;
   }
   if (self->lowMemoryAbort) {
     return;
