@@ -88,6 +88,32 @@ TEST(JsonStream, TruncationIsFlaggedAndNeverSplitsASequence) {
   EXPECT_STREQ(out, "abc");
 }
 
+TEST(JsonStream, InvalidUtf8NeverReachesATitleOrANote) {
+  const auto read = [](const std::string& raw) {
+    StringSource source("\"" + raw + "\"");
+    JsonScanner scan(source);
+    char out[32];
+    EXPECT_TRUE(scan.readString(out, sizeof(out)));
+    return std::string(out);
+  };
+  const std::string fffd = "\xEF\xBF\xBD";
+  EXPECT_EQ(read("a\xFFz"), "a" + fffd + "z");                         // Never a lead byte.
+  EXPECT_EQ(read("a\xC3z"), "a" + fffd + "z");                         // Lead with no continuation.
+  EXPECT_EQ(read("\xC0\xAF"), fffd + fffd);                            // Overlong slash.
+  EXPECT_EQ(read("\xED\xA0\x80"), fffd + fffd + fffd);                 // Encoded surrogate.
+  EXPECT_EQ(read("\xF4\x90\x80\x80"), fffd + fffd + fffd + fffd);      // Above U+10FFFF.
+  EXPECT_EQ(read("\xE2\x82"), fffd);                                   // Cut by the closing quote.
+  EXPECT_EQ(read("\xC3\xA9\xF0\x9F\x98\x80"), "\xC3\xA9\xF0\x9F\x98\x80");  // Real text is untouched.
+}
+
+TEST(JsonStream, ControlCharactersNeverReachATitleOrANote) {
+  StringSource source(R"("a\u0001b\u001fc\u007fd\be\ff\rg\nh\ti")");
+  JsonScanner scan(source);
+  char out[40];
+  ASSERT_TRUE(scan.readString(out, sizeof(out)));
+  EXPECT_STREQ(out, "a b c d e f g\nh\ti");
+}
+
 TEST(JsonStream, TypeMismatchConsumesWithoutFailing) {
   StringSource source(R"({"a":{"deep":[1]},"b":"text","c":[1,2],"d":"7"})");
   JsonScanner scan(source);
@@ -133,6 +159,13 @@ TEST(JsonStream, PercentIsExactAndBounded) {
   EXPECT_EQ(v, 1u);
   ASSERT_TRUE(parse("99.99999999", v));
   EXPECT_EQ(v, 100000000u);
+  // The digit that rounds is the most significant one dropped, however far down it is.
+  ASSERT_TRUE(parse("0.0000000099", v));
+  EXPECT_EQ(v, 0u);
+  ASSERT_TRUE(parse("0.00000149", v));
+  EXPECT_EQ(v, 1u);
+  ASSERT_TRUE(parse("9e-9", v));
+  EXPECT_EQ(v, 0u);
   EXPECT_FALSE(parse("100.000001", v));
   EXPECT_FALSE(parse("-1", v));
   EXPECT_FALSE(parse("1e400", v));

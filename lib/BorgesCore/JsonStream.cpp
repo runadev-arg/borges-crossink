@@ -140,6 +140,33 @@ int hexDigit(int c) {
   return -1;
 }
 
+// Whatever a response holds ends up on the panel or on the card, so a string is clean
+// before anyone sees it: no control characters but line breaks and tabs.
+uint32_t displaySafe(uint32_t cp) {
+  if (cp == '\n' || cp == '\t') return cp;
+  return cp < 0x20 || cp == 0x7F ? ' ' : cp;
+}
+
+// A UTF-8 lead byte's sequence length (0 if it cannot start one) and the range its first
+// continuation byte must fall in, which is what rules out overlong forms, surrogates and
+// anything above U+10FFFF.
+uint8_t utf8Lead(int c, int& low, int& high) {
+  low = 0x80;
+  high = 0xBF;
+  if (c >= 0xC2 && c <= 0xDF) return 2;
+  if (c >= 0xE0 && c <= 0xEF) {
+    if (c == 0xE0) low = 0xA0;
+    if (c == 0xED) high = 0x9F;
+    return 3;
+  }
+  if (c >= 0xF0 && c <= 0xF4) {
+    if (c == 0xF0) low = 0x90;
+    if (c == 0xF4) high = 0x8F;
+    return 4;
+  }
+  return 0;
+}
+
 size_t encodeUtf8(uint32_t cp, char* out) {
   if (cp < 0x80) {
     out[0] = static_cast<char>(cp);
@@ -165,8 +192,8 @@ size_t encodeUtf8(uint32_t cp, char* out) {
 }  // namespace
 
 // Called after the opening quote. Consumes through the closing quote. out may be
-// null: the string is still validated. Raw multi-byte sequences pass through, and
-// truncation never splits one.
+// null: the string is still validated. What comes out is valid UTF-8 with no control
+// characters: bad bytes become U+FFFD. Truncation never splits a sequence.
 bool JsonScanner::scanString(char* out, size_t cap, bool* truncated) {
   size_t n = 0;
   bool cut = false;
@@ -185,14 +212,31 @@ bool JsonScanner::scanString(char* out, size_t cap, bool* truncated) {
     if (c == '"') break;
     if (c < 0x20) return false;
     if (c != '\\') {
-      char byte = static_cast<char>(c);
+      // A byte past ASCII can never be a quote or a backslash, so with nowhere to put it
+      // there is nothing to check.
       if (!out || cut) continue;
       if (c < 0x80) {
+        const char byte = c == 0x7F ? ' ' : static_cast<char>(c);
         emit(&byte, 1);
-      } else if (n + 2 > cap) {
-        cut = true;
+        continue;
+      }
+      char sequence[4] = {static_cast<char>(c)};
+      int low = 0;
+      int high = 0;
+      const uint8_t length = utf8Lead(c, low, high);
+      uint8_t have = 1;
+      while (have < length) {
+        const int next = peekc();
+        if (next < low || next > high) break;
+        sequence[have++] = static_cast<char>(next);
+        ++pos_;
+        low = 0x80;
+        high = 0xBF;
+      }
+      if (have == length && length > 0) {
+        emit(sequence, length);
       } else {
-        out[n++] = byte;
+        emit("\xEF\xBF\xBD", 3);
       }
       continue;
     }
@@ -204,20 +248,16 @@ bool JsonScanner::scanString(char* out, size_t cap, bool* truncated) {
       case '/':
         plain = static_cast<char>(e);
         break;
-      case 'b':
-        plain = '\b';
-        break;
-      case 'f':
-        plain = '\f';
-        break;
       case 'n':
         plain = '\n';
         break;
-      case 'r':
-        plain = '\r';
-        break;
       case 't':
         plain = '\t';
+        break;
+      case 'b':
+      case 'f':
+      case 'r':
+        plain = ' ';
         break;
       case 'u':
         break;
@@ -249,17 +289,10 @@ bool JsonScanner::scanString(char* out, size_t cap, bool* truncated) {
       cp = 0xFFFD;  // A lone surrogate, or a NUL that would end the C string early.
     }
     char encoded[4];
-    const size_t count = encodeUtf8(cp, encoded);
+    const size_t count = encodeUtf8(displaySafe(cp), encoded);
     emit(encoded, count);
   }
-  if (out) {
-    // Raw bytes may have stopped mid-sequence when the room ran out.
-    if (cut) {
-      while (n > 0 && (static_cast<uint8_t>(out[n - 1]) & 0xC0) == 0x80) --n;
-      if (n > 0 && (static_cast<uint8_t>(out[n - 1]) & 0xC0) == 0xC0) --n;
-    }
-    if (cap > 0) out[n] = '\0';
-  }
+  if (out && cap > 0) out[n] = '\0';
   if (truncated) *truncated = cut;
   return true;
 }
@@ -508,11 +541,16 @@ bool JsonScanner::readPercentMicro(uint32_t& out) {
     mantissa *= 10;
     --scale;
   }
+  // The last digit dropped is the one that rounds: a digit dropped earlier must not
+  // survive the mantissa running out before the scale does.
   bool roundUp = false;
-  while (scale < 0 && mantissa) {
+  for (; scale < 0; ++scale) {
     roundUp = mantissa % 10 >= 5;
     mantissa /= 10;
-    ++scale;
+    if (mantissa == 0 && scale < -1) {
+      roundUp = false;
+      break;
+    }
   }
   if (roundUp) ++mantissa;
   if (mantissa > 100000000ULL) return false;
