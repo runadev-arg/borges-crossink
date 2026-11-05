@@ -619,7 +619,7 @@ void BorgesResumeActivity::render(RenderLock&&) {
   drawActionRow(renderer, area.x, rowsTop + rowHeight + kActionGap, area.width, rowHeight, stay, focus_ == 1);
 
   // Back answers nothing: the book opens where it was and this asks again. It says so.
-  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BORGES_LATER)), tr(STR_SELECT),
+  const auto labels = mappedInput.mapLabels(MappedInputManager::Label(tr(STR_BORGES_LATER)), tr(STR_SELECT),
                                             tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   // The screen before it is a line of text on white, so fast is clean enough. A panel will tell.
