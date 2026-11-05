@@ -107,6 +107,9 @@ class MemFs : public IFs {
   void failSeeks(const std::string& path) { failSeekPath_ = path; }
   void failOpen(const std::string& path) { failOpenPath_ = path; }
   void failWritesTo(const std::string& path) { failWritePath_ = path; }
+  // As on SdFat: opening for write in a directory that does not exist fails.
+  void requireDirs() { strictDirs_ = true; }
+  uint64_t lookups() const { return lookups_; }
   std::vector<std::string> paths() const {
     std::vector<std::string> out;
     for (const auto& kv : files_) out.push_back(kv.first);
@@ -125,7 +128,12 @@ class MemFs : public IFs {
   // IFs
   Handle open(const char* path, Mode mode) override {
     if (dead_ || failOpenPath_ == path) return kInvalid;
+    ++lookups_;
     if (mode == Mode::Read && files_.count(path) == 0) return kInvalid;
+    if (mode != Mode::Read && strictDirs_ && files_.count(path) == 0) {
+      const std::string parent = std::string(path).substr(0, std::string(path).rfind('/'));
+      if (dirs_.count(parent) == 0) return kInvalid;
+    }
     if (mode != Mode::Read && !tick()) return kInvalid;
     Data& d = files_[path];
     if (mode == Mode::WriteTrunc) {
@@ -196,7 +204,10 @@ class MemFs : public IFs {
     handles_[static_cast<size_t>(h)].used = false;
     --openCount_;
   }
-  bool exists(const char* path) override { return !dead_ && (files_.count(path) != 0 || dirs_.count(path) != 0); }
+  bool exists(const char* path) override {
+    ++lookups_;
+    return !dead_ && (files_.count(path) != 0 || dirs_.count(path) != 0);
+  }
   bool remove(const char* path) override {
     if (dead_) return false;
     if (files_.count(path) == 0) return true;
@@ -238,6 +249,8 @@ class MemFs : public IFs {
   std::vector<Open> handles_;
   std::map<std::string, uint64_t> writesByPath_;
   uint64_t ops_ = 0;
+  uint64_t lookups_ = 0;
+  bool strictDirs_ = false;
   uint64_t killAt_ = 0;
   bool dead_ = false;
   TornMode torn_ = TornMode::Drop;

@@ -117,7 +117,12 @@ bool BookLedger::hasChoice(uint64_t fingerprint) const {
 }
 
 Store::Store(IFs& fs, const uint8_t* key, size_t keyLen)
-    : fs_(fs), keyLen_(0), credFile_(fs, "/.crosspoint/borges/cred"), stateFile_(fs, "/.crosspoint/borges/state") {
+    : fs_(fs),
+      keyLen_(0),
+      credFile_(fs, "/.crosspoint/borges/cred"),
+      stateFile_(fs, "/.crosspoint/borges/state"),
+      bookFile_(fs, ""),
+      annFile_(fs, "") {
   keyLen_ = static_cast<uint8_t>(keyLen > sizeof(key_) ? sizeof(key_) : keyLen);
   if (key && keyLen_) memcpy(key_, key, keyLen_);
 }
@@ -298,8 +303,23 @@ void Store::bookPath(const char* subdir, const BookId& id, char* out) const {
   out[a] = '/';
   const size_t b = strlen(subdir);
   memcpy(out + a + 1, subdir, b);
-  out[a + 1 + b] = '/';
-  memcpy(out + a + 2 + b, id.hex, 33);
+  char* name = out + a + 1 + b;
+  name[0] = '/';
+  name[1] = id.hex[0];
+  name[2] = id.hex[1];
+  name[3] = '/';
+  memcpy(name + 4, id.hex + 2, 31);
+}
+
+bool Store::saveShardRecord(AtomicFile& file, const char* path, const void* payload, size_t len) {
+  if (file.save(payload, len)) return true;
+  // The common cause of a failed first save, and a lookup not worth paying on every save.
+  char dir[AtomicFile::kMaxPath];
+  const char* slash = strrchr(path, '/');
+  const size_t n = static_cast<size_t>(slash - path);
+  memcpy(dir, path, n);
+  dir[n] = '\0';
+  return fs_.mkdir(dir) && file.save(payload, len);
 }
 
 bool Store::loadBook(const BookId& id, BookLedger& out) {
@@ -307,7 +327,8 @@ bool Store::loadBook(const BookId& id, BookLedger& out) {
   out.id = id;
   char path[AtomicFile::kMaxPath];
   bookPath("books", id, path);
-  AtomicFile file(fs_, path);
+  AtomicFile& file = bookFile_;
+  file.setPath(path);
   uint8_t* buf = new (std::nothrow) uint8_t[2400];
   if (!buf) return false;
   size_t len = 0;
@@ -354,7 +375,7 @@ bool Store::loadBook(const BookId& id, BookLedger& out) {
 bool Store::saveBook(const BookLedger& l) {
   char path[AtomicFile::kMaxPath];
   bookPath("books", l.id, path);
-  AtomicFile file(fs_, path);
+  bookFile_.usePath(path);
   uint8_t* buf = new (std::nothrow) uint8_t[2400];
   if (!buf) return false;
   ByteWriter w(buf, 2400);
@@ -376,7 +397,7 @@ bool Store::saveBook(const BookLedger& l) {
   w.u8(static_cast<uint8_t>(l.suggestionAction));
   w.u8(l.choiceCount);
   for (uint8_t i = 0; i < l.choiceCount; ++i) w.u64(l.choices[i]);
-  const bool ok = w.ok() && file.save(buf, w.size());
+  const bool ok = w.ok() && saveShardRecord(bookFile_, path, buf, w.size());
   delete[] buf;
   return ok;
 }
@@ -386,7 +407,8 @@ bool Store::loadAnnotations(const BookId& id, AnnotationRecord** records, uint16
   *count = 0;
   char path[AtomicFile::kMaxPath];
   bookPath("ann", id, path);
-  AtomicFile file(fs_, path);
+  AtomicFile& file = annFile_;
+  file.setPath(path);
   const size_t rawCap = 3 + static_cast<size_t>(kMaxAnnotations) * 25;
   uint8_t* buf = new (std::nothrow) uint8_t[rawCap];
   if (!buf) return false;
@@ -431,7 +453,7 @@ bool Store::saveAnnotations(const BookId& id, const AnnotationRecord* records, u
   if (count > kMaxAnnotations) return false;
   char path[AtomicFile::kMaxPath];
   bookPath("ann", id, path);
-  AtomicFile file(fs_, path);
+  annFile_.usePath(path);
   const size_t cap = 5 + static_cast<size_t>(count) * 25;
   uint8_t* buf = new (std::nothrow) uint8_t[cap];
   if (!buf) return false;
@@ -444,7 +466,7 @@ bool Store::saveAnnotations(const BookId& id, const AnnotationRecord* records, u
     w.bytes(records[i].syncId, 16);
     w.u8(records[i].bookmark);
   }
-  const bool ok = w.ok() && file.save(buf, w.size());
+  const bool ok = w.ok() && saveShardRecord(annFile_, path, buf, w.size());
   delete[] buf;
   return ok;
 }

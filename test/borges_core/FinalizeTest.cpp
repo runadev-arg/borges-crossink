@@ -333,7 +333,7 @@ TEST_F(FinalizeTest, CrashBetweenQueueingAndLedgerDoesNotDuplicateTheAnnotation)
   input.paged = false;
   input.clips = &clips;
   // The ledger write is what fails: simulates dying right after the event went durable.
-  d.fs.failWritesTo(std::string("/.crosspoint/borges/ann/") + kMd5A + ".a");
+  d.fs.failWritesTo(std::string("/.crosspoint/borges/ann/ab/") + (kMd5A + 2) + ".a");
   EXPECT_FALSE(d.engine->finalizeBook(input).ok);
   ASSERT_EQ(d.outbox->depth(), 1u);
   d.fs.failWritesTo("");

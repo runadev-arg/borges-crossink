@@ -17,8 +17,19 @@ AtomicFile::AtomicFile(IFs& fs, const char* basePath) : fs_(fs) { copyText(base_
 void AtomicFile::setPath(const char* basePath) {
   copyText(base_, sizeof(base_), basePath);
   probed_ = false;
+  fresh_ = false;
   active_ = 0;
   seq_ = 0;
+}
+
+void AtomicFile::usePath(const char* basePath) {
+  if (strcmp(base_, basePath) != 0) setPath(basePath);
+}
+
+size_t AtomicFile::payloadSize() {
+  refresh();
+  fresh_ = !ioError_;
+  return active_ ? len_ : 0;
 }
 
 void AtomicFile::slotPath(char slot, char* out) const {
@@ -33,10 +44,11 @@ AtomicFile::Probe AtomicFile::probe(char slot) {
   Probe result;
   char path[kMaxPath + 3];
   slotPath(slot, path);
-  if (!fs_.exists(path)) return result;
+  // Open first: on a directory with many long names every lookup costs, and a slot that
+  // is there needs only this one. Only a failed open has to ask why.
   File f(fs_, path, IFs::Mode::Read);
   if (!f) {
-    result.ioError = true;
+    result.ioError = fs_.exists(path);
     return result;
   }
   const int64_t size = f.size();
@@ -84,15 +96,18 @@ void AtomicFile::refresh() {
   if (a.valid && (!b.valid || a.seq >= b.seq)) {
     active_ = 'a';
     seq_ = a.seq;
+    len_ = a.len;
   } else if (b.valid) {
     active_ = 'b';
     seq_ = b.seq;
+    len_ = b.len;
   }
   probed_ = true;
 }
 
 bool AtomicFile::load(uint8_t* buf, size_t cap, size_t& len) {
-  refresh();
+  if (!fresh_) refresh();
+  fresh_ = false;
   if (ioError_) {
     probed_ = false;
     return false;
@@ -123,6 +138,7 @@ bool AtomicFile::load(uint8_t* buf, size_t cap, size_t& len) {
 
 bool AtomicFile::save(const void* payload, size_t len) {
   if (len > kMaxPayload) return false;
+  fresh_ = false;
   if (!probed_) refresh();
   if (ioError_) {
     probed_ = false;
@@ -149,6 +165,7 @@ bool AtomicFile::save(const void* payload, size_t len) {
   if (!f || !f.writeAll(header, kHeader) || !f.writeAll(payload, len) || !f.flush()) return false;
   active_ = target;
   seq_ = seq;
+  len_ = static_cast<uint32_t>(len);
   probed_ = true;
   return true;
 }

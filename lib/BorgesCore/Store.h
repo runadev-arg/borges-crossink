@@ -4,9 +4,13 @@
 //
 //   /.crosspoint/borges/cred.{a,b}          Credentials (token obfuscated with the chip key)
 //   /.crosspoint/borges/state.{a,b}         Cursor, holds, backoff, diagnostics
-//   /.crosspoint/borges/books/<md5>.{a,b}   Per-book ledger: remote head, choices, undo
-//   /.crosspoint/borges/ann/<md5>.{a,b}     Which clippings this device already published
+//   /.crosspoint/borges/books/<xx>/<rest of md5>.{a,b}  Per-book ledger: head, choices, undo
+//   /.crosspoint/borges/ann/<xx>/<rest of md5>.{a,b}    Clippings this device already published
 //   /.crosspoint/borges/inbox/<md5>[.old]   Annotations from other devices, read-only list
+//
+// Sharded by the first hex byte: with 500 books a flat directory holds 1000 long names,
+// FAT looks them up one by one, and a page of 20 books would spend most of a 12 s open
+// budget on directory scans.
 //   /.crosspoint/borges/spool/resp.json     Last response
 //
 // Ledgers belong to the account: state.accountEpoch moves on an account change and a
@@ -190,6 +194,8 @@ class Store {
 
  private:
   void bookPath(const char* subdir, const BookId& id, char* out) const;
+  // Saves, creating the shard directory the first time this book needs it.
+  bool saveShardRecord(AtomicFile& file, const char* path, const void* payload, size_t len);
   bool importLegacy();
   void obfuscate(char* text, size_t len) const;
   bool readInboxFile(const char* path, InboundAnnotation& scratch, IInboundVisitor& visitor, uint64_t& lastSeq);
@@ -199,6 +205,8 @@ class Store {
   uint8_t keyLen_;
   AtomicFile credFile_;
   AtomicFile stateFile_;
+  AtomicFile bookFile_;
+  AtomicFile annFile_;
   Credentials creds_;
   SyncState state_;
 };

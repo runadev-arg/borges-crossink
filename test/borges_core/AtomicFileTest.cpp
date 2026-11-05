@@ -41,6 +41,20 @@ TEST(AtomicFile, AlternatesSlots) {
   ASSERT_TRUE(fs.content("/s.a").find("one") != std::string::npos);
 }
 
+TEST(AtomicFile, PayloadSizeIsTheNewestValidOneAndTheLoadAfterItLooksNoFurther) {
+  MemFs fs;
+  AtomicFile f(fs, "/s");
+  EXPECT_EQ(f.payloadSize(), 0u);
+  ASSERT_TRUE(f.save("one", 3));
+  ASSERT_TRUE(f.save("three", 5));
+  AtomicFile again(fs, "/s");
+  EXPECT_EQ(again.payloadSize(), 5u);
+  const uint64_t before = fs.lookups();
+  EXPECT_EQ(load(again), "three");
+  EXPECT_EQ(fs.lookups() - before, 1u);
+  EXPECT_EQ(load(again), "three");
+}
+
 TEST(AtomicFile, NeverUsesRename) {
   // The whole point on FAT. A rename here would fail this test: the fake has no such file.
   MemFs fs;

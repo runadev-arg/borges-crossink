@@ -98,7 +98,7 @@ TEST(Store, AnUnreadableCardIsNotAnEmptyOne) {
   Store store(fs, testKey(), 6);
   ASSERT_TRUE(store.begin());
   EXPECT_EQ(store.state().cursor, 9u);
-  fs.failReadsAfter(std::string("/.crosspoint/borges/books/") + kMd5A + ".a", 0);
+  fs.failReadsAfter(std::string("/.crosspoint/borges/books/ab/") + (kMd5A + 2) + ".a", 0);
   BookLedger ledger;
   EXPECT_FALSE(store.loadBook(Device::book(), ledger));
 }
@@ -199,6 +199,41 @@ TEST(Store, RememberingAgainMovesToNewestAndKeepsFortyBooksOfChoices) {
   EXPECT_EQ(l.choices[1], 1u);
 }
 
+TEST(Store, PerBookRecordsLiveInShardDirectoriesCreatedOnDemand) {
+  MemFs fs;
+  fs.requireDirs();
+  Store store(fs, testKey(), 6);
+  ASSERT_TRUE(store.begin());
+  BookLedger ledger;
+  ASSERT_TRUE(store.loadBook(Device::book(), ledger));
+  ledger.hasUndo = true;
+  ASSERT_TRUE(store.saveBook(ledger));
+  AnnotationRecord record{};
+  record.key = 7;
+  ASSERT_TRUE(store.saveAnnotations(Device::book(), &record, 1));
+  const std::string rest = kMd5A + 2;
+  EXPECT_TRUE(fs.has("/.crosspoint/borges/books/ab/" + rest + ".a"));
+  EXPECT_TRUE(fs.has("/.crosspoint/borges/ann/ab/" + rest + ".a"));
+  ASSERT_TRUE(store.loadBook(Device::book(), ledger));
+  EXPECT_TRUE(ledger.hasUndo);
+}
+
+TEST(Store, ALoadThenSaveOfAPerBookRecordDoesNotLookTwice) {
+  MemFs fs;
+  Store store(fs, testKey(), 6);
+  ASSERT_TRUE(store.begin());
+  BookLedger ledger;
+  ASSERT_TRUE(store.loadBook(Device::book(), ledger));
+  ASSERT_TRUE(store.saveBook(ledger));
+  ASSERT_TRUE(store.saveBook(ledger));
+  const uint64_t before = fs.lookups();
+  ASSERT_TRUE(store.loadBook(Device::book(), ledger));
+  EXPECT_LE(fs.lookups() - before, 3u) << "one per slot and one to read the winner";
+  const uint64_t afterLoad = fs.lookups();
+  ASSERT_TRUE(store.saveBook(ledger));
+  EXPECT_EQ(fs.lookups() - afterLoad, 1u) << "only the open of the slot it writes";
+}
+
 TEST(Store, AnnotationLedgerRoundTrip) {
   MemFs fs;
   Store store(fs, testKey(), 6);
@@ -242,7 +277,7 @@ TEST(Store, InboxListsInOrderSkipsDuplicatesAndTornBytes) {
   ASSERT_TRUE(store.appendInbound(book, a));
   // Redelivery after a crash before the ledger save.
   ASSERT_TRUE(store.appendInbound(book, a));
-  const std::string path = std::string("/.crosspoint/borges/inbox/") + kMd5A;
+  const std::string path = std::string("/.crosspoint/borges/inbox/ab/") + (kMd5A + 2);
   fs.put(path, fs.content(path) + fs.content(path).substr(0, 15));  // Torn tail.
   a.serverSeq = 11;
   copyText(a.text, sizeof(a.text), "dos");
@@ -266,7 +301,7 @@ TEST(Store, InboxRotatesAndStaysBounded) {
     a.serverSeq = i;
     ASSERT_TRUE(store.appendInbound(book, a));
   }
-  const std::string path = std::string("/.crosspoint/borges/inbox/") + kMd5A;
+  const std::string path = std::string("/.crosspoint/borges/inbox/ab/") + (kMd5A + 2);
   EXPECT_TRUE(fs.has(path + ".old"));
   EXPECT_LE(fs.content(path).size(), Store::kInboxRotateBytes + 2048);
   InboundAnnotation scratch;

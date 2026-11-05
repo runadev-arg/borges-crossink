@@ -21,6 +21,13 @@ class AtomicFile {
 
   AtomicFile(IFs& fs, const char* basePath);
   void setPath(const char* basePath);  // Forgets what it knew about the previous path.
+  // Same, but keeps what it knows when the path did not change: a save right after a load of
+  // the same record does not look at the card again.
+  void usePath(const char* basePath);
+
+  // Length of the newest valid payload, 0 when there is none (see ioError()). The load()
+  // right after it reuses this look at the slots, so a caller can allocate exactly.
+  size_t payloadSize();
 
   // Newest valid payload. False when no slot is valid, or it does not fit in cap.
   bool load(uint8_t* buf, size_t cap, size_t& len);
@@ -46,9 +53,11 @@ class AtomicFile {
   IFs& fs_;
   char base_[kMaxPath];
   bool probed_ = false;
+  bool fresh_ = false;  // The next load() may use this probe.
   bool ioError_ = false;
   char active_ = 0;  // Slot holding the newest valid record; 0 when there is none.
   uint32_t seq_ = 0;
+  uint32_t len_ = 0;
 };
 
 }  // namespace borges
