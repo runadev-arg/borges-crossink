@@ -255,7 +255,7 @@ async function toggleBookmarkRow(d) {
 }
 
 // Rows: Add/Remove Bookmark, [View Bookmarks, Clear], Create Clipping, [View Clippings],
-// Sync now, [Undo], Nearby..., and the first Down only takes the focus to the first row.
+// Sync now, Go to where another reader left off, [Undo], Nearby..., and the first Down only takes the focus to the first row.
 export function locationRows({ hasBookmarks = false, hasClippings = false, hasUndo = false } = {}) {
   let i = 0;
   const rows = { bookmark: i++ };
@@ -266,6 +266,7 @@ export function locationRows({ hasBookmarks = false, hasClippings = false, hasUn
   rows.clip = i++;
   if (hasClippings) rows.viewClippings = i++;
   rows.sync = i++;
+  rows.otherDevice = i++;
   if (hasUndo) rows.undo = i++;
   return rows;
 }

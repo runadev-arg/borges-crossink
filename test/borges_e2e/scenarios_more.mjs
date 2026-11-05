@@ -53,8 +53,8 @@ async function scenario6({ h, t, makeDevice }) {
   await d.tap("CONFIRM", { settleMs: 400 });
   await d.shot("power-button");
   await d.tap("CONFIRM", { settleMs: 400 });
-  // Ignore, Sleep/Wake, ... "Sync now" is the sixteenth, under "Sync Progress".
-  for (let i = 0; i < 15; i += 1) await d.tap("DOWN", { settleMs: 100 });
+  // Ignore, Sleep/Wake, ... "Sync now" is the fifteenth: a paired reader does not list "Sync Progress".
+  for (let i = 0; i < 14; i += 1) await d.tap("DOWN", { settleMs: 100 });
   await d.shot("short-press-picker-sync-now");
   await d.tap("CONFIRM", { settleMs: 400 });
   await d.shot("short-press-assigned");
