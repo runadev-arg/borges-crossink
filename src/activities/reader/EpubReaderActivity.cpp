@@ -5226,6 +5226,7 @@ bool EpubReaderActivity::handleShortcutAction(const uint8_t rawAction) {
   }
   return false;
 }
+    case CrossPointSettings::SHORT_PWRBTN::BORGES_SYNC:
 
 bool EpubReaderActivity::handleShortcutAction(const CrossPointSettings::SHORT_PWRBTN action) {
   if (action == CrossPointSettings::SHORT_PWRBTN::HOME_READER) return dispatchShortcutAction(action);

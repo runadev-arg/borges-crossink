@@ -9,6 +9,7 @@
 #include <functional>
 
 #include "CrossPointSettings.h"
+#include "borges/BorgesGlue.h"
 
 class OptionPopup;
 
@@ -105,6 +106,7 @@ inline bool isActionAvailable(const uint8_t action) {
       action == CrossPointSettings::LIBRARY || action == CrossPointSettings::BORGES_SYNC)
     return true;
   if (action == CrossPointSettings::QUICK_ACTIONS || action == CrossPointSettings::QUICK_LOCK) return true;
+  if (action == CrossPointSettings::SYNC_PROGRESS && borges::glue::isPaired()) return false;
   if (action == CrossPointSettings::TOGGLE_FRONTLIGHT) return Frontlight.present();
   if (action == CrossPointSettings::TOGGLE_TOUCHSCREEN) return gpio.hasTouch();
   if (action == CrossPointSettings::HOME_READER) return !gpio.hasTouch();

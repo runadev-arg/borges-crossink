@@ -701,6 +701,18 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
       }
     }
   }
+  // Paired, Borges is the sync: two rows that both say it ask the reader to know the difference.
+  if (borges::glue::isPaired()) {
+    for (auto& setting : v) {
+      if (settingKeyIs(setting, "shortPwrBtn") || settingKeyIs(setting, "longPwrBtn")) {
+        removeEnumRawValue(setting, shortcutRawValue(ShortcutOptionCatalog::PowerButton,
+                                                     CrossPointSettings::SHORT_PWRBTN::SYNC_PROGRESS));
+      } else if (settingKeyIs(setting, "powerChordAction") || settingKeyIs(setting, "sideButtonChordAction")) {
+        removeEnumRawValue(setting, shortcutRawValue(ShortcutOptionCatalog::ButtonChord,
+                                                     CrossPointSettings::SHORT_PWRBTN::SYNC_PROGRESS));
+      }
+    }
+  }
   if (!Frontlight.present() || !gpio.hasTouch()) {
     for (auto& setting : v) {
       if (!settingKeyIs(setting, "shortPwrBtn") && !settingKeyIs(setting, "longPwrBtn") &&
