@@ -1014,6 +1014,16 @@ TEST_F(SyncEngineTest, FocusOwnReleasesTheHold) {
   EXPECT_EQ(d.store->state().holds.size(), 0);
 }
 
+TEST_F(SyncEngineTest, OwnHeadIsOfferedWhenThisDeviceHasNoPlace) {
+  d.server.focusEvent = focusEventJson(kSelfId, kMd5A, 50);
+  Position nowhere;
+  ResumeDecision decision;
+  EXPECT_EQ(d.engine->runOpenSession(Device::bookRef(), nowhere, decision).outcome, SessionOutcome::AwaitingChoice);
+  EXPECT_TRUE(decision.ask);
+  EXPECT_EQ(decision.remotePct, 50000000u);
+  EXPECT_EQ(d.store->state().holds.size(), 1);
+}
+
 TEST_F(SyncEngineTest, FocusOtherAsksAndHoldsBackProgress) {
   ASSERT_EQ(d.appendRaw("mine", nullptr, kMd5A, 0, EventKind::Progress), Outbox::AppendResult::Ok);
   d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);

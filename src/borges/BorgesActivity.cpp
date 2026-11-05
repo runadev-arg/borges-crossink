@@ -444,6 +444,7 @@ void BorgesActivity::leave() {
 }
 
 void BorgesActivity::loop() {
+  if (!s_) return;  // Could not allocate it: already on the way out.
   if (s_->viewChanged_.exchange(false, std::memory_order_acquire)) {
     if (s_->needsChoice_.exchange(false)) {
       RenderLock lock(*this);
@@ -693,7 +694,7 @@ void BorgesActivity::renderStatus() {
 }
 
 void BorgesActivity::render(RenderLock&&) {
-  if (view_ == View::Status && !stackOk_ && !s_->stack_) return;  // Handed over: this screen is leaving.
+  if (!s_ || (view_ == View::Status && !stackOk_ && !s_->stack_)) return;  // On the way out, or handed over.
   renderer.clearScreen();
   switch (view_) {
     case View::Status:

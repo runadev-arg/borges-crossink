@@ -7,9 +7,18 @@
 - Reader menu: Sync now, and Back to where I was after a jump. Sync now can also be assigned to a button.
 - Home and Settings: a Borges screen with the connection status, the library of your account with one-press download and resume, and switches for the automatic checks.
 
+- Reader menu: go to where another reader left off, at any time.
+- Moving from the previous Borges firmware keeps your Wi-Fi, settings, language, recent books, places and bookmarks, and leaves the old folder untouched so you can go back.
+
 ### Changed
 
 - Updates now come from the CrossInk Borges releases.
+
+### Fixed
+
+- Home: Settings can be reached with the buttons again.
+- A book opened without a connection no longer overwrites your place on other devices when you next sleep.
+- A downloaded book now offers the place you read to on another device instead of opening at page 1.
 
 ## [v1.6.1] - 2026-10-03
 
