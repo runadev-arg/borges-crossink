@@ -126,6 +126,8 @@ void BorgesOpenActivity::sessionMain(void* self) {
   }
 }
 
+  // Also here: this boot may have been reached by a path that did not go through routeBook.
+  if (!stack.engine.onBookOpened(session.ref.id)) LOG_ERR("BORGES", "Could not hold the book");
 void BorgesOpenActivity::loop() {
   const unsigned long now = millis();
   (void)now;

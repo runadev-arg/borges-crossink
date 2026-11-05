@@ -42,8 +42,17 @@ const char* fileNameOf(const std::string& path) {
   return slash == std::string::npos ? path.c_str() : path.c_str() + slash + 1;
 }
 
-// A session reached its end, one way or another: the guard's count starts over.
-OpenRoute routeBook(BorgesStack& stack, const std::string& path, BookId* holdOut) {
+// Holds the book before anything can go wrong on the way to its check: no link, a press
+// that skips the session, a crash in that boot. The hold is what keeps stale progress from
+// quietly becoming the head at the next sleep.
+void holdBook(BorgesStack& stack, const std::string& path) {
+  BookId id;
+  if (!partialMd5(stack.fs, path.c_str(), id) || !stack.engine.onBookOpened(id)) {
+    LOG_ERR("BORGES", "Could not hold %s", path.c_str());
+  }
+}
+
+OpenRoute routeBook(BorgesStack& stack, const std::string& path) {
   OpenInputs in;
   in.isEpub = FsHelpers::hasEpubExtension(path);
   in.hasPendingJump = APP_STATE.pendingBookmarkSpine != UINT16_MAX;
@@ -64,9 +73,7 @@ OpenRoute routeBook(BorgesStack& stack, const std::string& path, BookId* holdOut
     }
     stack.glueStore.save(stack.glue);
   }
-  if (route == OpenRoute::DirectWithHold && holdOut) {
-    if (!partialMd5(stack.fs, path.c_str(), *holdOut)) holdOut->hex[0] = '\0';
-  }
+  if (route != OpenRoute::Direct) holdBook(stack, path);
   return route;
 }
 
@@ -164,28 +171,22 @@ std::unique_ptr<Activity> interceptOpen(GfxRenderer& renderer, MappedInputManage
   if (!FsHelpers::hasEpubExtension(path) || !mayBePaired()) return nullptr;
   auto stack = makeStack();
   if (!stack || !stack->openStore()) return nullptr;
-  BookId hold;
-  const OpenRoute route = routeBook(*stack, path, &hold);
-  if (route == OpenRoute::NetworkSession) {
-    return makeUniqueNoThrow<BorgesHandoffActivity>(renderer, input, NetPayload::OpenBook, path);
-  }
-  if (route == OpenRoute::DirectWithHold && hold.valid()) stack->engine.onBookOpened(hold);
-  return nullptr;
+  if (routeBook(*stack, path) != OpenRoute::NetworkSession) return nullptr;
+  return makeUniqueNoThrow<BorgesHandoffActivity>(renderer, input, NetPayload::OpenBook, path);
 }
 
 bool wakeWantsNetworkBoot(const std::string& path) {
   if (!FsHelpers::hasEpubExtension(path) || !mayBePaired()) return false;
   auto stack = makeStack();
   if (!stack || !stack->openStore()) return false;
-  return routeBook(*stack, path, nullptr) == OpenRoute::NetworkSession;
+  return routeBook(*stack, path) == OpenRoute::NetworkSession;
 }
 
 void noteOpenedWithoutSession(const std::string& path) {
   if (!FsHelpers::hasEpubExtension(path) || !mayBePaired()) return;
   auto stack = makeStack();
   if (!stack || !stack->openStore() || !stack->store.creds().paired()) return;
-  BookId id;
-  if (partialMd5(stack->fs, path.c_str(), id)) stack->engine.onBookOpened(id);
+  holdBook(*stack, path);
 }
 
 bool launchNetworkTarget(const uint32_t payload, GfxRenderer& renderer, MappedInputManager& input) {

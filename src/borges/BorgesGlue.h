@@ -42,7 +42,7 @@ std::unique_ptr<Activity> interceptOpen(GfxRenderer& renderer, MappedInputManage
 
 // A wake into a book. True: this very boot runs the check, since it is already clean.
 bool wakeWantsNetworkBoot(const std::string& path);
-// A wake into a book that will not run one: the book's progress waits for its check.
+// A book entered by any door other than a session: its progress waits for a check.
 void noteOpenedWithoutSession(const std::string& path);
 
 // Called from main's setup() for NetworkBootTarget::BORGES. False: nothing could start.
