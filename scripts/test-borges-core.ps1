@@ -16,14 +16,17 @@ $ErrorActionPreference = "Stop"
 
 $Root = "D:\CrossInkBorges"
 $Repo = Split-Path -Parent $PSScriptRoot
-$BuildDir = "$Root\tmp\core-tests"
+# BORGES_TMP moves build output, for a second worktree building at the same time.
+$Tmp = if ($env:BORGES_TMP) { $env:BORGES_TMP } else { "$Root\tmp" }
+$BuildDir = "$Tmp\core-tests"
 $CMake = "$Root\pio-core\tools\tool-cmake\bin\cmake.exe"
 $Ninja = "$Root\pio-core\tools\tool-ninja\ninja.exe"
 $Gpp = "$Root\pio-core\tools\toolchain-riscv32-esp\bin\riscv32-esp-elf-g++.exe"
 $Size = "$Root\pio-core\tools\toolchain-riscv32-esp\bin\riscv32-esp-elf-size.exe"
 
-$env:TMP = "$Root\tmp"
-$env:TEMP = "$Root\tmp"
+New-Item -ItemType Directory -Force $Tmp | Out-Null
+$env:TMP = $Tmp
+$env:TEMP = $Tmp
 
 foreach ($tool in @($CMake, $Ninja)) {
   if (-not (Test-Path $tool)) { throw "Missing $tool" }
@@ -60,7 +63,7 @@ $TestExit = $LASTEXITCODE
 
 if ($RiscV) {
   if (-not (Test-Path $Gpp)) { throw "Missing $Gpp" }
-  $ObjDir = "$Root\tmp\core-riscv"
+  $ObjDir = "$Tmp\core-riscv"
   New-Item -ItemType Directory -Force $ObjDir | Out-Null
   $Objects = @()
   foreach ($src in Get-ChildItem "$Repo\lib\BorgesCore\*.cpp") {

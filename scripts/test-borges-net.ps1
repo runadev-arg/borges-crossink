@@ -8,12 +8,15 @@ $ErrorActionPreference = "Stop"
 
 $Root = "D:\CrossInkBorges"
 $Repo = Split-Path -Parent $PSScriptRoot
-$BuildDir = "$Root\tmp\core-tests"
+# BORGES_TMP moves build output, for a second worktree building at the same time.
+$Tmp = if ($env:BORGES_TMP) { $env:BORGES_TMP } else { "$Root\tmp" }
+$BuildDir = "$Tmp\core-tests"
 $CMake = "$Root\pio-core\tools\tool-cmake\bin\cmake.exe"
 $Ninja = "$Root\pio-core\tools\tool-ninja\ninja.exe"
 
-$env:TMP = "$Root\tmp"
-$env:TEMP = "$Root\tmp"
+New-Item -ItemType Directory -Force $Tmp | Out-Null
+$env:TMP = $Tmp
+$env:TEMP = $Tmp
 
 $Configure = @(
   "-S", "$Repo\test", "-B", $BuildDir, "-G", "Ninja",

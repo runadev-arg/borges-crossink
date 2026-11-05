@@ -14,15 +14,19 @@ $ErrorActionPreference = "Stop"
 
 $Root = "D:\CrossInkBorges"
 $Repo = Split-Path -Parent $PSScriptRoot
-$BuildDir = "$Root\tmp\contract-build"
-$Cluster = "$Root\tmp\contract-pg"
-$RunDir = "$Root\tmp\contract-run"
+# BORGES_TMP moves everything this creates, for a second worktree running at the same time.
+# harness.mjs reads the same variable.
+$Tmp = if ($env:BORGES_TMP) { $env:BORGES_TMP } else { "$Root\tmp" }
+$BuildDir = "$Tmp\contract-build"
+$Cluster = "$Tmp\contract-pg"
+$RunDir = "$Tmp\contract-run"
 $CMake = "$Root\pio-core\tools\tool-cmake\bin\cmake.exe"
 $Ninja = "$Root\pio-core\tools\tool-ninja\ninja.exe"
 $PgCtl = "C:\Program Files\PostgreSQL\17\bin\pg_ctl.exe"
 
-$env:TMP = "$Root\tmp"
-$env:TEMP = "$Root\tmp"
+New-Item -ItemType Directory -Force $Tmp | Out-Null
+$env:TMP = $Tmp
+$env:TEMP = $Tmp
 
 foreach ($tool in @($CMake, $Ninja, $PgCtl)) {
   if (-not (Test-Path $tool)) { throw "Missing $tool" }

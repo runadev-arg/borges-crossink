@@ -18,8 +18,9 @@ import { assertLocalTestDatabaseUrl, selfTestSafety } from "./safety.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-export const KOBO = "C:\\Users\\totot\\Documents\\Proyectos\\highlights-kobo";
-export const ROOT = "D:\\CrossInkBorges\\tmp";
+// BORGES_KOBO points at another checkout of the server, for a server fix under test.
+export const KOBO = process.env.BORGES_KOBO || "C:\\Users\\totot\\Documents\\Proyectos\\highlights-kobo";
+export const ROOT = process.env.BORGES_TMP || "D:\\CrossInkBorges\\tmp";
 const PG_BIN = "C:\\Program Files\\PostgreSQL\\17\\bin";
 export const CLUSTER = path.join(ROOT, "contract-pg");
 export const RUN_DIR = path.join(ROOT, "contract-run");
