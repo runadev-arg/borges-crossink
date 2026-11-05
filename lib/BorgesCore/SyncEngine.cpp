@@ -379,9 +379,11 @@ SessionReport SyncEngine::applyChoice(const ResumeDecision& decision, ResumeChoi
     if (ledger.suggestionId[0]) ledger.suggestionAction = SuggestionAction::Dismiss;
   }
   ledger.remember(decision.fingerprint);
-  ledger.lastFinalized = position;
-  ledger.hasFinalized = true;
-  ledger.lastTurnEpoch = now.wall.epochSec;
+  if (position.hasPct) {
+    ledger.lastFinalized = position;
+    ledger.hasFinalized = true;
+    ledger.lastTurnEpoch = now.wall.epochSec;
+  }
   if (!store_.saveBook(ledger)) {
     recordLocalError(SyncStage::Focus, "ledger_write", report);
     return report;
@@ -1335,6 +1337,9 @@ bool SyncEngine::appendEvent(EventKind kind, const BookId& book, const char* bod
 }
 
 bool SyncEngine::enqueueProgress(const BookId& book, const EventTime& time, const Position& position, bool explicitJump) {
+  // A place this device does not know is not a place to publish: percentage 0 would
+  // become the head and send the other readers to the first page.
+  if (!position.hasPct) return true;
   JsonWriter counter(nullptr, 0);
   events::writeProgress(counter, book, time, position, explicitJump);
   char* body = new (std::nothrow) char[counter.size()];
@@ -1370,7 +1375,7 @@ FinalizeResult SyncEngine::finalizeBook(const FinalizeInput& input) {
                          strcmp(ledger.lastFinalized.xpointer, input.position.xpointer) == 0 &&
                          ledger.lastTurnEpoch == input.lastTurn.epochSec;
   bool ok = true;
-  if (input.paged && !samePlace) {
+  if (input.paged && input.position.hasPct && !samePlace) {
     if (enqueueProgress(input.book.id, time, input.position, false)) {
       result.progressQueued = true;
       ledger.lastFinalized = input.position;

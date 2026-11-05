@@ -69,6 +69,7 @@ namespace events {
 constexpr int32_t kMinSessionSec = 60;
 constexpr int32_t kMaxSessionSec = 14400;
 
+// position must have a percentage: the server requires one, and there is no honest default.
 void writeProgress(JsonWriter& w, const BookId& book, const EventTime& time, const Position& position,
                    bool explicitJump);
 

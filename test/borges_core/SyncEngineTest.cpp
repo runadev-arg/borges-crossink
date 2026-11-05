@@ -994,6 +994,30 @@ TEST_F(SyncEngineTest, StayHereBecomesTheHeadWithoutJumping) {
   EXPECT_FALSE(d.engine->hasUndo(Device::book()));
 }
 
+TEST_F(SyncEngineTest, StayWithNoLocalPositionPublishesNothingAndStillAnswers) {
+  d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
+  ResumeDecision decision;
+  Position nowhere;
+  ASSERT_EQ(d.engine->runOpenSession(Device::bookRef(), nowhere, decision).outcome, SessionOutcome::AwaitingChoice);
+  EXPECT_EQ(d.engine->applyChoice(decision, ResumeChoice::StayHere, nowhere, nowhere).outcome, SessionOutcome::Ok);
+  EXPECT_TRUE(d.server.recorded.empty()) << "no percentage:0 to become the head";
+  EXPECT_EQ(d.outbox->depth(), 0u);
+  EXPECT_EQ(d.store->state().holds.size(), 0);
+  ResumeDecision again;
+  EXPECT_EQ(d.engine->runOpenSession(Device::bookRef(), nowhere, again).outcome, SessionOutcome::Ok);
+  EXPECT_FALSE(again.ask);
+}
+
+TEST_F(SyncEngineTest, FinalizeWithNoPercentagePublishesNoProgress) {
+  FinalizeInput input = d.finalizeInput(30);
+  input.position.hasPct = false;
+  input.position.pctMicro = 0;
+  const FinalizeResult result = d.engine->finalizeBook(input);
+  EXPECT_TRUE(result.ok);
+  EXPECT_FALSE(result.progressQueued);
+  EXPECT_EQ(d.outbox->depth(), 0u);
+}
+
 TEST_F(SyncEngineTest, ReadingAfterAnAnswerDoesNotReopenTheQuestion) {
   // Go, read offline, reopen online: a second prompt would let Go throw away those pages.
   d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);

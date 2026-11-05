@@ -1,9 +1,12 @@
 #include "BorgesGlue.h"
 
 #include <BookmarkStore.h>
+#include <BuildScratch.h>
 #include <Epub.h>
 #include <FsHelpers.h>
+#include <GfxRenderer.h>
 #include <HalStorage.h>
+#include <InflateStream.h>
 #include <Logging.h>
 #include <Memory.h>
 
@@ -33,7 +36,11 @@ constexpr int64_t kPlausibleEpoch = 1600000000;
 // A single resolve streams a whole chapter, so a book with many new clippings spreads
 // them over a few exits instead of holding one exit for minutes.
 constexpr int kMaxXpointersPerFinalize = 6;
-constexpr uint32_t kMinHeapForXpointer = 24 * 1024;
+constexpr uint32_t kXpointerBudgetMs = 4000;
+// With the framebuffer lent, inflate's 43 KB come out of it. What is left on the heap is the
+// XML parser, its string pools and the read chunk.
+constexpr uint32_t kMinFreeForXpointer = 16 * 1024;
+constexpr uint32_t kMinBlockForXpointer = 8 * 1024;
 
 std::string cachePathFor(const std::string& path) { return Epub::cachePathForFilePath(path, kCacheRoot); }
 
@@ -83,9 +90,39 @@ bool mayBePaired() {
          Storage.exists(kLegacyCredentialPath) || Storage.exists(kLegacyCredentialPathOld);
 }
 
+// An xpointer means streaming a chapter through inflate (43 KB) on a heap that a loaded
+// reader leaves at 35 KB, so it can only run on the framebuffer's storage. Lent on the first
+// resolve of this finalize and returned once at the end: most exits resolve nothing and
+// keep their frame. The panel keeps showing its image; the bytes in RAM do not survive.
+class XpointerBudget {
+ public:
+  explicit XpointerBudget(GfxRenderer& renderer) : renderer_(renderer), startedAt_(millis()) {}
+
+  // False: not now. Whoever asked retries at a later finalize, or goes without.
+  bool take(const bool bounded) {
+    if (bounded && (taken_ >= kMaxXpointersPerFinalize || millis() - startedAt_ >= kXpointerBudgetMs)) return false;
+    if (!loan_) loan_ = makeUniqueNoThrow<GfxRenderer::FrameBufferLoan>(renderer_);
+    if (!loan_ || !buildscratch::available(InflateStream::requiredStorageSize(true)) ||
+        ESP.getFreeHeap() < kMinFreeForXpointer || ESP.getMaxAllocHeap() < kMinBlockForXpointer) {
+      LOG_ERR("BORGES", "No memory for an xpointer (free=%u maxAlloc=%u)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+      return false;
+    }
+    ++taken_;
+    return true;
+  }
+  bool frameLent() const { return loan_ != nullptr; }
+
+ private:
+  GfxRenderer& renderer_;
+  std::unique_ptr<GfxRenderer::FrameBufferLoan> loan_;
+  uint32_t startedAt_;
+  int taken_ = 0;
+};
+
 class ClipSource final : public IClipSource {
  public:
-  ClipSource(BorgesStack& stack, std::shared_ptr<Epub> epub) : stack_(stack), epub_(std::move(epub)) {
+  ClipSource(BorgesStack& stack, std::shared_ptr<Epub> epub, XpointerBudget& budget)
+      : stack_(stack), epub_(std::move(epub)), budget_(budget) {
     timesPath_ = epub_->getCachePath() + kClipTimes;
   }
 
@@ -119,7 +156,6 @@ class ClipSource final : public IClipSource {
 
   bool detail(const size_t index, ClipDetail& out) override {
     // The core treats false as "try again at the next finalize", and nothing is lost.
-    if (resolved_ >= kMaxXpointersPerFinalize) return false;
     const size_t clips = CLIPPINGS.clippingCount();
     uint16_t spine = 0;
     uint16_t paragraph = UINT16_MAX;
@@ -147,8 +183,9 @@ class ClipSource final : public IClipSource {
     }
     out.chapter = chapter_.c_str();
     xpointer_.clear();
-    if (paragraph != UINT16_MAX && ESP.getFreeHeap() >= kMinHeapForXpointer) {
-      ++resolved_;
+    if (paragraph != UINT16_MAX) {
+      // Published without one it would stay without one: the ledger never asks again.
+      if (!budget_.take(true)) return false;
       xpointer_ = ChapterXPathResolver::findXPathForParagraph(epub_, spine, paragraph);
     }
     if (!xpointer_.empty() && xpointer_.size() < kMaxXpointer) out.xpointer = xpointer_.c_str();
@@ -162,7 +199,7 @@ class ClipSource final : public IClipSource {
   std::string text_;
   std::string chapter_;
   std::string xpointer_;
-  int resolved_ = 0;
+  XpointerBudget& budget_;
 };
 
 }  // namespace
@@ -236,19 +273,21 @@ bool shouldFlushBeforeSleep(const uint32_t batteryPercent, const bool inNetworkB
   return armed;
 }
 
-void finalizeFromReader(const ReaderTracker& tracker, const std::shared_ptr<Epub>& epub,
+bool finalizeFromReader(GfxRenderer& renderer, const ReaderTracker& tracker, const std::shared_ptr<Epub>& epub,
                         const ReaderSnapshot& snapshot) {
-  if (!epub || !mayBePaired()) return;
+  if (!epub || !mayBePaired()) return false;
   auto stack = makeStack();
-  if (!stack || !stack->openStore() || !stack->store.creds().paired()) return;
+  if (!stack || !stack->openStore() || !stack->store.creds().paired()) return false;
   BookId id;
   if (!partialMd5(stack->fs, epub->getPath().c_str(), id)) {
     LOG_ERR("BORGES", "No identity for this book: nothing published");
-    return;
+    return false;
   }
   auto input = makeUniqueNoThrow<FinalizeInput>();  // Holds a Position: too large for the stack.
   auto session = makeUniqueNoThrow<SessionSummary>();
-  if (!input || !session || !stack->openEngine()) return;
+  if (!input || !session || !stack->openEngine()) return false;
+
+  XpointerBudget budget(renderer);
 
   input->book.id = id;
   input->book.title = epub->getTitle().c_str();
@@ -262,7 +301,8 @@ void finalizeFromReader(const ReaderTracker& tracker, const std::shared_ptr<Epub
     input->position.setPercent(snapshot.percent);
     input->position.page = snapshot.page;
     input->position.totalPages = snapshot.totalPages;
-    if (snapshot.mapped && ESP.getFreeHeap() >= kMinHeapForXpointer) {
+    // Unbounded by count and time: the position comes first, and is one resolve.
+    if (snapshot.mapped && budget.take(false)) {
       const KOReaderPosition mapped = ProgressMapper::toKOReader(epub, *snapshot.mapped);
       if (mapped.valid && mapped.xpath.size() < kMaxXpointer) {
         strncpy(input->position.xpointer, mapped.xpath.c_str(), kMaxXpointer - 1);
@@ -283,7 +323,7 @@ void finalizeFromReader(const ReaderTracker& tracker, const std::shared_ptr<Epub
     input->session = session.get();
   }
 
-  ClipSource clips(*stack, epub);
+  ClipSource clips(*stack, epub, budget);
   input->clips = &clips;
   const FinalizeResult result = stack->engine.finalizeBook(*input);
   LOG_DBG("BORGES", "Finalize ok=%d progress=%d created=%u deleted=%u", result.ok ? 1 : 0,
@@ -294,6 +334,7 @@ void stampClip(const std::string& cachePath, const uint16_t spine, const uint32_
   const time_t now = time(nullptr);
   if (static_cast<int64_t>(now) < kPlausibleEpoch || !mayBePaired()) return;  // Otherwise the event omits the time.
   net::BorgesFsHal fs;
+  return budget.frameLent();
   ClipStamp stamp;
   stamp.spine = spine;
   stamp.uptime = uptimeStamp;

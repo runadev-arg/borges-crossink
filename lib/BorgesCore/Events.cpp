@@ -72,7 +72,7 @@ void writeProgress(JsonWriter& w, const BookId& book, const EventTime& time, con
   writeTail(w, book, time);
   w.objectBegin();
   w.key("percentage");
-  w.valuePercent(position.hasPct ? (position.pctMicro > 100000000u ? 100000000u : position.pctMicro) : 0);
+  w.valuePercent(position.pctMicro > 100000000u ? 100000000u : position.pctMicro);
   // The server rejects current_page > total_pages, so an inconsistent pair is left out.
   const bool pagesValid = position.page >= 0 && position.totalPages >= 1 && position.page <= position.totalPages;
   if (pagesValid) {
