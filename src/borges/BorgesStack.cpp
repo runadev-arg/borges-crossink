@@ -51,7 +51,8 @@ uint32_t SessionCancel::remainingMs() {
 }
 
 BorgesStack::BorgesStack()
-    : store(fs, loadIdentity(mac, clientVersion, sizeof(clientVersion), externalId), sizeof(mac)),
+    : box(random),
+      store(fs, loadIdentity(mac, clientVersion, sizeof(clientVersion), externalId), sizeof(mac), box),
       outbox(fs, random, kOutboxDir),
       dns(fs),
       clock(dns, kServerHost),

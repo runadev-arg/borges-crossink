@@ -34,7 +34,7 @@ constexpr const char* kLegacyToken = "toto_LEGACY12_abcdefghijklmnopqrstuvwxyzAB
 TEST(Store, CredentialsRoundTripAndTokenIsNotInTheClear) {
   MemFs fs;
   {
-    Store store(fs, testKey(), 6);
+    Store store(fs, testKey(), 6, testBox());
     ASSERT_TRUE(store.begin());
     EXPECT_STREQ(store.creds().baseUrl, kDefaultBaseUrl);
     copyText(store.creds().deviceId, sizeof(store.creds().deviceId), kSelfId);
@@ -45,35 +45,166 @@ TEST(Store, CredentialsRoundTripAndTokenIsNotInTheClear) {
   for (const char* slot : {"/.crosspoint/borges/cred.a", "/.crosspoint/borges/cred.b"}) {
     EXPECT_EQ(fs.content(slot).find("toto_SECRET"), std::string::npos);
   }
-  Store again(fs, testKey(), 6);
+  Store again(fs, testKey(), 6, testBox());
   ASSERT_TRUE(again.begin());
   EXPECT_TRUE(again.creds().paired());
   EXPECT_STREQ(again.creds().token, "toto_SECRET");
   EXPECT_EQ(again.creds().expiresAtEpoch, 123);
 }
 
-TEST(Store, TokenWithBytesEqualToTheKeyRoundTrips) {
-  // XOR of a byte with itself is NUL: lengths must come from the record, not strlen.
+namespace {
+
+// A format 1 record: what a card written by the first Borges build holds.
+std::string credV1(const std::string& token, const std::string& account, const std::string& url = kDefaultBaseUrl) {
+  std::string xored = token;
+  for (size_t i = 0; i < xored.size(); ++i) xored[i] = static_cast<char>(xored[i] ^ testKey()[i % 6]);
+  std::string raw;
+  const auto u16 = [&](size_t v) {
+    raw += static_cast<char>(v & 0xFF);
+    raw += static_cast<char>(v >> 8);
+  };
+  const auto str = [&](const std::string& v) {
+    u16(v.size());
+    raw += v;
+  };
+  raw += static_cast<char>(1);
+  str(url);
+  str(kSelfId);
+  str(xored);
+  str(account);
+  raw.append(16, '\0');  // expires, renew
+  str("");                // serverIp
+  str("");                // serverIpHost
+  str("");                // requestId
+  str("");                // nonce
+  str("");                // userCode
+  str("");                // verificationUrl
+  raw.append(12, '\0');  // interval, pairing expiry
+  return raw;
+}
+
+void saveV1(MemFs& fs, const std::string& token, const std::string& account) {
+  AtomicFile file(fs, "/.crosspoint/borges/cred");
+  const std::string raw = credV1(token, account);
+  ASSERT_TRUE(file.save(raw.data(), raw.size()));
+}
+
+std::string credSlots(MemFs& fs) {
+  return fs.content("/.crosspoint/borges/cred.a") + fs.content("/.crosspoint/borges/cred.b");
+}
+
+}  // namespace
+
+TEST(Store, ATokenInTheOldFormatIsResealedAndNoCopyStaysOnTheCard) {
   MemFs fs;
-  std::string token;
-  for (int i = 0; i < 6; ++i) token += static_cast<char>(testKey()[i] & 0x7F);
-  const uint8_t key[6] = {'t', 'o', 't', 'o', '_', 'X'};
+  fs.mkdir("/.crosspoint");
+  const std::string token = "toto_OLD_FORMAT_TOKEN";
+  saveV1(fs, "older", "account-1");  // Slot a.
+  saveV1(fs, token, "account-1");    // Slot b, the newest.
+  std::string xored = token;
+  for (size_t i = 0; i < xored.size(); ++i) xored[i] = static_cast<char>(xored[i] ^ testKey()[i % 6]);
+  ASSERT_NE(credSlots(fs).find(xored), std::string::npos);
   {
-    Store store(fs, key, 6);
+    Store store(fs, testKey(), 6, testBox());
+    ASSERT_TRUE(store.begin());
+    EXPECT_STREQ(store.creds().token, token.c_str());
+    EXPECT_STREQ(store.creds().accountId, "account-1");
+  }
+  EXPECT_EQ(credSlots(fs).find(xored), std::string::npos) << "an XORed token is one MAC away from the clear";
+  EXPECT_EQ(credSlots(fs).find(token), std::string::npos);
+  Store again(fs, testKey(), 6, testBox());
+  ASSERT_TRUE(again.begin());
+  EXPECT_STREQ(again.creds().token, token.c_str());
+}
+
+TEST(Store, ACardReadOnAnotherChipYieldsNoToken) {
+  MemFs fs;
+  {
+    Store store(fs, testKey(), 6, testBox());
     ASSERT_TRUE(store.begin());
     copyText(store.creds().deviceId, sizeof(store.creds().deviceId), kSelfId);
-    copyText(store.creds().token, sizeof(store.creds().token), "toto_X_end");
+    copyText(store.creds().token, sizeof(store.creds().token), "toto_SECRET");
+    copyText(store.creds().accountId, sizeof(store.creds().accountId), "account-1");
     ASSERT_TRUE(store.saveCredentials());
   }
-  Store again(fs, key, 6);
+  // The MAC is printed on the box: knowing it must not be enough.
+  FakeRandom random;
+  const uint8_t otherKey[32] = {9, 9, 9};
+  SoftSecretBox otherChip(otherKey, random);
+  Store store(fs, testKey(), 6, otherChip);
+  ASSERT_TRUE(store.begin());
+  EXPECT_FALSE(store.creds().paired());
+  EXPECT_EQ(store.creds().token[0], '\0');
+  EXPECT_STREQ(store.creds().accountId, "account-1") << "it still knows whose queue it holds";
+}
+
+TEST(Store, AFlippedByteInTheSealedPartIsNotAToken) {
+  FakeRandom random;
+  SoftSecretBox box(testNvsKey(), random);
+  const char plain[] = "secret";
+  uint8_t sealed[sizeof(plain) + ISecretBox::kOverhead];
+  ASSERT_TRUE(box.seal(reinterpret_cast<const uint8_t*>(plain), sizeof(plain), sealed));
+  char out[sizeof(plain)];
+  ASSERT_TRUE(box.open(sealed, sizeof(sealed), reinterpret_cast<uint8_t*>(out)));
+  EXPECT_STREQ(out, plain);
+  sealed[14] ^= 1;
+  EXPECT_FALSE(box.open(sealed, sizeof(sealed), reinterpret_cast<uint8_t*>(out)));
+}
+
+TEST(Store, WithNoWayToSealTheTokenItIsNotWrittenAtAll) {
+  class BrokenBox : public ISecretBox {
+   public:
+    bool seal(const uint8_t*, size_t, uint8_t*) override { return false; }
+    bool open(const uint8_t*, size_t, uint8_t*) override { return false; }
+  } broken;
+  MemFs fs;
+  Store store(fs, testKey(), 6, broken);
+  ASSERT_TRUE(store.begin());
+  copyText(store.creds().deviceId, sizeof(store.creds().deviceId), kSelfId);
+  copyText(store.creds().token, sizeof(store.creds().token), "toto_SECRET");
+  EXPECT_FALSE(store.saveCredentials());
+  EXPECT_EQ(credSlots(fs).find("toto_SECRET"), std::string::npos);
+}
+
+TEST(Store, ForgetLeavesNoCopyOfTheTokenInEitherSlot) {
+  MemFs fs;
+  Store store(fs, testKey(), 6, testBox());
+  ASSERT_TRUE(store.begin());
+  copyText(store.creds().deviceId, sizeof(store.creds().deviceId), kSelfId);
+  copyText(store.creds().token, sizeof(store.creds().token), "toto_SECRET");
+  ASSERT_TRUE(store.saveCredentials());
+  ASSERT_TRUE(store.saveCredentials());  // Both slots hold a sealed copy now.
+  const std::string sealedBefore = fs.content("/.crosspoint/borges/cred.a");
+  ASSERT_GT(sealedBefore.size(), 100u);
+
+  ASSERT_TRUE(store.forgetCredential());
+  int slots = 0;
+  for (const char* slot : {"/.crosspoint/borges/cred.a", "/.crosspoint/borges/cred.b"}) {
+    if (!fs.has(slot)) continue;
+    ++slots;
+    EXPECT_LT(fs.content(slot).size(), sealedBefore.size()) << "no sealed part left in " << slot;
+  }
+  EXPECT_EQ(slots, 1);
+  Store again(fs, testKey(), 6, testBox());
   ASSERT_TRUE(again.begin());
-  EXPECT_STREQ(again.creds().token, "toto_X_end");
+  EXPECT_FALSE(again.creds().paired());
+}
+
+TEST(Store, ScrubOverwritesInPlaceBeforeRemoving) {
+  MemFs fs;
+  fs.put("/spool", "token token token");
+  uint64_t writes = 0;
+  scrubFile(fs, "/spool");
+  writes = fs.writeOpsTo("/spool");
+  EXPECT_GE(writes, 1u) << "removing alone leaves the bytes on the card";
+  EXPECT_FALSE(fs.has("/spool"));
+  scrubFile(fs, "/not-there");
 }
 
 TEST(Store, AnUnreadableCardIsNotAnEmptyOne) {
   MemFs fs;
   {
-    Store store(fs, testKey(), 6);
+    Store store(fs, testKey(), 6, testBox());
     ASSERT_TRUE(store.begin());
     copyText(store.creds().deviceId, sizeof(store.creds().deviceId), kSelfId);
     copyText(store.creds().token, sizeof(store.creds().token), "t");
@@ -86,16 +217,16 @@ TEST(Store, AnUnreadableCardIsNotAnEmptyOne) {
   }
   {
     fs.failReadsAfter("/.crosspoint/borges/cred.a", 0);
-    Store store(fs, testKey(), 6);
+    Store store(fs, testKey(), 6, testBox());
     EXPECT_FALSE(store.begin());
   }
   {
     fs.failReadsAfter("/.crosspoint/borges/state.a", 0);
-    Store store(fs, testKey(), 6);
+    Store store(fs, testKey(), 6, testBox());
     EXPECT_FALSE(store.begin());
   }
   fs.failReadsAfter("", 0);
-  Store store(fs, testKey(), 6);
+  Store store(fs, testKey(), 6, testBox());
   ASSERT_TRUE(store.begin());
   EXPECT_EQ(store.state().cursor, 9u);
   fs.failReadsAfter(std::string("/.crosspoint/borges/books/ab/") + (kMd5A + 2) + ".a", 0);
@@ -106,7 +237,7 @@ TEST(Store, AnUnreadableCardIsNotAnEmptyOne) {
 TEST(Store, StateRoundTrip) {
   MemFs fs;
   {
-    Store store(fs, testKey(), 6);
+    Store store(fs, testKey(), 6, testBox());
     ASSERT_TRUE(store.begin());
     SyncState& s = store.state();
     s.cursor = 9007199254740993ULL;  // Above 2^53.
@@ -120,7 +251,7 @@ TEST(Store, StateRoundTrip) {
     s.holds.add(Device::book().md5);
     ASSERT_TRUE(store.saveState());
   }
-  Store again(fs, testKey(), 6);
+  Store again(fs, testKey(), 6, testBox());
   ASSERT_TRUE(again.begin());
   const SyncState& s = again.state();
   EXPECT_EQ(s.cursor, 9007199254740993ULL);
@@ -153,7 +284,7 @@ TEST(Store, HoldSetEvictsOldestWhenFullAndCounts) {
 
 TEST(Store, BookLedgerRoundTripWithLongestValues) {
   MemFs fs;
-  Store store(fs, testKey(), 6);
+  Store store(fs, testKey(), 6, testBox());
   ASSERT_TRUE(store.begin());
   BookLedger l;
   ASSERT_TRUE(store.loadBook(Device::book(), l));
@@ -200,7 +331,7 @@ TEST(Store, RememberingAgainMovesToNewestAndKeepsFortyBooksOfChoices) {
 TEST(Store, PerBookRecordsLiveInShardDirectoriesCreatedOnDemand) {
   MemFs fs;
   fs.requireDirs();
-  Store store(fs, testKey(), 6);
+  Store store(fs, testKey(), 6, testBox());
   ASSERT_TRUE(store.begin());
   BookLedger ledger;
   ASSERT_TRUE(store.loadBook(Device::book(), ledger));
@@ -218,7 +349,7 @@ TEST(Store, PerBookRecordsLiveInShardDirectoriesCreatedOnDemand) {
 
 TEST(Store, ALoadThenSaveOfAPerBookRecordDoesNotLookTwice) {
   MemFs fs;
-  Store store(fs, testKey(), 6);
+  Store store(fs, testKey(), 6, testBox());
   ASSERT_TRUE(store.begin());
   BookLedger ledger;
   ASSERT_TRUE(store.loadBook(Device::book(), ledger));
@@ -234,7 +365,7 @@ TEST(Store, ALoadThenSaveOfAPerBookRecordDoesNotLookTwice) {
 
 TEST(Store, AnnotationLedgerHoldsExactlyItsMaximumAndStaysLoadable) {
   MemFs fs;
-  Store store(fs, testKey(), 6);
+  Store store(fs, testKey(), 6, testBox());
   ASSERT_TRUE(store.begin());
   std::vector<AnnotationRecord> records(Store::kMaxAnnotations);
   for (size_t i = 0; i < records.size(); ++i) records[i].key = i + 1;
@@ -249,7 +380,7 @@ TEST(Store, AnnotationLedgerHoldsExactlyItsMaximumAndStaysLoadable) {
 
 TEST(Store, AnnotationLedgerRoundTrip) {
   MemFs fs;
-  Store store(fs, testKey(), 6);
+  Store store(fs, testKey(), 6, testBox());
   ASSERT_TRUE(store.begin());
   AnnotationRecord records[2]{};
   records[0].key = 5;
@@ -310,7 +441,7 @@ TEST(LegacyImport, ReadsThePreviousFirmwaresCredentialOnce) {
   fs.put(kLegacyCredentialPath, json);
 
   {
-    Store store(fs, testKey(), 6);
+    Store store(fs, testKey(), 6, testBox());
     ASSERT_TRUE(store.begin());
     EXPECT_TRUE(store.creds().paired());
     EXPECT_STREQ(store.creds().token, kLegacyToken);
@@ -322,7 +453,7 @@ TEST(LegacyImport, ReadsThePreviousFirmwaresCredentialOnce) {
   // The legacy file stays, so a rollback still works, and the import does not rerun.
   EXPECT_TRUE(fs.has(kLegacyCredentialPath));
   fs.put(kLegacyCredentialPath, "{\"deviceId\":\"x\",\"token\":\"other\"}");
-  Store again(fs, testKey(), 6);
+  Store again(fs, testKey(), 6, testBox());
   ASSERT_TRUE(again.begin());
   EXPECT_STREQ(again.creds().token, kLegacyToken);
 }
@@ -330,7 +461,7 @@ TEST(LegacyImport, ReadsThePreviousFirmwaresCredentialOnce) {
 TEST(LegacyImport, TheOlderFileNameAndAPlainTokenWork) {
   MemFs fs;
   fs.put(kLegacyCredentialPathOld, std::string("{\"deviceId\":\"") + kSelfId + "\",\"token\":\"plain_token\"}");
-  Store store(fs, testKey(), 6);
+  Store store(fs, testKey(), 6, testBox());
   ASSERT_TRUE(store.begin());
   EXPECT_STREQ(store.creds().token, "plain_token");
   EXPECT_STREQ(store.creds().baseUrl, kDefaultBaseUrl);
@@ -348,7 +479,7 @@ TEST(LegacyImport, AFileFromAnotherChipIsIgnoredNotHalfImported) {
   std::string json;
   serializeJson(doc, json);
   fs.put(kLegacyCredentialPath, json);
-  Store store(fs, testKey(), 6);
+  Store store(fs, testKey(), 6, testBox());
   ASSERT_TRUE(store.begin());
   EXPECT_FALSE(store.creds().paired());
   EXPECT_EQ(store.creds().token[0], '\0');
@@ -369,7 +500,7 @@ TEST(LegacyImport, HostileFilesDoNothing) {
   for (const std::string& file : files) {
     MemFs fs;
     fs.put(kLegacyCredentialPath, file);
-    Store store(fs, testKey(), 6);
+    Store store(fs, testKey(), 6, testBox());
     ASSERT_TRUE(store.begin());
     EXPECT_FALSE(store.creds().paired()) << file.substr(0, 40);
   }
@@ -378,14 +509,14 @@ TEST(LegacyImport, HostileFilesDoNothing) {
 TEST(Store, ABaseUrlOnTheCardCannotMoveTheServer) {
   MemFs fs;
   {
-    Store store(fs, testKey(), 6);
+    Store store(fs, testKey(), 6, testBox());
     ASSERT_TRUE(store.begin());
     copyText(store.creds().baseUrl, sizeof(store.creds().baseUrl), "https://borges.runadev.com@evil.example");
     copyText(store.creds().deviceId, sizeof(store.creds().deviceId), kSelfId);
     copyText(store.creds().token, sizeof(store.creds().token), "t");
     ASSERT_TRUE(store.saveCredentials());
   }
-  Store again(fs, testKey(), 6);
+  Store again(fs, testKey(), 6, testBox());
   ASSERT_TRUE(again.begin());
   EXPECT_TRUE(again.creds().paired());
   EXPECT_STREQ(again.creds().baseUrl, kDefaultBaseUrl);
@@ -394,7 +525,7 @@ TEST(Store, ABaseUrlOnTheCardCannotMoveTheServer) {
 TEST(LegacyImport, ABaseUrlInTheOldFileIsNeverBelieved) {
   MemFs fs;
   fs.put(kLegacyCredentialPath, std::string("{\"baseUrl\":\"https://evil.example\",\"deviceId\":\"") + kSelfId + "\",\"token\":\"t\"}");
-  Store store(fs, testKey(), 6);
+  Store store(fs, testKey(), 6, testBox());
   ASSERT_TRUE(store.begin());
   EXPECT_TRUE(store.creds().paired());
   EXPECT_STREQ(store.creds().baseUrl, kDefaultBaseUrl);

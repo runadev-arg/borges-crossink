@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "Codec.h"
+#include "Spool.h"
 
 namespace borges {
 
@@ -167,6 +168,14 @@ bool AtomicFile::save(const void* payload, size_t len) {
   seq_ = seq;
   len_ = static_cast<uint32_t>(len);
   probed_ = true;
+  return true;
+}
+
+bool AtomicFile::saveExclusive(const void* payload, size_t len) {
+  if (!save(payload, len)) return false;
+  char path[kMaxPath + 3];
+  slotPath(active_ == 'a' ? 'b' : 'a', path);
+  scrubFile(fs_, path);
   return true;
 }
 

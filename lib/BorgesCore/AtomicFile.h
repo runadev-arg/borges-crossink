@@ -33,6 +33,9 @@ class AtomicFile {
   bool load(uint8_t* buf, size_t cap, size_t& len);
   bool save(const void* payload, size_t len);
   void removeAll();
+  // A save that leaves no older version behind: the other slot is overwritten and removed
+  // once the new record is durable. For when the old record must not survive.
+  bool saveExclusive(const void* payload, size_t len);
   // The last load() or save() could not read the slots. Nothing can be said about
   // them, and a save is refused: a new record could lose to a slot that was unreadable.
   bool ioError() const { return ioError_; }

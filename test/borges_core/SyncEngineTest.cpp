@@ -398,7 +398,7 @@ TEST_F(SyncEngineTest, CursorIsPersistedBeforeItIsSent) {
   d.boot();
   // Every request's cursor must already be on disk when it goes out.
   d.http.beforeRequest = [this](size_t) {
-    Store fresh(d.fs, testKey(), 6);
+    Store fresh(d.fs, testKey(), 6, testBox());
     fresh.begin();
     lastDiskCursor_ = fresh.state().cursor;
   };

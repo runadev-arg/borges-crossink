@@ -40,6 +40,7 @@
 #include "Outbox.h"
 #include "PairingFlow.h"
 #include "Ports.h"
+#include "SoftCrypto.h"
 #include "Store.h"
 #include "SyncEngine.h"
 #include "Types.h"
@@ -140,7 +141,9 @@ class HostFs : public IFs {
       return kInvalid;
     }
     const DWORD access = mode == Mode::Read ? GENERIC_READ : GENERIC_READ | GENERIC_WRITE;
-    const DWORD disposition = mode == Mode::Read ? OPEN_EXISTING : mode == Mode::WriteTrunc ? CREATE_ALWAYS : OPEN_ALWAYS;
+    const DWORD disposition = mode == Mode::Read || mode == Mode::Update ? OPEN_EXISTING
+                              : mode == Mode::WriteTrunc                 ? CREATE_ALWAYS
+                                                                         : OPEN_ALWAYS;
     HANDLE h = CreateFileW(wide, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, disposition,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return kInvalid;
@@ -827,6 +830,7 @@ struct Options {
   std::string firmware = "1.6.1-contract";
   std::string client = "crossink-borges/1.6.1-contract";
   std::string externalId;
+  std::string nvsSalt;
   std::string precision = "exact";
   int64_t wallOffset = 0;
   int64_t monoStepMs = 0;
@@ -847,7 +851,8 @@ class Device {
         // Store copies the key when constructed, so the MAC has to be decoded before it.
         fs_((hexDecode(opt.macHex.c_str(), mac_, 6), opt.sd)),
         http_(clock_),
-        store_(fs_, mac_, 6),
+        box_(nvsKey(opt), random_),
+        store_(fs_, mac_, 6, box_),
         outbox_(fs_, random_, kOutboxDir) {
     clock_.precision = parsePrecision(opt.precision);
     clock_.wallOffset = opt.wallOffset;
@@ -965,6 +970,16 @@ class Device {
   }
 
  private:
+  // What the device keeps in NVS: per chip, and gone with --nvs-wiped.
+  const uint8_t* nvsKey(const Options& opt) {
+    SoftSha256 sha;
+    sha.begin();
+    sha.update(opt.macHex.data(), opt.macHex.size());
+    sha.update(opt.nvsSalt.data(), opt.nvsSalt.size());
+    sha.finish(nvsKey_);
+    return nvsKey_;
+  }
+
   void resetCommandPeak() {
     if (heap::peak > processPeak_) processPeak_ = heap::peak;
     heap::peak = heap::live;
@@ -1335,11 +1350,13 @@ class Device {
 
   Options opt_;
   uint8_t mac_[6] = {0};
+  uint8_t nvsKey_[32] = {0};
   HostFs fs_;
   HostClock clock_;
   HostRandom random_;
   NeverCancel cancel_;
   HostHttp http_;
+  SoftSecretBox box_;
   Store store_;
   Outbox outbox_;
   EngineConfig config_;
@@ -1397,6 +1414,7 @@ int main() {
     else if (a == "--firmware") opt.firmware = value();
     else if (a == "--client") opt.client = value();
     else if (a == "--external-id") opt.externalId = value();
+    else if (a == "--nvs-salt") opt.nvsSalt = value();
     else if (a == "--precision") opt.precision = value();
     else if (a == "--wall-offset") opt.wallOffset = _atoi64(value().c_str());
     else if (a == "--mono-step-ms") opt.monoStepMs = _atoi64(value().c_str());

@@ -287,6 +287,7 @@ void PairingFlow::claim() {
   w.objectEnd();
   const ApiResult r = api_.call("POST", kClaimPath, reinterpret_cast<const uint8_t*>(body), w.size());
   if (r.kind != ApiKind::Ok) {
+    scrubFile(fs_, kSpoolPath);  // A cut answer can still hold the token.
     note(r, r.kind == ApiKind::Transport ? "transport" : "pairing_claim_failed");
     if (strcmp(r.code, "authorization_pending") == 0) {
       scheduleRetry(r);
@@ -355,6 +356,8 @@ void PairingFlow::claim() {
     failed = scan.failed();
   }
   f.close();
+  // The token must not outlive this function anywhere but in the sealed record.
+  scrubFile(fs_, kSpoolPath);
   if (!deviceId[0]) copyText(deviceId, sizeof(deviceId), credentialDevice);
   if (failed || !token[0] || tokenCut || !deviceId[0]) {
     note(r, "malformed_response");

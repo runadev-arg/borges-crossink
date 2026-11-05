@@ -29,6 +29,7 @@ IFs::Handle BorgesFsHal::open(const char* path, const Mode mode) {
   oflag_t flags = O_RDONLY;
   if (mode == Mode::WriteTrunc) flags = O_RDWR | O_CREAT | O_TRUNC;
   if (mode == Mode::Append) flags = O_RDWR | O_CREAT | O_APPEND;
+  if (mode == Mode::Update) flags = O_RDWR;
   HalFile opened = Storage.open(path, flags);
   if (!opened.isOpen()) return kInvalid;
   files_[slot] = std::move(opened);

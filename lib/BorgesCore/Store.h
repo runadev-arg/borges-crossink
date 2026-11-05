@@ -2,7 +2,7 @@
 
 // Everything that survives a reboot besides the outbox:
 //
-//   /.crosspoint/borges/cred.{a,b}          Credentials (token obfuscated with the chip key)
+//   /.crosspoint/borges/cred.{a,b}          Credentials (token and nonce sealed: see ISecretBox)
 //   /.crosspoint/borges/state.{a,b}         Cursor, holds, backoff, diagnostics
 //   /.crosspoint/borges/books/<xx>/<rest of md5>.{a,b}  Per-book ledger: head, choices, undo
 //   /.crosspoint/borges/ann/<xx>/<rest of md5>.{a,b}    Clippings this device already published
@@ -49,7 +49,8 @@ struct Credentials {
   char baseUrl[96] = {0};
   char deviceId[40] = {0};
   char token[128] = {0};
-  char accountId[40] = {0};
+  char accountId[40] = {0};     // Empty if the server did not say, or for an imported credential.
+  char accountName[40] = {0};   // The username: the identity when there is no id.
   int64_t expiresAtEpoch = 0;   // 0 = unknown. Pairing credentials may have no expiry.
   int64_t renewAfterEpoch = 0;  // 0 = unknown.
   char serverIp[16] = {0};      // Last IPv4 that worked, for the DNS chain.
@@ -137,11 +138,13 @@ class Store {
  public:
   static constexpr uint16_t kMaxAnnotations = 512;
 
-  // key: the chip's MAC, the same key the previous firmware obfuscated secrets with.
-  Store(IFs& fs, const uint8_t* key, size_t keyLen);
+  // legacyKey: the chip's MAC, with which the previous firmware and format 1 of this one
+  // obfuscated secrets. Only ever used to read those. box seals what is stored now.
+  Store(IFs& fs, const uint8_t* legacyKey, size_t legacyKeyLen, ISecretBox& box);
 
-  // Creates directories and loads everything. Imports the previous firmware's
-  // credential once, silently, when there is none. False only on a hard IO error.
+  // Creates directories and loads everything. Imports the previous firmware's credential
+  // when there is none. A record in the old format is resealed here and its slots
+  // overwritten. False only on a hard IO error.
   bool begin();
 
   Credentials& creds() { return creds_; }
@@ -155,7 +158,8 @@ class Store {
   // A pairing resolved to this account. A different account than before moves the
   // epoch and empties the queue and the cursor: its data belongs to someone else.
   bool adoptAccount(const char* accountId, Outbox& outbox);
-  // Forgets the credential (and the account's cursor), keeping the sequence counter.
+  // Forgets the credential, with no copy left in either slot of the record. Keeps which
+  // account it was (re-pairing it keeps the queue) and the sequence counter.
   bool forgetCredential();
 
   // A blank ledger with its id set when there is none: only IO is a failure.
@@ -175,8 +179,12 @@ class Store {
   bool saveShardRecord(AtomicFile& file, const char* path, const void* payload, size_t len);
   bool importLegacy();
   void obfuscate(char* text, size_t len) const;
+  bool writeCredentials(bool exclusive);
+  bool readCredentialsV1(ByteReader& r);
+  bool readCredentialsV2(ByteReader& r);
 
   IFs& fs_;
+  ISecretBox& box_;
   uint8_t key_[8];
   uint8_t keyLen_;
   AtomicFile credFile_;

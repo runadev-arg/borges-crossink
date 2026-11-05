@@ -18,6 +18,7 @@
 #include "SyncEngine.h"
 #include "borges/logic/GlueState.h"
 #include "borges/net/BorgesClock.h"
+#include "borges/net/BorgesCrypto.h"
 #include "borges/net/BorgesDevice.h"
 #include "borges/net/BorgesDns.h"
 #include "borges/net/BorgesFsHal.h"
@@ -59,6 +60,8 @@ struct BorgesStack {
 
   net::BorgesFsHal fs;
   net::EspRandom random;
+  net::NvsSecretBox box;
+  net::DeviceSha256 sha;
   Store store;
   Outbox outbox;
   net::BorgesDns dns;

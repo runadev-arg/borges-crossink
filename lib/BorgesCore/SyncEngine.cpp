@@ -1294,6 +1294,7 @@ void SyncEngine::maybeRotate(SessionReport& report) {
   static constexpr char kEmpty[] = "{}";
   const ApiResult r = api_.call("POST", kRotatePath, reinterpret_cast<const uint8_t*>(kEmpty), 2);
   if (r.kind != ApiKind::Ok) {
+    scrubFile(fs_, kSpoolPath);  // A cut answer can still hold the token.
     if (r.kind == ApiKind::HttpError && (r.status == 401 || r.status == 403)) recordFailure(SyncStage::Rotate, r, report);
     return;
   }
@@ -1323,6 +1324,8 @@ void SyncEngine::maybeRotate(SessionReport& report) {
       }
     }
   }
+  f.close();
+  scrubFile(fs_, kSpoolPath);
   if (scan.failed() || !token[0] || truncated) return;
   copyText(c.token, sizeof(c.token), token);
   memset(token, 0, sizeof(token));

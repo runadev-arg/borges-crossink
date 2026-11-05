@@ -49,6 +49,19 @@ class PairingFlowTest : public testing::Test {
 
 }  // namespace
 
+TEST_F(PairingFlowTest, TheClaimAnswerDoesNotStayInTheSpool) {
+  ASSERT_TRUE(startFlow());
+  d.http.script.push_back(jsonReply(200, statusReply("approved")));
+  d.http.script.push_back(jsonReply(200, claimReply()));
+  advance(5);
+  ASSERT_EQ(flow->step(), PairingState::Done);
+  EXPECT_FALSE(d.fs.has(kSpoolPath));
+  for (const std::string& path : d.fs.paths()) {
+    EXPECT_EQ(d.fs.content(path).find("toto_PAIRED_TOKEN"), std::string::npos) << path;
+  }
+  EXPECT_STREQ(d.store->creds().token, "toto_PAIRED_TOKEN");
+}
+
 TEST_F(PairingFlowTest, RequestMatchesTheServersValidation) {
   ASSERT_TRUE(startFlow());
   EXPECT_EQ(flow->state(), PairingState::WaitingForApproval);
@@ -129,7 +142,7 @@ TEST_F(PairingFlowTest, ApprovedClaimsOnceAndFinishesAlone) {
   EXPECT_FALSE(d.store->creds().pairing.active());
 
   // Durable.
-  d.store = std::make_unique<Store>(d.fs, testKey(), 6);
+  d.store = std::make_unique<Store>(d.fs, testKey(), 6, testBox());
   ASSERT_TRUE(d.store->begin());
   EXPECT_TRUE(d.store->creds().paired());
   EXPECT_STREQ(d.store->creds().token, "toto_PAIRED_TOKEN");

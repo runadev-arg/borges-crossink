@@ -26,6 +26,7 @@ class IFs {
     Read,        // Must exist. Position 0.
     WriteTrunc,  // Created or truncated. Position 0.
     Append,      // Created if missing. Every write goes to the end.
+    Update,      // Must exist. Position 0. Writes replace bytes in place, on the same clusters.
   };
 
   virtual ~IFs() = default;
@@ -97,6 +98,24 @@ class ICancel {
  public:
   virtual ~ICancel() = default;
   virtual bool cancelled() = 0;
+};
+
+// Keeps a secret off the card: the key lives on the chip, so a card read elsewhere yields
+// nothing. Authenticated: open() fails on another chip's data or on one flipped bit.
+class ISecretBox {
+ public:
+  static constexpr size_t kOverhead = 28;  // nonce(12) + tag(16)
+  virtual ~ISecretBox() = default;
+  virtual bool seal(const uint8_t* plain, size_t len, uint8_t* out) = 0;  // out holds len + kOverhead.
+  virtual bool open(const uint8_t* sealed, size_t len, uint8_t* out) = 0;  // out holds len - kOverhead.
+};
+
+class ISha256 {
+ public:
+  virtual ~ISha256() = default;
+  virtual void begin() = 0;
+  virtual void update(const void* data, size_t len) = 0;
+  virtual void finish(uint8_t digest[32]) = 0;
 };
 
 struct HttpHeader {

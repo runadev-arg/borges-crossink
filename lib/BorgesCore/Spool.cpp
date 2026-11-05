@@ -2,6 +2,24 @@
 
 namespace borges {
 
+void scrubFile(IFs& fs, const char* path) {
+  if (!fs.exists(path)) return;
+  {
+    File f(fs, path, IFs::Mode::Update);
+    if (f) {
+      int64_t left = f.size();
+      static constexpr uint8_t kZeros[64] = {0};
+      while (left > 0) {
+        const size_t n = left < static_cast<int64_t>(sizeof(kZeros)) ? static_cast<size_t>(left) : sizeof(kZeros);
+        if (!f.writeAll(kZeros, n)) break;
+        left -= static_cast<int64_t>(n);
+      }
+      f.flush();
+    }
+  }
+  fs.remove(path);
+}
+
 bool Spool::begin() {
   close();
   size_ = 0;

@@ -353,7 +353,7 @@ TEST_F(DesignRule, Rule10_CursorDiscipline_PersistAppliedThenSendNew) {
       sentCursors.push_back(cursor);
       // What is on the card right now must be at least what is being sent, and the
       // head cache must already hold everything up to it.
-      Store fresh(d.fs, testKey(), 6);
+      Store fresh(d.fs, testKey(), 6, testBox());
       EXPECT_TRUE(fresh.begin());
       EXPECT_GE(fresh.state().cursor, cursor);
       if (cursor > 0) {

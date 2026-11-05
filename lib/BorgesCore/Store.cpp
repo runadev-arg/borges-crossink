@@ -10,11 +10,14 @@ namespace borges {
 
 namespace {
 
-constexpr uint8_t kCredVersion = 1;
+constexpr uint8_t kCredVersionXor = 1;  // Token and nonce XORed with the MAC. Read to migrate.
+constexpr uint8_t kCredVersion = 2;
 constexpr uint8_t kStateVersion = 1;
 constexpr uint8_t kBookVersion = 3;
 constexpr uint8_t kAnnVersion = 1;
 constexpr size_t kLegacyMaxBytes = 8 * 1024;
+// Token (127) + nonce (43), their length prefixes and the box's overhead.
+constexpr size_t kSealedBytes = 127 + 43 + 4 + ISecretBox::kOverhead;
 constexpr size_t kAnnHeaderBytes = 5;  // version u8, epoch u16, count u16
 constexpr size_t kAnnRecordBytes = 25;
 
@@ -116,8 +119,9 @@ bool BookLedger::hasChoice(uint64_t fingerprint) const {
   return false;
 }
 
-Store::Store(IFs& fs, const uint8_t* key, size_t keyLen)
+Store::Store(IFs& fs, const uint8_t* key, size_t keyLen, ISecretBox& box)
     : fs_(fs),
+      box_(box),
       keyLen_(0),
       credFile_(fs, "/.crosspoint/borges/cred"),
       stateFile_(fs, "/.crosspoint/borges/state"),
@@ -147,33 +151,18 @@ bool Store::begin() {
   uint8_t buf[1024];
   size_t len = 0;
   bool haveCreds = false;
+  bool migrate = false;
   if (credFile_.load(buf, sizeof(buf), len)) {
     ByteReader r(buf, len);
-    if (r.u8() == kCredVersion) {
-      char storedUrl[sizeof(creds_.baseUrl)];  // Read past, never believed.
-      r.str(storedUrl, sizeof(storedUrl));
-      r.str(creds_.deviceId, sizeof(creds_.deviceId));
-      const size_t tokenLen = r.str(creds_.token, sizeof(creds_.token));
-      r.str(creds_.accountId, sizeof(creds_.accountId));
-      creds_.expiresAtEpoch = static_cast<int64_t>(r.u64());
-      creds_.renewAfterEpoch = static_cast<int64_t>(r.u64());
-      r.str(creds_.serverIp, sizeof(creds_.serverIp));
-      r.str(creds_.serverIpHost, sizeof(creds_.serverIpHost));
-      r.str(creds_.pairing.requestId, sizeof(creds_.pairing.requestId));
-      const size_t nonceLen = r.str(creds_.pairing.nonce, sizeof(creds_.pairing.nonce));
-      r.str(creds_.pairing.userCode, sizeof(creds_.pairing.userCode));
-      r.str(creds_.pairing.verificationUrl, sizeof(creds_.pairing.verificationUrl));
-      creds_.pairing.intervalSec = r.u32();
-      creds_.pairing.expiresAtEpoch = static_cast<int64_t>(r.u64());
-      if (r.ok()) {
-        // Lengths come from the record: an obfuscated byte may legitimately be NUL.
-        obfuscate(creds_.token, tokenLen);
-        obfuscate(creds_.pairing.nonce, nonceLen);
-        haveCreds = true;
-      } else {
-        creds_ = Credentials{};
-      }
+    const uint8_t version = r.u8();
+    haveCreds = true;
+    if (version == kCredVersion) {
+      if (!readCredentialsV2(r)) creds_ = Credentials{};
+    } else if (version == kCredVersionXor) {
+      migrate = readCredentialsV1(r);
+      if (!migrate) creds_ = Credentials{};
     }
+    memset(buf, 0, len);
   }
   // An unreadable card is not an empty one: starting blank here would look unpaired,
   // and later writes could lose to the slots that could not be read.
@@ -209,42 +198,114 @@ bool Store::begin() {
   }
   if (stateFile_.ioError()) return false;
 
-  if (!creds_.paired() && !creds_.pairing.active()) importLegacy();
+  if (migrate) {
+    // A failure here is retried at the next begin: the old record is still the newest.
+    writeCredentials(true);
+  } else if (!creds_.paired() && !creds_.pairing.active()) {
+    importLegacy();
+  }
   return true;
 }
 
-bool Store::saveCredentials() {
+// Format 1. The base URL it holds is read past, never believed.
+bool Store::readCredentialsV1(ByteReader& r) {
+  char storedUrl[sizeof(creds_.baseUrl)];
+  r.str(storedUrl, sizeof(storedUrl));
+  r.str(creds_.deviceId, sizeof(creds_.deviceId));
+  const size_t tokenLen = r.str(creds_.token, sizeof(creds_.token));
+  r.str(creds_.accountId, sizeof(creds_.accountId));
+  creds_.expiresAtEpoch = static_cast<int64_t>(r.u64());
+  creds_.renewAfterEpoch = static_cast<int64_t>(r.u64());
+  r.str(creds_.serverIp, sizeof(creds_.serverIp));
+  r.str(creds_.serverIpHost, sizeof(creds_.serverIpHost));
+  r.str(creds_.pairing.requestId, sizeof(creds_.pairing.requestId));
+  const size_t nonceLen = r.str(creds_.pairing.nonce, sizeof(creds_.pairing.nonce));
+  r.str(creds_.pairing.userCode, sizeof(creds_.pairing.userCode));
+  r.str(creds_.pairing.verificationUrl, sizeof(creds_.pairing.verificationUrl));
+  creds_.pairing.intervalSec = r.u32();
+  creds_.pairing.expiresAtEpoch = static_cast<int64_t>(r.u64());
+  if (!r.ok()) return false;
+  // Lengths come from the record: an obfuscated byte may legitimately be NUL.
+  obfuscate(creds_.token, tokenLen);
+  obfuscate(creds_.pairing.nonce, nonceLen);
+  return true;
+}
+
+// A sealed part that does not open (another chip, or its key was wiped) leaves everything
+// else in place: the device is unpaired, but still knows whose queue it holds.
+bool Store::readCredentialsV2(ByteReader& r) {
+  r.str(creds_.deviceId, sizeof(creds_.deviceId));
+  r.str(creds_.accountId, sizeof(creds_.accountId));
+  r.str(creds_.accountName, sizeof(creds_.accountName));
+  creds_.expiresAtEpoch = static_cast<int64_t>(r.u64());
+  creds_.renewAfterEpoch = static_cast<int64_t>(r.u64());
+  r.str(creds_.serverIp, sizeof(creds_.serverIp));
+  r.str(creds_.serverIpHost, sizeof(creds_.serverIpHost));
+  r.str(creds_.pairing.requestId, sizeof(creds_.pairing.requestId));
+  r.str(creds_.pairing.userCode, sizeof(creds_.pairing.userCode));
+  r.str(creds_.pairing.verificationUrl, sizeof(creds_.pairing.verificationUrl));
+  creds_.pairing.intervalSec = r.u32();
+  creds_.pairing.expiresAtEpoch = static_cast<int64_t>(r.u64());
+  const size_t sealedLen = r.u16();
+  if (!r.ok()) return false;
+  if (sealedLen == 0) return true;
+  uint8_t sealed[kSealedBytes];
+  uint8_t plain[kSealedBytes];
+  if (sealedLen > sizeof(sealed) || sealedLen < ISecretBox::kOverhead) return false;
+  r.bytes(sealed, sealedLen);
+  if (!r.ok()) return false;
+  if (box_.open(sealed, sealedLen, plain)) {
+    ByteReader inner(plain, sealedLen - ISecretBox::kOverhead);
+    inner.str(creds_.token, sizeof(creds_.token));
+    inner.str(creds_.pairing.nonce, sizeof(creds_.pairing.nonce));
+    if (!inner.ok()) {
+      creds_.token[0] = '\0';
+      creds_.pairing.nonce[0] = '\0';
+    }
+  }
+  memset(plain, 0, sizeof(plain));
+  return true;
+}
+
+bool Store::saveCredentials() { return writeCredentials(false); }
+
+bool Store::writeCredentials(bool exclusive) {
   uint8_t buf[1024];
   ByteWriter w(buf, sizeof(buf));
   w.u8(kCredVersion);
-  w.str(creds_.baseUrl);
   w.str(creds_.deviceId);
-  char token[sizeof(creds_.token)];
-  const size_t tokenLen = strlen(creds_.token);
-  memcpy(token, creds_.token, tokenLen);
-  token[tokenLen] = '\0';
-  obfuscate(token, tokenLen);
-  w.u16(static_cast<uint16_t>(tokenLen));
-  w.bytes(token, tokenLen);
-  memset(token, 0, sizeof(token));
   w.str(creds_.accountId);
+  w.str(creds_.accountName);
   w.u64(static_cast<uint64_t>(creds_.expiresAtEpoch));
   w.u64(static_cast<uint64_t>(creds_.renewAfterEpoch));
   w.str(creds_.serverIp);
   w.str(creds_.serverIpHost);
   w.str(creds_.pairing.requestId);
-  char nonce[sizeof(creds_.pairing.nonce)];
-  const size_t nonceLen = strlen(creds_.pairing.nonce);
-  memcpy(nonce, creds_.pairing.nonce, nonceLen);
-  obfuscate(nonce, nonceLen);
-  w.u16(static_cast<uint16_t>(nonceLen));
-  w.bytes(nonce, nonceLen);
   w.str(creds_.pairing.userCode);
   w.str(creds_.pairing.verificationUrl);
   w.u32(creds_.pairing.intervalSec);
   w.u64(static_cast<uint64_t>(creds_.pairing.expiresAtEpoch));
+  // No secret, no box: forgetting works even if the key cannot be reached.
+  if (creds_.token[0] || creds_.pairing.nonce[0]) {
+    uint8_t plain[kSealedBytes];
+    uint8_t sealed[kSealedBytes];
+    ByteWriter inner(plain, sizeof(plain) - ISecretBox::kOverhead);
+    inner.str(creds_.token);
+    inner.str(creds_.pairing.nonce);
+    // Never in the clear: with no way to seal it, the secret is not written at all.
+    const bool sealedOk = inner.ok() && box_.seal(plain, inner.size(), sealed);
+    memset(plain, 0, sizeof(plain));
+    if (!sealedOk) return false;
+    const size_t sealedLen = inner.size() + ISecretBox::kOverhead;
+    w.u16(static_cast<uint16_t>(sealedLen));
+    w.bytes(sealed, sealedLen);
+  } else {
+    w.u16(0);
+  }
   if (!w.ok()) return false;
-  return credFile_.save(buf, w.size());
+  const bool ok = exclusive ? credFile_.saveExclusive(buf, w.size()) : credFile_.save(buf, w.size());
+  memset(buf, 0, sizeof(buf));
+  return ok;
 }
 
 bool Store::saveState() {
@@ -290,11 +351,11 @@ bool Store::adoptAccount(const char* accountId, Outbox& outbox) {
 
 bool Store::forgetCredential() {
   creds_.deviceId[0] = '\0';
-  creds_.token[0] = '\0';
+  memset(creds_.token, 0, sizeof(creds_.token));
   creds_.expiresAtEpoch = 0;
   creds_.renewAfterEpoch = 0;
   creds_.pairing = PendingPairing{};
-  return saveCredentials();
+  return writeCredentials(true);
 }
 
 void Store::bookPath(const char* subdir, const BookId& id, char* out) const {

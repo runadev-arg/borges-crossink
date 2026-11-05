@@ -23,6 +23,7 @@
 #include "Outbox.h"
 #include "PairingFlow.h"
 #include "Ports.h"
+#include "SoftCrypto.h"
 #include "Store.h"
 #include "SyncEngine.h"
 
@@ -129,7 +130,7 @@ class MemFs : public IFs {
   Handle open(const char* path, Mode mode) override {
     if (dead_ || failOpenPath_ == path) return kInvalid;
     ++lookups_;
-    if (mode == Mode::Read && files_.count(path) == 0) return kInvalid;
+    if ((mode == Mode::Read || mode == Mode::Update) && files_.count(path) == 0) return kInvalid;
     if (mode != Mode::Read && strictDirs_ && files_.count(path) == 0) {
       const std::string parent = std::string(path).substr(0, std::string(path).rfind('/'));
       if (dirs_.count(parent) == 0) return kInvalid;
@@ -709,6 +710,19 @@ inline const uint8_t* testKey() {
   return key;
 }
 
+// What the chip holds in NVS. One per test process: a test that wants another chip makes
+// its own box.
+inline const uint8_t* testNvsKey() {
+  static const uint8_t key[32] = {0x5A, 0x11, 0x22, 0x33};
+  return key;
+}
+
+inline borges::ISecretBox& testBox() {
+  static FakeRandom random;
+  static borges::SoftSecretBox box(testNvsKey(), random);
+  return box;
+}
+
 struct Device {
   MemFs fs;
   FakeClock clock;
@@ -733,7 +747,7 @@ struct Device {
   void boot(bool paired = true) {
     engine.reset();
     outbox.reset();
-    store = std::make_unique<borges::Store>(fs, testKey(), 6);
+    store = std::make_unique<borges::Store>(fs, testKey(), 6, testBox());
     ASSERT_TRUE(store->begin());
     outbox = std::make_unique<borges::Outbox>(fs, random, borges::kOutboxDir);
     engine = std::make_unique<borges::SyncEngine>(*store, *outbox, fs, http, clock, random, cancel, config);

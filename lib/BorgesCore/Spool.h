@@ -11,6 +11,10 @@
 
 namespace borges {
 
+// Overwrites a file on its own clusters, then removes it. Removing alone leaves the bytes
+// on the card, and a response may hold a token. Best effort: nothing to do if this fails.
+void scrubFile(IFs& fs, const char* path);
+
 class Spool : public IHttpSink {
  public:
   Spool(IFs& fs, const char* path) : fs_(fs), path_(path) {}
