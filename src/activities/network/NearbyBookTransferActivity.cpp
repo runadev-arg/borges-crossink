@@ -19,6 +19,7 @@
 #include "SilentRestart.h"
 #include "activities/boot_sleep/ImageFolderIndex.h"
 #include "activities/home/FileBrowserActivity.h"
+#include "borges/BorgesGlue.h"
 #include "components/TouchActionButtons.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
@@ -579,6 +580,7 @@ void NearbyBookTransferActivity::openReceivedFile() {
   APP_STATE.openEpubPath = finalPath_;
   APP_STATE.saveToFile();
   stopRadio();
+  borges::glue::noteOpenedWithoutSession(finalPath_);
   silentRestartToReader();
 }
 

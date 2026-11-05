@@ -5,6 +5,7 @@
 
 #include <algorithm>
 
+#include "borges/BorgesGlue.h"
 #include "components/TouchActionButtons.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
@@ -766,6 +767,7 @@ void NearbyBookPositionSyncActivity::onExit() {
   const bool shouldRestart = radioActivated_;
   endEspNow();
   if (shouldRestart) {
+    borges::glue::noteOpenedWithoutSession(epubPath_);
     silentRestartToReader();
   }
 }
@@ -1258,6 +1260,7 @@ void NearbyBookPositionSyncActivity::updateSyncProgress() {
 }
 
 void NearbyBookPositionSyncActivity::returnToReader(const bool suppressBackRelease) {
+  borges::glue::noteOpenedWithoutSession(epubPath_);
   activityManager.goToReader(epubPath_, suppressBackRelease);
 }
 

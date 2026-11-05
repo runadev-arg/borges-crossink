@@ -262,7 +262,7 @@ void XtcReaderActivity::loop() {
   }
   switch (endOfBookAction) {
     case EndOfBookOptions::Action::OpenBook:
-      activityManager.goToReader(openPath);
+      activityManager.openBook(openPath);
       return;
     case EndOfBookOptions::Action::GoHome:
       onGoHome();

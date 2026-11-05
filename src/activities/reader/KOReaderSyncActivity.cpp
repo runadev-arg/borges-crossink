@@ -27,6 +27,7 @@
 #include "activities/ActivityManager.h"
 #include "activities/home/RecentBookProgress.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "borges/BorgesGlue.h"
 #include "components/TouchActionButtons.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
@@ -250,7 +251,10 @@ void KOReaderSyncActivity::saveProgressAndReturn(const CrossPointPosition& posit
   returnToReader();
 }
 
-void KOReaderSyncActivity::returnToReader() { activityManager.goToReader(epubPath, false, false, true); }
+void KOReaderSyncActivity::returnToReader() {
+  borges::glue::noteOpenedWithoutSession(epubPath);
+  activityManager.goToReader(epubPath, false, false, true);
+}
 
 bool KOReaderSyncActivity::consumeInitialConfirmRelease() {
   if (!lockInitialConfirmRelease) {
@@ -714,6 +718,7 @@ void KOReaderSyncActivity::onExit() {
 
   if (wifiActivated) {
     wifiOff();
+    borges::glue::noteOpenedWithoutSession(epubPath);
     silentRestartToReader(true);
   }
 }

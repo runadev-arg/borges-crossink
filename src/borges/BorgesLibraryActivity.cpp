@@ -235,9 +235,17 @@ void BorgesLibraryActivity::openDownloaded() {
   char path[128];
   snprintf(path, sizeof(path), "%s/%s", kBorgesBooksDir, downloading_.fileName);
   stack_->bringDown();
+  catalog_.reset();
+  stack_.reset();  // interceptOpen builds its own, and this boot's heap is already tight.
   APP_STATE.openEpubPath = path;
   APP_STATE.saveToFile();
-  silentRestartToReader(false);
+  // The same door as any other open: the account may have read this book elsewhere, and a
+  // fresh download has no local place to protect it from opening at page 1.
+  if (auto check = interceptOpen(renderer, mappedInput, path)) {
+    activityManager.replaceActivity(std::move(check));
+    return;
+  }
+  silentRestartToReader(true);
 }
 
 void BorgesLibraryActivity::leave() {

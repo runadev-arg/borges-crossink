@@ -18,6 +18,7 @@
 #include "WifiSelectionActivity.h"
 #include "activities/ActivityManager.h"
 #include "activities/network/CalibreConnectActivity.h"
+#include "borges/BorgesGlue.h"
 #include "components/CompactHeader.h"
 #include "components/TouchHeaderBackButton.h"
 #include "components/UITheme.h"
@@ -115,6 +116,7 @@ void CrossPointWebServerActivity::onExit() {
     if (returnBookPath.empty()) {
       silentRestart();
     } else {
+      borges::glue::noteOpenedWithoutSession(returnBookPath);
       silentRestartToReader();
     }
   }
@@ -359,6 +361,7 @@ void CrossPointWebServerActivity::exitToOrigin() {
     if (returnBookPath.empty()) {
       silentRestart();
     } else {
+      borges::glue::noteOpenedWithoutSession(returnBookPath);
       silentRestartToReader();
     }
     return;
@@ -375,6 +378,7 @@ void CrossPointWebServerActivity::exitToOrigin() {
       Storage.exists(APP_STATE.openEpubPath.c_str())) {
     returnBookPath = APP_STATE.openEpubPath;
   }
+  borges::glue::noteOpenedWithoutSession(returnBookPath);
   activityManager.goToReader(returnBookPath, true);
 }
 

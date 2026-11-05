@@ -1021,6 +1021,7 @@ void ActivityManager::openBook(std::string path) {
 
 void ActivityManager::goToReaderAndRunMenuAction(std::string path, const uint8_t action) {
   pendingReaderMenuAction = action;
+  borges::glue::noteOpenedWithoutSession(path);
   goToReader(std::move(path));
 }
 
