@@ -1422,6 +1422,38 @@ bool SyncEngine::enqueueProgress(const BookId& book, const EventTime& time, cons
   return ok;
 }
 
+// A long uninterrupted reading is not an invalid one: as session.lua:finishAll, it is split
+// into segments the server accepts, with the pages counted on the last. False: something
+// valid is not in the queue, and the caller has to keep it for the next finalize.
+bool SyncEngine::enqueueSession(const BookId& book, const SessionSummary& session, FinalizeResult& result) {
+  int64_t start = session.started.epochSec;
+  const int64_t end = session.ended.epochSec;
+  bool queued = true;
+  bool any = false;
+  while (queued && end - start >= events::kMinSessionSec) {
+    const int64_t segmentEnd = end - start > events::kMaxSessionSec ? start + events::kMaxSessionSec : end;
+    SessionSummary segment = session;
+    segment.started.epochSec = start;
+    segment.ended.epochSec = segmentEnd;
+    segment.pagesRead = segmentEnd == end ? session.pagesRead : 0;
+    segment.startPage = start == session.started.epochSec ? session.startPage : session.endPage;
+    JsonWriter counter(nullptr, 0);
+    if (!events::writeSession(counter, book, segment)) return true;  // The clock: nothing honest to send.
+    char* body = new (std::nothrow) char[counter.size()];
+    queued = body != nullptr;
+    if (body) {
+      JsonWriter w(body, counter.size());
+      events::writeSession(w, book, segment);
+      queued = appendEvent(EventKind::Session, book, body, w.size(), false);
+      delete[] body;
+    }
+    any = any || queued;
+    start = segmentEnd;
+  }
+  result.sessionQueued = any && queued;
+  return queued;
+}
+
 FinalizeResult SyncEngine::finalizeBook(const FinalizeInput& input) {
   FinalizeResult result;
   if (!input.book.id.valid() || !store_.creds().paired()) {
@@ -1459,20 +1491,7 @@ FinalizeResult SyncEngine::finalizeBook(const FinalizeInput& input) {
     }
   }
 
-  if (input.session) {
-    JsonWriter counter(nullptr, 0);
-    if (events::writeSession(counter, input.book.id, *input.session)) {
-      char* body = new (std::nothrow) char[counter.size()];
-      if (body) {
-        JsonWriter w(body, counter.size());
-        events::writeSession(w, input.book.id, *input.session);
-        result.sessionQueued = appendEvent(EventKind::Session, input.book.id, body, w.size(), false);
-        delete[] body;
-      }
-      // Valid, and not in the queue: the caller has to keep it for the next finalize.
-      if (!result.sessionQueued) ok = false;
-    }
-  }
+  if (input.session && !enqueueSession(input.book.id, *input.session, result)) ok = false;
 
   if (input.clips && !finalizeClips(input, time, result)) ok = false;
   result.ok = ok;

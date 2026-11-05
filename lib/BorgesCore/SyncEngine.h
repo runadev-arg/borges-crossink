@@ -268,6 +268,7 @@ class SyncEngine {
   void noteServerTime(const PageInfo& page);
 
   bool enqueueProgress(const BookId& book, const EventTime& time, const Position& position, bool explicitJump);
+  bool enqueueSession(const BookId& book, const SessionSummary& session, FinalizeResult& result);
   bool finalizeClips(const FinalizeInput& input, const EventTime& time, FinalizeResult& result);
   bool appendEvent(EventKind kind, const BookId& book, const char* body, size_t len, bool replace);
 

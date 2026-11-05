@@ -177,6 +177,57 @@ TEST_F(FinalizeTest, FullQueueReportsASessionItCouldNotKeep) {
   EXPECT_TRUE(d.engine->finalizeBook(input).ok);
 }
 
+TEST_F(FinalizeTest, ALongReadingIsSplitIntoSessionsTheServerAccepts) {
+  SessionSummary s;
+  s.started = WallTime{kNow - 9 * 3600, TimePrecision::Exact};
+  s.ended = WallTime{kNow, TimePrecision::Exact};
+  s.pagesRead = 300;
+  s.startPage = 10;
+  s.endPage = 310;
+  FinalizeInput input = d.finalizeInput(30);
+  input.session = &s;
+  const FinalizeResult result = d.engine->finalizeBook(input);
+  EXPECT_TRUE(result.ok);
+  EXPECT_TRUE(result.sessionQueued);
+  ASSERT_EQ(d.engine->runManualSession(nullptr, nullptr, nullptr).outcome, SessionOutcome::Ok);
+
+  std::vector<JsonDocument> sessions;
+  for (const auto& e : d.server.recorded) {
+    if (e.type != "session.ended") continue;
+    sessions.emplace_back();
+    ASSERT_FALSE(deserializeJson(sessions.back(), e.body));
+  }
+  ASSERT_EQ(sessions.size(), 3u) << "4 h + 4 h + 1 h";
+  int64_t total = 0;
+  for (auto& doc : sessions) {
+    const int64_t seconds = doc["payload"]["duration_seconds"];
+    EXPECT_GE(seconds, events::kMinSessionSec);
+    EXPECT_LE(seconds, events::kMaxSessionSec);
+    total += seconds;
+  }
+  EXPECT_EQ(total, 9 * 3600) << "no time lost at the seams";
+  EXPECT_EQ(sessions[0]["payload"]["start_page"], 10);
+  EXPECT_EQ(sessions[0]["payload"]["pages_read"], 0);
+  EXPECT_EQ(sessions[2]["payload"]["pages_read"], 300) << "counted once";
+  EXPECT_EQ(sessions[2]["payload"]["end_page"], 310);
+  EXPECT_NE(sessions[0]["aggregate_id"].as<std::string>(), sessions[1]["aggregate_id"].as<std::string>());
+}
+
+TEST_F(FinalizeTest, ALastPieceUnderAMinuteIsNotASession) {
+  SessionSummary s;
+  s.started = WallTime{kNow - events::kMaxSessionSec - 30, TimePrecision::Exact};
+  s.ended = WallTime{kNow, TimePrecision::Exact};
+  s.pagesRead = 5;
+  FinalizeInput input = d.finalizeInput(30);
+  input.session = &s;
+  ASSERT_TRUE(d.engine->finalizeBook(input).ok);
+  size_t sessions = 0;
+  for (size_t i = 0; i < d.outbox->depth(); ++i) {
+    if (d.outbox->entryAt(i)->kind == static_cast<uint8_t>(EventKind::Session)) ++sessions;
+  }
+  EXPECT_EQ(sessions, 1u);
+}
+
 TEST_F(FinalizeTest, SessionIsEmittedOnlyWithinTheRules) {
   SessionSummary good;
   good.started = WallTime{kNow - 600, TimePrecision::Exact};
@@ -189,11 +240,6 @@ TEST_F(FinalizeTest, SessionIsEmittedOnlyWithinTheRules) {
   SessionSummary tooShort = good;
   tooShort.started.epochSec = kNow - 59;
   input.session = &tooShort;
-  EXPECT_FALSE(d.engine->finalizeBook(input).sessionQueued);
-
-  SessionSummary tooLong = good;
-  tooLong.started.epochSec = kNow - 14401;
-  input.session = &tooLong;
   EXPECT_FALSE(d.engine->finalizeBook(input).sessionQueued);
 
   SessionSummary untimed = good;
