@@ -17,6 +17,8 @@ constexpr uint8_t kAnnVersion = 1;
 constexpr uint8_t kInboxMagic0 = 0xB1;
 constexpr uint8_t kInboxMagic1 = 0x57;
 constexpr size_t kLegacyMaxBytes = 8 * 1024;
+constexpr size_t kAnnHeaderBytes = 5;  // version u8, epoch u16, count u16
+constexpr size_t kAnnRecordBytes = 25;
 
 void writePosition(ByteWriter& w, const Position& p) {
   w.u8(p.hasPct ? 1 : 0);
@@ -407,25 +409,30 @@ bool Store::loadAnnotations(const BookId& id, AnnotationRecord** records, uint16
   *count = 0;
   char path[AtomicFile::kMaxPath];
   bookPath("ann", id, path);
-  AtomicFile& file = annFile_;
-  file.setPath(path);
-  const size_t rawCap = 3 + static_cast<size_t>(kMaxAnnotations) * 25;
-  uint8_t* buf = new (std::nothrow) uint8_t[rawCap];
-  if (!buf) return false;
+  annFile_.setPath(path);
+  // Sized from what is stored: a book with no clippings allocates nothing here, and there
+  // is no maximum for this to fall short of.
+  const size_t stored = annFile_.payloadSize();
+  if (annFile_.ioError()) return false;  // Not "no annotations": that would republish every clipping.
+  uint8_t* buf = nullptr;
   size_t len = 0;
   uint16_t n = 0;
   uint16_t epoch = 0;
-  bool loaded = file.load(buf, rawCap, len);
-  if (file.ioError()) {
-    delete[] buf;
-    return false;  // Not "no annotations": that would republish every clipping.
-  }
-  if (loaded && len >= 5) {
-    ByteReader r(buf, len);
-    if (r.u8() == kAnnVersion) {
-      epoch = r.u16();
-      n = r.u16();
-      if (epoch != state_.accountEpoch || n > kMaxAnnotations || r.remaining() != static_cast<size_t>(n) * 25) n = 0;
+  if (stored >= kAnnHeaderBytes && stored <= kAnnHeaderBytes + kMaxAnnotations * kAnnRecordBytes) {
+    buf = new (std::nothrow) uint8_t[stored];
+    if (!buf) return false;
+    const bool loaded = annFile_.load(buf, stored, len);
+    if (annFile_.ioError()) {
+      delete[] buf;
+      return false;
+    }
+    if (loaded) {
+      ByteReader r(buf, len);
+      if (r.u8() == kAnnVersion) {
+        epoch = r.u16();
+        n = r.u16();
+        if (epoch != state_.accountEpoch || n > kMaxAnnotations || r.remaining() != n * kAnnRecordBytes) n = 0;
+      }
     }
   }
   // Room for one more per clipping found later is handled by the caller, which
@@ -436,7 +443,7 @@ bool Store::loadAnnotations(const BookId& id, AnnotationRecord** records, uint16
     return false;
   }
   if (n) {
-    ByteReader r(buf + 5, len - 5);
+    ByteReader r(buf + kAnnHeaderBytes, len - kAnnHeaderBytes);
     for (uint16_t i = 0; i < n; ++i) {
       out[i].key = r.u64();
       r.bytes(out[i].syncId, 16);
@@ -454,7 +461,7 @@ bool Store::saveAnnotations(const BookId& id, const AnnotationRecord* records, u
   char path[AtomicFile::kMaxPath];
   bookPath("ann", id, path);
   annFile_.usePath(path);
-  const size_t cap = 5 + static_cast<size_t>(count) * 25;
+  const size_t cap = kAnnHeaderBytes + static_cast<size_t>(count) * kAnnRecordBytes;
   uint8_t* buf = new (std::nothrow) uint8_t[cap];
   if (!buf) return false;
   ByteWriter w(buf, cap);

@@ -204,6 +204,40 @@ TEST_F(FinalizeTest, SessionIsEmittedOnlyWithinTheRules) {
 
 // --- Highlights --------------------------------------------------------------------
 
+TEST_F(FinalizeTest, MoreClippingsThanTheLedgerHoldsNeverReadAsDeleted) {
+  // Past the limit the ledger cannot know them, and their absence from the read proves nothing.
+  FakeClips clips;
+  for (uint32_t i = 0; i < Store::kMaxAnnotations; ++i) clips.clips.push_back(clip(1, i, "t" + std::to_string(i)));
+  FinalizeResult result;
+  int exits = 0;
+  do {
+    FinalizeInput input = d.finalizeInput(10);
+    input.paged = false;
+    input.clips = &clips;
+    result = d.engine->finalizeBook(input);
+    ASSERT_TRUE(result.ok);
+    d.outbox->reset();
+  } while (result.annotationsPending && ++exits < 40);
+  EXPECT_FALSE(result.annotationsPending);
+
+  // A full ledger stays readable: no republishing at every exit.
+  FinalizeInput same = d.finalizeInput(10);
+  same.paged = false;
+  same.clips = &clips;
+  result = d.engine->finalizeBook(same);
+  EXPECT_EQ(result.annotationsCreated, 0u);
+
+  // One more up front pushes the last known clip past the cap.
+  clips.clips.insert(clips.clips.begin(), clip(0, 0, "nueva"));
+  FinalizeInput input = d.finalizeInput(10);
+  input.paged = false;
+  input.clips = &clips;
+  result = d.engine->finalizeBook(input);
+  EXPECT_TRUE(result.ok);
+  EXPECT_TRUE(result.annotationsPending);
+  EXPECT_EQ(result.annotationsDeleted, 0u);
+}
+
 TEST_F(FinalizeTest, NewClippingsBecomeCreatedRemovedOnesDeleted) {
   FakeClips clips;
   clips.clips = {clip(1, 10, "uno"), clip(2, 20, "dos")};

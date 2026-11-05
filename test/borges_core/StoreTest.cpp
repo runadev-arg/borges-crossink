@@ -234,6 +234,21 @@ TEST(Store, ALoadThenSaveOfAPerBookRecordDoesNotLookTwice) {
   EXPECT_EQ(fs.lookups() - afterLoad, 1u) << "only the open of the slot it writes";
 }
 
+TEST(Store, AnnotationLedgerHoldsExactlyItsMaximumAndStaysLoadable) {
+  MemFs fs;
+  Store store(fs, testKey(), 6);
+  ASSERT_TRUE(store.begin());
+  std::vector<AnnotationRecord> records(Store::kMaxAnnotations);
+  for (size_t i = 0; i < records.size(); ++i) records[i].key = i + 1;
+  ASSERT_TRUE(store.saveAnnotations(Device::book(), records.data(), Store::kMaxAnnotations));
+  AnnotationRecord* loaded = nullptr;
+  uint16_t count = 0;
+  ASSERT_TRUE(store.loadAnnotations(Device::book(), &loaded, &count));
+  EXPECT_EQ(count, Store::kMaxAnnotations) << "a full ledger read as empty republishes the book at every exit";
+  EXPECT_EQ(loaded[511].key, 512u);
+  delete[] loaded;
+}
+
 TEST(Store, AnnotationLedgerRoundTrip) {
   MemFs fs;
   Store store(fs, testKey(), 6);

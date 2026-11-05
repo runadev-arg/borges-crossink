@@ -1427,7 +1427,12 @@ FinalizeResult SyncEngine::finalizeBook(const FinalizeInput& input) {
 bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time, FinalizeResult& result) {
   size_t clipCount = 0;
   if (!input.clips->count(clipCount)) return false;  // Unreadable is not "all deleted".
-  if (clipCount > Store::kMaxAnnotations) clipCount = Store::kMaxAnnotations;
+  if (clipCount > Store::kMaxAnnotations) {
+    // The ledger has no room to know the rest, so nothing can be concluded from their
+    // absence: pending keeps the deletion pass below from running on a partial read.
+    clipCount = Store::kMaxAnnotations;
+    result.annotationsPending = true;
+  }
 
   AnnotationRecord* stored = nullptr;
   uint16_t storedCount = 0;
