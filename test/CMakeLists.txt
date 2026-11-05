@@ -39,6 +39,13 @@ target_compile_options(crosspoint_test_common INTERFACE
 enable_testing()
 include(GoogleTest)
 
+# scripts/test-borges-core.ps1 builds this suite alone.
+option(BORGES_CORE_ONLY "Configure only the borges_core test suite" OFF)
+add_subdirectory(borges_core)
+if(BORGES_CORE_ONLY)
+  return()
+endif()
+
 add_subdirectory(streaming_json_parser)
 add_subdirectory(release_json_parser)
 add_subdirectory(differential_rounding)
