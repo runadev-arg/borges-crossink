@@ -42,7 +42,8 @@
 #include <windows.h>
 #undef WIN32_LEAN_AND_MEAN
 
-#include <memory.h>
+/* Not <memory.h>: on a case-insensitive filesystem it finds lib/Memory/Memory.h,
+   a C++ header. <string.h> declares the same functions. */
 #include <string.h>
 
 #endif /* ndef WINCONFIG_H */

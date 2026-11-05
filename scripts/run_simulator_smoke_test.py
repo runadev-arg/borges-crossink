@@ -40,7 +40,8 @@ THEMES = {
 
 
 def program_path(env_name: str) -> Path:
-    return ROOT / ".pio" / "build" / env_name / "program"
+    suffix = ".exe" if os.name == "nt" else ""
+    return ROOT / ".pio" / "build" / env_name / f"program{suffix}"
 
 
 def build_simulator(env_name: str) -> None:
@@ -142,7 +143,7 @@ def run_smoke(args: argparse.Namespace) -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--book", default=str(DEFAULT_BOOK), help="EPUB fixture to copy into the isolated simulator fs_")
-    parser.add_argument("--env", choices=("simulator", "simulator-X3", "x4-classic-simulator", "sticky-simulator", "x4-pro-simulator"), default="simulator",
+    parser.add_argument("--env", choices=("simulator", "simulator-windows", "simulator-X3", "x4-classic-simulator", "sticky-simulator", "x4-pro-simulator"), default="simulator",
                         help="PlatformIO simulator environment to build and run")
     parser.add_argument("--font-dir", help="Font fixtures copied into isolated /fonts")
     parser.add_argument("--font-family", help="Exercise custom-font size and dictionary lifecycle")
