@@ -1,0 +1,27 @@
+LIBRARY SDL2.dll
+EXPORTS
+  SDL_PollEvent
+  SDL_GetKeyboardState
+  SDL_RenderPresent
+  SDL_CreateRGBSurfaceWithFormatFrom = SDL2_real.SDL_CreateRGBSurfaceWithFormatFrom
+  SDL_CreateRenderer = SDL2_real.SDL_CreateRenderer
+  SDL_CreateTexture = SDL2_real.SDL_CreateTexture
+  SDL_CreateWindow = SDL2_real.SDL_CreateWindow
+  SDL_Delay = SDL2_real.SDL_Delay
+  SDL_FreeSurface = SDL2_real.SDL_FreeSurface
+  SDL_GetError = SDL2_real.SDL_GetError
+  SDL_GetRendererOutputSize = SDL2_real.SDL_GetRendererOutputSize
+  SDL_GetTicks = SDL2_real.SDL_GetTicks
+  SDL_Init = SDL2_real.SDL_Init
+  SDL_Quit = SDL2_real.SDL_Quit
+  SDL_RWFromFile = SDL2_real.SDL_RWFromFile
+  SDL_RenderClear = SDL2_real.SDL_RenderClear
+  SDL_RenderCopy = SDL2_real.SDL_RenderCopy
+  SDL_RenderCopyEx = SDL2_real.SDL_RenderCopyEx
+  SDL_RenderReadPixels = SDL2_real.SDL_RenderReadPixels
+  SDL_RenderSetLogicalSize = SDL2_real.SDL_RenderSetLogicalSize
+  SDL_SaveBMP_RW = SDL2_real.SDL_SaveBMP_RW
+  SDL_SetHint = SDL2_real.SDL_SetHint
+  SDL_SetMainReady = SDL2_real.SDL_SetMainReady
+  SDL_SetWindowSize = SDL2_real.SDL_SetWindowSize
+  SDL_UpdateTexture = SDL2_real.SDL_UpdateTexture
