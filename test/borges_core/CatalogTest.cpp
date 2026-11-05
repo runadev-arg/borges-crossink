@@ -253,6 +253,17 @@ TEST(SafeFileName, LongNamesAreBoundedAndKeepTheExtension) {
   EXPECT_EQ((strlen(out) - 5) % 2, 0u) << "no split character";
 }
 
+TEST_F(CatalogTest, TheCacheOfAnotherAccountIsNotShown) {
+  d.http.script.push_back(jsonReply(200, page(book("b1", kMd5A, "Ficciones"))));
+  CatalogPage info;
+  ASSERT_EQ(catalog->fetchPage(1, 20, info), CatalogResult::Ok);
+  ASSERT_EQ(cached().size(), 1u);
+  ASSERT_TRUE(d.store->adoptAccount("another", "otra", *d.outbox));
+  Collect c;
+  EXPECT_FALSE(catalog->loadPage(1, info, c));
+  EXPECT_TRUE(c.entries.empty());
+}
+
 // --- Partial MD5 ------------------------------------------------------------------
 
 TEST(PartialMd5, MatchesKoreadersAlgorithm) {

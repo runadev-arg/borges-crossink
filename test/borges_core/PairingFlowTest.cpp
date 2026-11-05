@@ -49,6 +49,101 @@ class PairingFlowTest : public testing::Test {
 
 }  // namespace
 
+namespace {
+
+std::string claimByUsername(const std::string& username) {
+  return "{\"request_id\":\"" + std::string(kRequestId) + "\",\"status\":\"claimed\",\"account\":{\"username\":\"" + username +
+         "\"},\"device\":{\"id\":\"" + kSelfId + "\"},\"credential\":{\"token\":\"toto_T\",\"username\":\"" + kSelfId + "\"}}";
+}
+
+}  // namespace
+
+class AccountSwitchTest : public PairingFlowTest {
+ protected:
+  void pairWith(const std::string& claim) {
+    d.store->forgetCredential();
+    flow = std::make_unique<PairingFlow>(*d.store, *d.outbox, d.fs, d.http, d.clock, d.random, d.cancel, config);
+    ASSERT_TRUE(startFlow());
+    d.http.script.push_back(jsonReply(200, statusReply("approved")));
+    d.http.script.push_back(jsonReply(200, claim));
+    advance(5);
+    ASSERT_EQ(flow->step(), PairingState::Done);
+  }
+  void leaveSomethingBehind() {
+    d.store->state().cursor = 77;
+    d.store->state().holds.add(Device::book().md5);
+    ASSERT_TRUE(d.store->saveState());
+    ASSERT_EQ(d.appendRaw("del anterior"), Outbox::AppendResult::Ok);
+    BookLedger ledger;
+    ASSERT_TRUE(d.store->loadBook(Device::book(), ledger));
+    ledger.hasUndo = true;
+    ASSERT_TRUE(d.store->saveBook(ledger));
+  }
+  void expectKept() {
+    EXPECT_EQ(d.outbox->depth(), 1u);
+    EXPECT_EQ(d.store->state().cursor, 77u);
+    EXPECT_EQ(d.store->state().holds.size(), 1);
+  }
+  void expectReset() {
+    EXPECT_EQ(d.outbox->depth(), 0u) << "the old account's queue must not go up under this one";
+    EXPECT_EQ(d.store->state().cursor, 0u);
+    EXPECT_EQ(d.store->state().holds.size(), 0);
+    BookLedger ledger;
+    ASSERT_TRUE(d.store->loadBook(Device::book(), ledger));
+    EXPECT_FALSE(ledger.hasUndo);
+  }
+};
+
+TEST_F(AccountSwitchTest, AnotherAccountByIdResetsEverything) {
+  pairWith(claimReply("account-1"));
+  leaveSomethingBehind();
+  pairWith(claimReply("account-2"));
+  expectReset();
+  EXPECT_STREQ(d.store->creds().accountId, "account-2");
+}
+
+TEST_F(AccountSwitchTest, TheSameAccountKeepsTheQueue) {
+  pairWith(claimReply("account-1"));
+  leaveSomethingBehind();
+  pairWith(claimReply("account-1"));
+  expectKept();
+}
+
+TEST_F(AccountSwitchTest, WithoutAnIdTheUsernameIsTheIdentity) {
+  pairWith(claimByUsername("toto"));
+  EXPECT_STREQ(d.store->creds().accountName, "toto");
+  leaveSomethingBehind();
+  pairWith(claimByUsername("toto"));
+  expectKept();
+  pairWith(claimByUsername("german"));
+  expectReset();
+  EXPECT_STREQ(d.store->creds().accountName, "german");
+}
+
+TEST_F(AccountSwitchTest, TheServerStartingToSendAnIdIsNotAnotherAccount) {
+  pairWith(claimByUsername("toto"));
+  leaveSomethingBehind();
+  pairWith(claimReply("account-1"));  // Same username, "toto", now with an id.
+  expectKept();
+  EXPECT_STREQ(d.store->creds().accountId, "account-1");
+}
+
+TEST_F(AccountSwitchTest, ACredentialOfUnknownAccountProvesNothing) {
+  // Imported from the previous firmware: no id, no username.
+  copyText(d.store->creds().deviceId, sizeof(d.store->creds().deviceId), kSelfId);
+  copyText(d.store->creds().token, sizeof(d.store->creds().token), "toto_OLD");
+  leaveSomethingBehind();
+  pairWith(claimReply("account-1"));
+  expectReset();
+}
+
+TEST_F(AccountSwitchTest, ItsChoiceSurvivesAReboot) {
+  pairWith(claimReply("account-1"));
+  d.crashAndBoot();
+  EXPECT_STREQ(d.store->creds().accountId, "account-1");
+  EXPECT_STREQ(d.store->creds().accountName, "toto");
+}
+
 TEST_F(PairingFlowTest, TheClaimAnswerDoesNotStayInTheSpool) {
   ASSERT_TRUE(startFlow());
   d.http.script.push_back(jsonReply(200, statusReply("approved")));

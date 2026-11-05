@@ -156,9 +156,11 @@ class Store {
   const SyncState& state() const { return state_; }
   bool saveState();
 
-  // A pairing resolved to this account. A different account than before moves the
-  // epoch and empties the queue and the cursor: its data belongs to someone else.
-  bool adoptAccount(const char* accountId, Outbox& outbox);
+  // A pairing resolved to this account, by id when the server sent one and by username
+  // otherwise. Anything but proof of the same account moves the epoch and empties the
+  // queue, the cursor and the holds: that data may belong to someone else, and none of it
+  // can go up under this login. The same account keeps everything.
+  bool adoptAccount(const char* accountId, const char* accountName, Outbox& outbox);
   // Forgets the credential, with no copy left in either slot of the record. Keeps which
   // account it was (re-pairing it keeps the queue) and the sequence counter.
   bool forgetCredential();

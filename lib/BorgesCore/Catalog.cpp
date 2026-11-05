@@ -8,7 +8,8 @@ namespace borges {
 
 namespace {
 
-constexpr uint8_t kCacheMagic[4] = {'B', 'C', 'P', '1'};
+constexpr uint8_t kCacheMagic[4] = {'B', 'C', 'P', '2'};
+constexpr size_t kCacheTailBytes = 11;  // count, flags, page, account epoch, crc
 constexpr const char* kCacheDir = "/.crosspoint/borges/catalog";
 constexpr const char* kBooksPath = "/api/library/plugin/books";
 
@@ -344,11 +345,12 @@ CatalogResult Catalog::fetchPage(uint16_t page, uint16_t limit, CatalogPage& out
     return CatalogResult::Malformed;
   }
 
-  uint8_t tail[9];
+  uint8_t tail[kCacheTailBytes];
   ByteWriter w(tail, sizeof(tail));
   w.u16(count);
   w.u8((out.hasNext ? 1 : 0) | (out.hasPrevious ? 2 : 0));
   w.u16(page);
+  w.u16(store_.state().accountEpoch);
   w.u32(crc32End(crc));
   ioOk = ioOk && dst.writeAll(tail, sizeof(tail)) && dst.flush();
   dst.close();
@@ -373,19 +375,21 @@ bool Catalog::loadPage(uint16_t page, CatalogPage& out, ICatalogVisitor& visitor
   File f(fs_, path, IFs::Mode::Read);
   if (!f) return false;
   const int64_t size = f.size();
-  if (size < 4 + 9) return false;
+  if (size < static_cast<int64_t>(4 + kCacheTailBytes)) return false;
   uint8_t magic[4];
   if (!f.readExact(magic, 4) || memcmp(magic, kCacheMagic, 4) != 0) return false;
-  const uint32_t bodyBytes = static_cast<uint32_t>(size) - 4 - 9;
+  const uint32_t bodyBytes = static_cast<uint32_t>(size) - 4 - kCacheTailBytes;
   if (bodyBytes % kRecordBytes != 0) return false;
-  uint8_t tail[9];
-  if (!f.seek(4 + bodyBytes) || !f.readExact(tail, 9)) return false;
-  ByteReader r(tail, 9);
+  uint8_t tail[kCacheTailBytes];
+  if (!f.seek(4 + bodyBytes) || !f.readExact(tail, kCacheTailBytes)) return false;
+  ByteReader r(tail, kCacheTailBytes);
   const uint16_t count = r.u16();
   const uint8_t flags = r.u8();
   const uint16_t storedPage = r.u16();
+  const uint16_t epoch = r.u16();
   const uint32_t expect = r.u32();
-  if (count != bodyBytes / kRecordBytes || storedPage != page) return false;
+  // Another account's list is not this one's, even offline.
+  if (count != bodyBytes / kRecordBytes || storedPage != page || epoch != store_.state().accountEpoch) return false;
 
   uint8_t record[kRecordBytes];
   // Verify everything first, so a visitor never sees half of a corrupt page.

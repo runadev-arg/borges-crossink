@@ -315,6 +315,7 @@ void PairingFlow::claim() {
   char deviceId[sizeof(store_.creds().deviceId)] = {0};
   char credentialDevice[sizeof(store_.creds().deviceId)] = {0};
   char accountId[sizeof(store_.creds().accountId)] = {0};
+  char accountName[sizeof(store_.creds().accountName)] = {0};
   int64_t expires = 0;
   int64_t renew = 0;
   bool tokenCut = false;
@@ -344,6 +345,8 @@ void PairingFlow::claim() {
               scan.readString(deviceId, sizeof(deviceId));
             } else if (isAccount && strcmp(key, "id") == 0) {
               scan.readString(accountId, sizeof(accountId));
+            } else if (isAccount && strcmp(key, "username") == 0) {
+              scan.readString(accountName, sizeof(accountName));
             } else {
               scan.skipValue();
             }
@@ -365,7 +368,7 @@ void PairingFlow::claim() {
     clearPairing();
     return;
   }
-  if (!store_.adoptAccount(accountId, outbox_)) {
+  if (!store_.adoptAccount(accountId, accountName, outbox_)) {
     ApiResult none;
     note(none, "account_switch_failed");
     state_ = PairingState::Failed;

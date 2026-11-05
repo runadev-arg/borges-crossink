@@ -411,12 +411,12 @@ TEST(Store, AccountChangeEmptiesQueueAndCursorButKeepsSequence) {
   ASSERT_TRUE(d.store->saveBook(l));
 
   // Same account: nothing changes.
-  ASSERT_TRUE(d.store->adoptAccount("account-a", *d.outbox));
+  ASSERT_TRUE(d.store->adoptAccount("account-a", nullptr, *d.outbox));
   EXPECT_EQ(d.outbox->depth(), 1u);
   EXPECT_EQ(d.store->state().cursor, 55u);
 
   // Another account: its data must not be uploaded under the new one.
-  ASSERT_TRUE(d.store->adoptAccount("account-b", *d.outbox));
+  ASSERT_TRUE(d.store->adoptAccount("account-b", nullptr, *d.outbox));
   EXPECT_EQ(d.outbox->depth(), 0u);
   EXPECT_EQ(d.store->state().cursor, 0u);
   EXPECT_EQ(d.store->state().holds.size(), 0);

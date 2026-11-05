@@ -335,18 +335,32 @@ bool Store::saveState() {
   return stateFile_.save(buf, w.size());
 }
 
-bool Store::adoptAccount(const char* accountId, Outbox& outbox) {
-  if (!accountId || !*accountId) return true;
-  if (creds_.accountId[0] && strcmp(creds_.accountId, accountId) != 0) {
-    if (outbox.isOpen() && !outbox.reset()) return false;
-    state_.cursor = 0;
-    state_.committedCursor = 0;
-    state_.holds.clear();
-    state_.accountEpoch = static_cast<uint16_t>(state_.accountEpoch + 1);
-    state_.capsClientHash = 0;
-    if (!saveState()) return false;
+bool Store::adoptAccount(const char* accountId, const char* accountName, Outbox& outbox) {
+  const char* id = accountId ? accountId : "";
+  const char* name = accountName ? accountName : "";
+  // An id is compared with an id: a record from before the server sent one only has the
+  // username, and that must not read as somebody else. A credential imported from the
+  // previous firmware knows neither, and then nothing proves it is the same account.
+  bool same = false;
+  if (creds_.accountId[0] && id[0]) {
+    same = strcmp(creds_.accountId, id) == 0;
+  } else if (creds_.accountName[0] && name[0]) {
+    same = strcmp(creds_.accountName, name) == 0;
   }
-  copyText(creds_.accountId, sizeof(creds_.accountId), accountId);
+  if (!same) {
+    if (!outbox.isOpen() && !outbox.open()) return false;
+    if (!outbox.reset()) return false;
+    const uint16_t epoch = state_.accountEpoch;
+    const int64_t anchor = state_.anchorEpoch;
+    state_ = SyncState{};
+    state_.accountEpoch = static_cast<uint16_t>(epoch + 1);
+    state_.anchorEpoch = anchor;  // The clock is not the account's.
+    if (!saveState()) return false;
+    creds_.accountId[0] = '\0';
+    creds_.accountName[0] = '\0';
+  }
+  if (id[0]) copyText(creds_.accountId, sizeof(creds_.accountId), id);
+  if (name[0]) copyText(creds_.accountName, sizeof(creds_.accountName), name);
   return true;
 }
 
