@@ -210,11 +210,14 @@ class ClipSource final : public IClipSource {
     if (visibleOffset != kNoVisibleOffset || paragraph != UINT16_MAX || index < clips) {
       // Published without one it would stay without one: the ledger never asks again.
       if (!budget_.take(true)) return false;
+      // locateText builds a second copy of the text, and a std::string aborts when it cannot grow.
+      if (index < clips && ESP.getMaxAllocHeap() < text_.size() + kAllocationMargin) return false;
       // A clipping reaches KOReader as a highlight only with both ends, holding the text it is
       // sent with. When its text cannot be found it goes on with no end: KOReader leaves it out
       // instead of showing other text, and the server still has it.
-      if (index < clips && ChapterXPathResolver::locateText(epub_, spine, text_.c_str(), visibleOffset,
-                                                            CLIPPINGS.clippingAt(index)->startWordIndex, range_) &&
+      if (index < clips &&
+          ChapterXPathResolver::locateText(epub_, spine, text_.c_str(), visibleOffset,
+                                           CLIPPINGS.clippingAt(index)->startWordIndex, range_) &&
           range_.pos0.size() < kMaxXpointer && range_.pos1.size() < kMaxXpointer) {
         out.xpointer = range_.pos0.c_str();
         out.xpointerEnd = range_.pos1.c_str();

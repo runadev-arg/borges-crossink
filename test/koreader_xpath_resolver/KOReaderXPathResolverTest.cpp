@@ -360,6 +360,13 @@ TEST(KOReaderClipRange, TheReadersComposedLetterIsTheSourcesBaseAndMark) {
   EXPECT_EQ(range.text, "e\xCC\x81");
 }
 
+TEST(KOReaderClipRange, ABaseLetterWithoutItsMarkIsOtherText) {
+  const auto epub = epubWith("<html><body><p>e x</p></body></html>");
+  ChapterXPathResolver::TextRange range;
+  EXPECT_FALSE(ChapterXPathResolver::locateText(epub, 0, "\xC3\xA9", 0, 0, range));
+  EXPECT_FALSE(ChapterXPathResolver::locateText(epub, 0, "\xC3\xA9 x", 0, 0, range));
+}
+
 TEST(KOReaderClipRange, ListMarkersAreTheReadersAlone) {
   EXPECT_EQ(locate("<ul><li>one</li><li>two</li></ul>", "one\n\xE2\x80\xA2 two").text, "one\ntwo");
   EXPECT_EQ(locate("<ol><li>one</li><li>two</li></ol>", "one\n2. two").text, "one\ntwo");

@@ -361,6 +361,7 @@ class CreWalker final : public Print {
     uint32_t last;
     uint32_t startWord;
     bool afterBase;
+    bool markSeen;
   };
 
   static constexpr int kCssMemoSize = 16;
@@ -522,6 +523,7 @@ class CreWalker final : public Print {
       if (wanted != 0 && utf8DecomposedBase(wanted) == cp) {
         attempt.position = next;
         attempt.afterBase = true;
+        attempt.markSeen = false;
         return true;
       }
       const uint32_t skipped = afterListMarker(attempt.position);
@@ -530,6 +532,12 @@ class CreWalker final : public Print {
       wanted = clipCodepointAt(attempt.position, next);
     }
     return false;
+  }
+
+  // The base alone is not that letter: without its mark, this is other text.
+  bool finished(const Attempt& attempt) const {
+    if (attempt.afterBase && !attempt.markSeen) return false;
+    return clipFinished(attempt.position);
   }
 
   bool clipFinished(const uint32_t position) const {
@@ -542,9 +550,9 @@ class CreWalker final : public Print {
   }
 
   void startAttempt(const uint32_t position, const uint32_t cp, const uint32_t at) {
-    Attempt attempt{position, at, at, wordsSeen_ > 0 ? wordsSeen_ - 1 : 0, false};
+    Attempt attempt{position, at, at, wordsSeen_ > 0 ? wordsSeen_ - 1 : 0, false, false};
     if (!advance(attempt, cp)) return;
-    if (clipFinished(attempt.position)) {
+    if (finished(attempt)) {
       finishAttempt(attempt);
       return;
     }
@@ -571,12 +579,18 @@ class CreWalker final : public Print {
       Attempt attempt = attempts_[i];
       if (mark && attempt.afterBase) {
         attempt.last = at;
+        attempt.markSeen = true;
+        if (finished(attempt)) {
+          finishAttempt(attempt);
+          continue;
+        }
         attempts_[kept++] = attempt;
         continue;
       }
+      if (attempt.afterBase && !attempt.markSeen) continue;
       if (!advance(attempt, cp)) continue;
       attempt.last = at;
-      if (clipFinished(attempt.position)) {
+      if (finished(attempt)) {
         finishAttempt(attempt);
         continue;
       }
