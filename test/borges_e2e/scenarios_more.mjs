@@ -1,6 +1,10 @@
 // Scenarios 6 to 12.
 
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { buildItem, comparableText } from "../borges_contract/koreader.mjs";
 import * as B from "./books.mjs";
 import { until } from "./device.mjs";
 import { deviceWithBook, headIs, koreaderAt, wait } from "./scenarios.mjs";
@@ -289,6 +293,30 @@ async function scenario9({ h, t, makeDevice }) {
   const annEvents = async () => (await h.events(d.deviceId)).filter((e) => /annotation|bookmark/.test(e.event_type));
   const before = await annEvents();
   t.eq(before.length, 2, `two annotation events (${before.map((e) => e.event_type).join(",")})`);
+
+  // What KOReader needs to place the highlight: both ends, and the text crengine reads there.
+  const created = before.find((e) => e.event_type === "annotation.created");
+  const pos0 = created?.payload?.position?.pos0;
+  const pos1 = created?.payload?.position?.pos1;
+  t.ok(pos0 && pos1, `the highlight has both ends: ${pos0} .. ${pos1}`);
+  t.eq(pos0, created?.payload?.xpointer, "and starts at its xpointer");
+  const buildItemResult = buildItem(created?.payload ?? {}, "rolling", (x) => typeof x === "string" && x.startsWith("/body/"), 1);
+  t.ok(buildItemResult.item, `annotationadapter.lua's buildItem takes it: ${buildItemResult.error}`);
+  const oracle = process.env.BORGES_CRE_ORACLE;
+  if (oracle && fs.existsSync(oracle) && pos0 && pos1) {
+    // scripts/test-borges-xpointer.ps1 builds this: KOReader's real engine, reading the range.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cre-"));
+    const epub = path.join(dir, "book.epub");
+    fs.writeFileSync(epub, book.bytes);
+    fs.writeFileSync(path.join(dir, "in"), `${pos0}\t${pos1}\n`);
+    execFileSync(oracle, [epub, "--ranges", path.join(dir, "in"), "--out", path.join(dir, "out")], { stdio: "ignore" });
+    const [, valid, read] = fs.readFileSync(path.join(dir, "out"), "utf8").trimEnd().split("\t");
+    t.eq(valid, "1", "crengine accepts both ends");
+    t.eq(comparableText((read ?? "").replace(/\\n/g, "\n")), comparableText(created?.payload?.text), "and reads there the text that was sent");
+    fs.rmSync(dir, { recursive: true, force: true });
+  } else {
+    t.note("BORGES_CRE_ORACLE not set: the range was not read back with crengine");
+  }
   t.ok(before.every((e) => e.processing_status === "accepted" || e.processing_status === "applied"), `accepted (${before.map((e) => e.processing_status).join(",")})`);
   h.proxy.clear();
   ui.letThrottleExpire(d);

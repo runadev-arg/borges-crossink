@@ -206,12 +206,26 @@ class ClipSource final : public IClipSource {
     }
     out.chapter = chapter_.c_str();
     xpointer_.clear();
-    if (visibleOffset != kNoVisibleOffset || paragraph != UINT16_MAX) {
+    range_ = {};
+    if (visibleOffset != kNoVisibleOffset || paragraph != UINT16_MAX || index < clips) {
       // Published without one it would stay without one: the ledger never asks again.
       if (!budget_.take(true)) return false;
-      xpointer_ = visibleOffset != kNoVisibleOffset
-                      ? ChapterXPathResolver::findXPathForVisibleTextOffset(epub_, spine, visibleOffset)
-                      : ChapterXPathResolver::findXPathForParagraph(epub_, spine, paragraph);
+      // A clipping reaches KOReader as a highlight only with both ends, holding the text it is
+      // sent with. When its text cannot be found it goes on with no end: KOReader leaves it out
+      // instead of showing other text, and the server still has it.
+      if (index < clips && ChapterXPathResolver::locateText(epub_, spine, text_.c_str(), visibleOffset,
+                                                            CLIPPINGS.clippingAt(index)->startWordIndex, range_) &&
+          range_.pos0.size() < kMaxXpointer && range_.pos1.size() < kMaxXpointer) {
+        out.xpointer = range_.pos0.c_str();
+        out.xpointerEnd = range_.pos1.c_str();
+        out.text = range_.text.c_str();
+        return true;
+      }
+      if (visibleOffset != kNoVisibleOffset) {
+        xpointer_ = ChapterXPathResolver::findXPathForVisibleTextOffset(epub_, spine, visibleOffset);
+      } else if (paragraph != UINT16_MAX) {
+        xpointer_ = ChapterXPathResolver::findXPathForParagraph(epub_, spine, paragraph);
+      }
     }
     if (!xpointer_.empty() && xpointer_.size() < kMaxXpointer) out.xpointer = xpointer_.c_str();
     return true;
@@ -224,6 +238,7 @@ class ClipSource final : public IClipSource {
   std::string text_;
   std::string chapter_;
   std::string xpointer_;
+  ChapterXPathResolver::TextRange range_;
   XpointerBudget& budget_;
 };
 
