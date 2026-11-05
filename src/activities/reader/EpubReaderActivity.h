@@ -112,6 +112,8 @@ class EpubReaderActivity final : public Activity {
   borges::glue::ReaderTracker borgesTracker;
   bool skipBorgesExitSave = false;
   void finalizeForBorges();
+  int32_t borgesReferencePage() const;
+  int32_t borgesTotalPages() const;
   void undoBorgesJump();
   ActiveBookReaderSettingsData initialBookReaderSettings;
   std::unique_ptr<Section> section = nullptr;

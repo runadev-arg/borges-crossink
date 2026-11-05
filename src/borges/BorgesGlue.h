@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 class Activity;
@@ -31,9 +32,9 @@ enum class NetPayload : uint32_t {
   ManualFromHome = 5,    // The Borges screen, straight into a sync.
   ManualFromReader = 6,  // A sync of the open book, then back to it.
   Library = 7,
-};
   Disconnect = 8,   // The Borges screen, invalidating the credential on the server.
   OtherDevice = 9,  // APP_STATE.openEpubPath: the place another device left it at, then back.
+};
 
 // --- The previous firmware's data ------------------------------------------------------
 
@@ -75,10 +76,18 @@ struct ReaderSnapshot {
 // At reader exit, with the book and its clippings still loaded. Local, never the radio.
 // True: the framebuffer was lent to resolve xpointers, so its bytes are gone. The caller
 // holds the render lock, and rebuilds the frame if something after it needs one.
-bool finalizeFromReader(GfxRenderer& renderer, const ReaderTracker& tracker, const std::shared_ptr<Epub>& epub,
+bool finalizeFromReader(GfxRenderer& renderer, ReaderTracker& tracker, const std::shared_ptr<Epub>& epub,
                         const ReaderSnapshot& snapshot);
+// A restart that skips onExit is coming: what this reading knows goes to the card.
+void keepReadingAcrossRestart(const ReaderTracker& tracker, const Epub& epub);
+// At reader entry. Takes back what a restart or a failed finalize left.
+void restoreReading(ReaderTracker& tracker, const Epub& epub);
+// "Volver a donde estaba": the place restored becomes the head, as in the plugin.
+void publishRestoredPosition(const std::shared_ptr<Epub>& epub, const Position& position);
 // A clipping was just saved: remember when, next to the book.
-void stampClip(const std::string& cachePath, uint16_t spine, uint32_t uptimeStamp);
+void stampClip(const std::string& cachePath, uint16_t spine, uint32_t uptimeStamp,
+               std::optional<uint32_t> visibleOffset);
+void stampBookmark(const std::string& cachePath, uint16_t spine, float progress, std::optional<uint32_t> visibleOffset);
 
 bool isPaired();
 // Cheap enough to call when a menu opens: one exists() each.

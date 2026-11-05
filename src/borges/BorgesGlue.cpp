@@ -5,6 +5,7 @@
 #include <Epub.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <InflateStream.h>
 #include <Logging.h>
@@ -12,6 +13,7 @@
 
 #include <cstring>
 #include <ctime>
+#include <optional>
 #include <string>
 
 #include "BorgesActivities.h"
@@ -39,11 +41,12 @@ constexpr int kMaxXpointersPerFinalize = 6;
 constexpr uint32_t kXpointerBudgetMs = 4000;
 // With the framebuffer lent, inflate's 43 KB come out of it. What is left on the heap is the
 // XML parser, its string pools and the read chunk.
-constexpr uint32_t kMinFreeForXpointer = 16 * 1024;
+constexpr uint32_t kMinFreeForXpointer = 22 * 1024;  // 18 KB peak measured on the host.
 constexpr uint32_t kMinBlockForXpointer = 8 * 1024;
+constexpr uint32_t kAllocationMargin = 2 * 1024;
 
 std::string cachePathFor(const std::string& path) { return Epub::cachePathForFilePath(path, kCacheRoot); }
-constexpr uint32_t kAllocationMargin = 2 * 1024;
+std::string trackedPath(const Epub& epub) { return epub.getCachePath() + "/borges_reading.bin"; }
 
 const char* fileNameOf(const std::string& path) {
   const size_t slash = path.find_last_of('/');
@@ -66,13 +69,14 @@ OpenRoute routeBook(BorgesStack& stack, const std::string& path) {
   in.hasPendingJump = APP_STATE.pendingBookmarkSpine != UINT16_MAX;
   in.paired = stack.store.creds().paired();
   if (in.paired) {
-    const Gate gate = stack.engine.gate(SessionKind::Open);
+    const Gate gate = stack.engine.decideAutomatic(SessionKind::Open);
     in.needsRelink = gate == Gate::NeedsRelink;
-    in.backedOff = gate == Gate::BackedOff;
+    in.backedOff = gate == Gate::BackedOff && !openOutlastsBackoff(stack.glue, stack.clock.wallNow());
   }
   in.hasSavedWifi = hasSavedWifi();
   in.autoOnOpen = stack.glue.autoOnOpen;
   in.throttled = openThrottled(stack.glue, pathHash(path.c_str()), stack.clock.wallNow());
+  in.batteryPercent = powerManager.getBatteryPercentage();
   OpenRoute route = routeOpen(in);
   if (route != OpenRoute::Direct) holdBook(stack, path);
   if (route == OpenRoute::NetworkSession) {
@@ -80,6 +84,7 @@ OpenRoute routeBook(BorgesStack& stack, const std::string& path) {
       LOG_INF("BORGES", "Open sessions keep failing: opening without one");
       route = OpenRoute::DirectWithHold;
     }
+    stack.glue.lastOpenTryEpoch = stack.clock.wallNow().epochSec;
     stack.glueStore.save(stack.glue);
   }
   return route;
@@ -139,7 +144,7 @@ class ClipSource final : public IClipSource {
       if (!clip) return false;
       out.spine = clip->spineIndex;
       out.textOffset = clip->paragraphIndex;
-      out.textHash = clipIdentity(clip->timestamp, clip->textLength, clip->wordCount);
+      out.textHash = clipIdentity(clip->startWordIndex, clip->textLength, clip->wordCount);
       out.bookmark = false;
       return true;
     }
@@ -155,6 +160,7 @@ class ClipSource final : public IClipSource {
     const size_t clips = CLIPPINGS.clippingCount();
     uint16_t spine = 0;
     uint16_t paragraph = UINT16_MAX;
+    uint32_t visibleOffset = kNoVisibleOffset;
     out = ClipDetail{};
     if (index < clips) {
       const Clipping* clip = CLIPPINGS.clippingAt(index);
@@ -167,8 +173,18 @@ class ClipSource final : public IClipSource {
       spine = clip->spineIndex;
       paragraph = clip->paragraphIndex;
       out.text = text_.c_str();
-      out.page = clip->startPage;
-      out.timeMs = ClipTimes(stack_.fs).lookup(timesPath_.c_str(), spine, clip->timestamp);
+      // The core derives the book-wide page from this, as for progress. startPage is the
+      // chapter's, and means nothing elsewhere.
+      out.hasPct = true;
+      out.pctMicro = static_cast<uint32_t>(
+          epub_->calculateProgress(spine,
+                                   clip->pageCount > 0 ? static_cast<float>(clip->startPage) / clip->pageCount : 0.0f) *
+          100000000.0f);
+      ClipStamp stamp;
+      if (ClipTimes(stack_.fs).lookup(timesPath_.c_str(), spine, clip->timestamp, stamp)) {
+        out.timeMs = stamp.epochMs;
+        visibleOffset = stamp.visibleOffset;
+      }
     } else {
       const auto& bookmarks = BOOKMARKS.getBookmarks();
       if (index - clips >= bookmarks.size()) return false;
@@ -180,13 +196,22 @@ class ClipSource final : public IClipSource {
       out.text = text_.c_str();
       out.hasPct = true;
       out.pctMicro = static_cast<uint32_t>(epub_->calculateProgress(spine, mark.progress) * 100000000.0f);
+      uint32_t progressBits = 0;
+      memcpy(&progressBits, &mark.progress, sizeof(progressBits));
+      ClipStamp stamp;
+      if (ClipTimes(stack_.fs).lookup(timesPath_.c_str(), spine, progressBits, stamp)) {
+        out.timeMs = stamp.epochMs;
+        visibleOffset = stamp.visibleOffset;
+      }
     }
     out.chapter = chapter_.c_str();
     xpointer_.clear();
-    if (paragraph != UINT16_MAX) {
+    if (visibleOffset != kNoVisibleOffset || paragraph != UINT16_MAX) {
       // Published without one it would stay without one: the ledger never asks again.
       if (!budget_.take(true)) return false;
-      xpointer_ = ChapterXPathResolver::findXPathForParagraph(epub_, spine, paragraph);
+      xpointer_ = visibleOffset != kNoVisibleOffset
+                      ? ChapterXPathResolver::findXPathForVisibleTextOffset(epub_, spine, visibleOffset)
+                      : ChapterXPathResolver::findXPathForParagraph(epub_, spine, paragraph);
     }
     if (!xpointer_.empty() && xpointer_.size() < kMaxXpointer) out.xpointer = xpointer_.c_str();
     return true;
@@ -255,6 +280,8 @@ bool launchNetworkTarget(const uint32_t payload, GfxRenderer& renderer, MappedIn
     case NetPayload::Pair:
     case NetPayload::ManualFromHome:
     case NetPayload::ManualFromReader:
+    case NetPayload::Disconnect:
+    case NetPayload::OtherDevice:
       activity = makeUniqueNoThrow<BorgesActivity>(renderer, input, true, what);
       break;
     case NetPayload::None:
@@ -276,17 +303,15 @@ bool shouldFlushBeforeSleep(const uint32_t batteryPercent, const bool inNetworkB
   in.paired = true;
   in.syncOnSleep = stack->glue.syncOnSleep;
   in.hasSavedWifi = hasSavedWifi();
-  in.gateGo = stack->engine.gate(SessionKind::Sleep) == Gate::Go;
+  in.gateGo = stack->engine.decideAutomatic(SessionKind::Sleep) == Gate::Go;
   in.batteryPercent = batteryPercent;
   if (!glue::shouldFlushBeforeSleep(in)) return false;
   const bool armed = armSession(stack->glue, PendingKind::SleepFlush);
-    case NetPayload::Disconnect:
-    case NetPayload::OtherDevice:
   stack->glueStore.save(stack->glue);
   return armed;
 }
 
-bool finalizeFromReader(GfxRenderer& renderer, const ReaderTracker& tracker, const std::shared_ptr<Epub>& epub,
+bool finalizeFromReader(GfxRenderer& renderer, ReaderTracker& tracker, const std::shared_ptr<Epub>& epub,
                         const ReaderSnapshot& snapshot) {
   if (!epub || !mayBePaired()) return false;
   auto stack = makeStack();
@@ -324,7 +349,7 @@ bool finalizeFromReader(GfxRenderer& renderer, const ReaderTracker& tracker, con
   }
   input->lastTurn.precision = now.precision;
   input->lastTurn.epochSec = tracker.lastTurnEpoch > 0 ? tracker.lastTurnEpoch : now.epochSec;
-  input->hasLastTurnMonotonic = tracker.paged;
+  input->hasLastTurnMonotonic = tracker.paged && tracker.lastTurnMs != 0;
   input->lastTurnMonotonicMs = tracker.lastTurnMs;
 
   if (tracker.paged && tracker.startedEpoch > kPlausibleEpoch) {
@@ -332,28 +357,82 @@ bool finalizeFromReader(GfxRenderer& renderer, const ReaderTracker& tracker, con
     session->started.precision = now.precision;
     session->ended = input->lastTurn;
     session->pagesRead = tracker.pagesRead;
+    session->startPage = tracker.startPage;
     session->endPage = snapshot.page;
     input->session = session.get();
   }
 
+  tracker.leavePage();
+  input->pageStats = &tracker.pageStats;
+
   ClipSource clips(*stack, epub, budget);
   input->clips = &clips;
   const FinalizeResult result = stack->engine.finalizeBook(*input);
+  const bool progressLost = input->paged && !result.ok && !result.progressQueued;
+  const bool sessionLost = input->session && !result.sessionQueued && !result.ok;
+  if (progressLost || sessionLost) {
+    // Clippings retry by themselves at the next finalize. These live only in this reader.
+    TrackedReading keep = tracker;
+    keep.paged = progressLost;
+    if (!sessionLost) keep.pagesRead = 0;
+    if (!saveTrackedReading(stack->fs, trackedPath(*epub).c_str(), keep)) LOG_ERR("BORGES", "Reading state lost");
+  }
   LOG_DBG("BORGES", "Finalize ok=%d progress=%d created=%u deleted=%u", result.ok ? 1 : 0,
           result.progressQueued ? 1 : 0, result.annotationsCreated, result.annotationsDeleted);
   return budget.frameLent();
 }
 
-void stampClip(const std::string& cachePath, const uint16_t spine, const uint32_t uptimeStamp) {
+void keepReadingAcrossRestart(const ReaderTracker& tracker, const Epub& epub) {
+  if (!tracker.paged || !mayBePaired()) return;
+  net::BorgesFsHal fs;
+  if (!saveTrackedReading(fs, trackedPath(epub).c_str(), tracker)) LOG_ERR("BORGES", "Reading state lost");
+}
+
+void restoreReading(ReaderTracker& tracker, const Epub& epub) {
+  if (!mayBePaired()) return;
+  net::BorgesFsHal fs;
+  TrackedReading kept;
+  if (!takeTrackedReading(fs, trackedPath(epub).c_str(), kept)) return;
+  tracker.paged = kept.paged;
+  tracker.pagesRead = kept.pagesRead;
+  if (kept.startedEpoch > kPlausibleEpoch) tracker.startedEpoch = kept.startedEpoch;
+  tracker.lastTurnEpoch = kept.lastTurnEpoch;
+}
+
+void publishRestoredPosition(const std::shared_ptr<Epub>& epub, const Position& position) {
+  auto stack = makeStack();
+  if (!stack || !stack->openStore() || !stack->store.creds().paired() || !stack->openEngine()) return;
+  auto input = makeUniqueNoThrow<FinalizeInput>();
+  if (!input || !partialMd5(stack->fs, epub->getPath().c_str(), input->book.id)) return;
+  input->book.title = epub->getTitle().c_str();
+  input->book.author = epub->getAuthor().c_str();
+  input->book.file = fileNameOf(epub->getPath());
+  input->position = position;
+  input->paged = true;
+  input->lastTurn = stack->clock.wallNow();
+  if (!stack->engine.finalizeBook(*input).ok) LOG_ERR("BORGES", "Could not queue the restored place");
+}
+
+void stampClip(const std::string& cachePath, const uint16_t spine, const uint32_t uptimeStamp,
+               const std::optional<uint32_t> visibleOffset) {
+  if (!mayBePaired()) return;
   const time_t now = time(nullptr);
-  if (static_cast<int64_t>(now) < kPlausibleEpoch || !mayBePaired()) return;  // Otherwise the event omits the time.
   net::BorgesFsHal fs;
   ClipStamp stamp;
   stamp.spine = spine;
   stamp.uptime = uptimeStamp;
-  stamp.epochMs = static_cast<int64_t>(now) * 1000;
+  // 0: the event omits the time rather than state a wrong one.
+  stamp.epochMs = static_cast<int64_t>(now) >= kPlausibleEpoch ? static_cast<int64_t>(now) * 1000 : 0;
+  stamp.visibleOffset = visibleOffset.value_or(kNoVisibleOffset);
   const std::string path = cachePath + kClipTimes;
   if (!ClipTimes(fs).append(path.c_str(), stamp)) LOG_ERR("BORGES", "Could not stamp a clipping");
+}
+
+void stampBookmark(const std::string& cachePath, const uint16_t spine, const float progress,
+                   const std::optional<uint32_t> visibleOffset) {
+  uint32_t progressBits = 0;
+  memcpy(&progressBits, &progress, sizeof(progressBits));
+  stampClip(cachePath, spine, progressBits, visibleOffset);
 }
 
 bool isPaired() { return mayBePaired(); }
