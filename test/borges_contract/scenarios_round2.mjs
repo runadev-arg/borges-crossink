@@ -149,6 +149,12 @@ async function tokenAndDisconnect(h, t) {
   const imported = await importer.once("status");
   t.eq(imported.paired, true, "the old credential is imported");
   t.ok(imported.base_url.startsWith("http://127.0.0.1"), "its base URL means nothing");
+  // The row was paired by the old firmware: the first session must say what runs now, even
+  // with nothing to send, so only the pull can carry it.
+  t.eq((await importer.once("manual-session")).report.outcome, "ok", "the imported credential syncs");
+  const [row] = await h.sql`SELECT client_version, firmware_version FROM devices WHERE id = ${claimed.device.id}`;
+  t.eq(row.client_version, "crossink-borges/1.6.1-contract", "the device row says what runs now");
+  t.eq(row.firmware_version, "1.6.1-contract", "and its firmware");
   t.eq((await importer.once("disconnect", { online: 0 })).result, "still_valid_on_server", "disconnected");
   t.eq((await importer.once("status")).paired, false, "and the next boot does not bring it back");
   t.ok(fs.existsSync(path.join(legacyDir, "borges.json")), "the old file stays, for a rollback");
