@@ -1,0 +1,579 @@
+// Differential test: the firmware mapper against cre-oracle (KOReader's crengine), for one book.
+//
+//   xpdiff <bookdir> <oracle.exe> <workdir> [maxPointsPerDirection]
+//
+// Both sides are compared in one coordinate: the non-space characters of a spine item, in order.
+// The firmware side is an independent scan of the same XHTML, not the code under test.
+#include <expat.h>
+#include <sys/stat.h>
+
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <map>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "ChapterXPathResolver.h"
+#include "Epub/htmlEntities.h"
+#include "Epub/parsers/VisibleOffsetRules.h"
+#include "ProgressMapper.h"
+#include "Utf8.h"
+
+extern "C" {
+size_t g_live = 0, g_peak = 0;
+void* hmalloc(size_t n) {
+  size_t* p = static_cast<size_t*>(malloc(n + 16));
+  if (!p) return nullptr;
+  *p = n;
+  g_live += n;
+  if (g_live > g_peak) g_peak = g_live;
+  return reinterpret_cast<char*>(p) + 16;
+}
+void hfree(void* q) {
+  if (!q) return;
+  size_t* p = reinterpret_cast<size_t*>(static_cast<char*>(q) - 16);
+  g_live -= *p;
+  free(p);
+}
+void* hrealloc(void* q, size_t n) {
+  if (!q) return hmalloc(n);
+  size_t* p = reinterpret_cast<size_t*>(static_cast<char*>(q) - 16);
+  void* r = hmalloc(n);
+  if (r) memcpy(r, q, std::min(*p, n));
+  hfree(q);
+  return r;
+}
+}
+void* operator new(size_t n) {
+  void* p = hmalloc(n);
+  if (!p) abort();
+  return p;
+}
+void* operator new[](size_t n) { return operator new(n); }
+void* operator new(size_t n, const std::nothrow_t&) noexcept { return hmalloc(n); }
+void* operator new[](size_t n, const std::nothrow_t&) noexcept { return hmalloc(n); }
+void operator delete(void* p) noexcept { hfree(p); }
+void operator delete[](void* p) noexcept { hfree(p); }
+void operator delete(void* p, size_t) noexcept { hfree(p); }
+void operator delete[](void* p, size_t) noexcept { hfree(p); }
+
+namespace {
+// Elements whose direct text crengine discards (allow_text in fb2def.h). Written out again here
+// so the scan below stays apart from the code under test.
+bool discardsText(const char* n) {
+  static const char* const kNames[] = {"annotation", "applet",   "area",   "audio",  "author",   "col",     "colgroup",
+                                       "coverpage",  "epigraph", "head",   "html",   "input",    "keygen",  "param",
+                                       "part",       "poem",     "source", "stanza", "table",    "tbody",   "tfoot",
+                                       "thead",      "tr",       "track",  "base",   "basefont", "bgsound", "link",
+                                       "meta",       "embed",    "image",  "img",    "object",   "svg",     "g"};
+  for (const char* k : kNames) {
+    if (strcmp(n, k) == 0) return true;
+  }
+  return false;
+}
+
+struct FwChar {
+  uint32_t cp;
+  uint32_t visible;
+};
+
+// What the firmware's coordinate means, written out plainly.
+struct FwScan {
+  XML_Parser parser;
+  std::vector<FwChar> content;  // Non-space characters
+  uint32_t visible = 0;
+  int excluded = 0;
+  int bodyDepth = -1;
+  int depth = 0;
+  bool bodyDone = false;
+  std::vector<bool> discard;
+
+  void text(const char* s, int len) {
+    const auto* p = reinterpret_cast<const unsigned char*>(s);
+    const auto* e = p + len;
+    while (p < e) {
+      const uint32_t cp = utf8NextCodepoint(&p);
+      const uint32_t at = visible;
+      if (!excluded) visible++;
+      if (bodyDepth < 0 || bodyDone || excluded || (!discard.empty() && discard.back())) continue;
+      if (cp != ' ' && cp != '\n' && cp != '\t' && cp != '\r') content.push_back({cp, at});
+    }
+  }
+  static void XMLCALL start(void* d, const XML_Char* n, const XML_Char**) {
+    auto* s = static_cast<FwScan*>(d);
+    if (s->excluded > 0 || isVisibleOffsetExcludedTag(n)) s->excluded++;
+    if (s->bodyDepth < 0 && strcmp(n, "body") == 0) s->bodyDepth = s->depth;
+    s->depth++;
+    s->discard.push_back(discardsText(n));
+  }
+  static void XMLCALL end(void* d, const XML_Char*) {
+    auto* s = static_cast<FwScan*>(d);
+    if (s->excluded > 0) s->excluded--;
+    s->depth--;
+    s->discard.pop_back();
+    if (s->depth == s->bodyDepth) s->bodyDone = true;
+  }
+  static void XMLCALL chars(void* d, const XML_Char* c, int n) { static_cast<FwScan*>(d)->text(c, n); }
+  static void XMLCALL dflt(void* d, const XML_Char* c, int n) {
+    if (n < 3 || c[0] != '&' || c[n - 1] != ';') return;
+    const char* v = lookupHtmlEntity(c, n);
+    static_cast<FwScan*>(d)->text(v ? v : c, v ? static_cast<int>(strlen(v)) : n);
+  }
+  bool ok = true;
+  void run(const std::string& xml) {
+    parser = XML_ParserCreate(nullptr);
+    XML_SetUserData(parser, this);
+    XML_SetElementHandler(parser, start, end);
+    XML_SetCharacterDataHandler(parser, chars);
+    XML_SetDefaultHandlerExpand(parser, dflt);
+    ok = XML_Parse(parser, xml.data(), static_cast<int>(xml.size()), XML_TRUE) != XML_STATUS_ERROR;
+    XML_ParserFree(parser);
+  }
+};
+
+std::vector<uint32_t> decode(const std::string& s) {
+  std::vector<uint32_t> out;
+  const auto* p = reinterpret_cast<const unsigned char*>(s.c_str());
+  while (*p) out.push_back(utf8NextCodepoint(&p));
+  return out;
+}
+
+std::string unescape(const std::string& in) {
+  std::string out;
+  for (size_t i = 0; i < in.size(); i++) {
+    if (in[i] == '\\' && i + 1 < in.size()) {
+      i++;
+      out += in[i] == 't' ? '\t' : in[i] == 'n' ? '\n' : in[i] == 'r' ? '\r' : in[i];
+    } else {
+      out += in[i];
+    }
+  }
+  return out;
+}
+
+std::vector<std::string> split(const std::string& line) {
+  std::vector<std::string> f;
+  size_t a = 0;
+  while (true) {
+    const size_t b = line.find('\t', a);
+    f.push_back(line.substr(a, b == std::string::npos ? b : b - a));
+    if (b == std::string::npos) break;
+    a = b + 1;
+  }
+  return f;
+}
+
+bool isSpace(const uint32_t c) { return c == ' ' || c == '\n' || c == '\t' || c == '\r'; }
+
+struct Node {
+  int frag;
+  std::string xp;  // Ends in ".0"
+  std::vector<uint32_t> text;
+  int ordinalBefore;
+  bool internalText;  // Inside something the firmware's coordinate excludes
+};
+
+struct Stats {
+  int total = 0, exact = 0, notFound = 0, wrong = 0, canonical = 0, nearest = 0;
+  int maxDelta = 0;
+};
+
+// An oracle ordinal to a firmware content index, walking the two sequences together. They differ
+// only where one side has text the other does not.
+struct Alignment {
+  std::vector<int> oracleToFw;
+  std::vector<int> fwToOracle;
+  int unmatchedOracle = 0;
+  int unmatchedFw = 0;
+};
+
+// crengine maps the C1 controls of a numeric reference (&#150;) to what windows-1252 has there.
+bool sameChar(const uint32_t oracle, const uint32_t fw) { return oracle == fw || (fw >= 0x80 && fw < 0xA0); }
+
+Alignment align(const std::vector<uint32_t>& o, const std::vector<bool>& skip, const std::vector<FwChar>& f) {
+  Alignment a;
+  a.oracleToFw.assign(o.size() + 1, -1);
+  a.fwToOracle.assign(f.size() + 1, -1);
+  size_t i = 0, j = 0;
+  const auto same = [&](size_t x, size_t y) {
+    for (int k = 0; k < 6; k++) {
+      if (x + k >= o.size() || y + k >= f.size()) return x + k >= o.size() && y + k >= f.size();
+      if (!sameChar(o[x + k], f[y + k].cp)) return false;
+    }
+    return true;
+  };
+  while (i < o.size() && j < f.size()) {
+    // What the firmware's coordinate does not count: it lands on what follows.
+    if (skip[i]) {
+      i++;
+      continue;
+    }
+    if (sameChar(o[i], f[j].cp)) {
+      a.oracleToFw[i] = static_cast<int>(j);
+      a.fwToOracle[j] = static_cast<int>(i);
+      i++;
+      j++;
+      continue;
+    }
+    bool moved = false;
+    for (size_t k = 1; k < 8192 && !moved; k++) {
+      if (i + k <= o.size() && same(i + k, j)) {
+        a.unmatchedOracle += static_cast<int>(k);
+        i += k;
+        moved = true;
+      } else if (j + k <= f.size() && same(i, j + k)) {
+        a.unmatchedFw += static_cast<int>(k);
+        j += k;
+        moved = true;
+      }
+    }
+    if (!moved) {
+      a.unmatchedOracle++;
+      a.unmatchedFw++;
+      i++;
+      j++;
+    }
+  }
+  for (; i < o.size(); i++) {
+    if (!skip[i]) a.unmatchedOracle++;
+  }
+  a.unmatchedFw += static_cast<int>(f.size() - j);
+  a.oracleToFw[o.size()] = static_cast<int>(f.size());
+  a.fwToOracle[f.size()] = static_cast<int>(o.size());
+  // A position in text only one side has lands on what comes next.
+  for (int x = static_cast<int>(o.size()) - 1; x >= 0; x--) {
+    if (a.oracleToFw[x] < 0)
+      a.oracleToFw[x] = a.oracleToFw[x + 1] < 0 ? static_cast<int>(f.size()) : a.oracleToFw[x + 1];
+  }
+  for (int x = static_cast<int>(f.size()) - 1; x >= 0; x--) {
+    if (a.fwToOracle[x] < 0)
+      a.fwToOracle[x] = a.fwToOracle[x + 1] < 0 ? static_cast<int>(o.size()) : a.fwToOracle[x + 1];
+  }
+  return a;
+}
+
+// First content index at or after a visible offset.
+int fwIndexAt(const std::vector<FwChar>& f, const uint32_t visible) {
+  const auto it =
+      std::lower_bound(f.begin(), f.end(), visible, [](const FwChar& c, const uint32_t v) { return c.visible < v; });
+  return static_cast<int>(it - f.begin());
+}
+
+std::string readFile(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  std::stringstream ss;
+  ss << in.rdbuf();
+  return ss.str();
+}
+
+__attribute__((noinline)) size_t paintStack() {
+  constexpr size_t kSize = 96 * 1024;
+  volatile unsigned char* p = static_cast<volatile unsigned char*>(__builtin_alloca(kSize));
+  for (size_t i = 0; i < kSize; i++) p[i] = 0xA5;
+  return reinterpret_cast<size_t>(p);
+}
+
+__attribute__((noinline)) size_t measureStack(const size_t low) {
+  constexpr size_t kSize = 96 * 1024;
+  const auto* p = reinterpret_cast<const unsigned char*>(low);
+  size_t i = 0;
+  while (i < kSize && p[i] == 0xA5) i++;
+  return kSize - i;
+}
+}  // namespace
+
+int main(int argc, char** argv) {
+  if (argc < 4) {
+    fprintf(stderr, "usage: xpdiff bookdir oracle workdir [max]\n");
+    return 2;
+  }
+  const std::string dir = argv[1];
+  const std::string oracle = argv[2];
+  const std::string work = argv[3];
+  const int maxPoints = argc > 4 ? atoi(argv[4]) : 2000;
+  const bool verbose = getenv("XPDIFF_VERBOSE") != nullptr;
+  const std::string name = dir.substr(dir.find_last_of("/\\") + 1);
+
+  std::vector<std::string> spine;
+  for (int i = 0;; i++) {
+    char path[32];
+    snprintf(path, sizeof(path), "/spine/%04d.xhtml", i);
+    std::ifstream in(dir + path, std::ios::binary);
+    if (!in) break;
+    std::stringstream ss;
+    ss << in.rdbuf();
+    spine.push_back(ss.str());
+  }
+
+  const std::string enumPath = work + "/" + name + ".enum";
+  const char* oracleExtra = getenv("XPDIFF_ORACLE_ARGS");
+  const std::string extra = oracleExtra ? std::string(" ") + oracleExtra : "";
+  std::string cmd = "\"\"" + oracle + "\" \"" + dir + "/book.epub\"" + extra + " --enum \"" + enumPath + "\"\"";
+  if (system(cmd.c_str()) != 0) {
+    printf("%s\tORACLE-FAILED\n", name.c_str());
+    return 1;
+  }
+
+  auto epub = std::make_shared<Epub>(spine);
+  {
+    std::vector<std::string> sheets;
+    for (int i = 0;; i++) {
+      char path[32];
+      snprintf(path, sizeof(path), "/css/%04d.css", i);
+      std::ifstream in(dir + path, std::ios::binary);
+      if (!in) break;
+      std::stringstream ss;
+      ss << in.rdbuf();
+      sheets.push_back(ss.str());
+    }
+    if (!getenv("XPDIFF_NO_CSS")) epub->loadCss(sheets);
+  }
+
+  std::vector<std::unique_ptr<FwScan>> scans;
+  for (const auto& s : spine) {
+    scans.push_back(std::make_unique<FwScan>());
+    scans.back()->run(s);
+  }
+
+  std::vector<Node> nodes;
+  struct PagePoint {
+    std::string xp;
+  };
+  std::vector<PagePoint> pages;
+  std::map<int, std::vector<uint32_t>> oracleContent;
+  std::map<int, std::vector<bool>> oracleSkip;
+  {
+    std::ifstream in(enumPath, std::ios::binary);
+    std::string line;
+    while (std::getline(in, line)) {
+      const auto f = split(line);
+      if (f[0] == "N") {
+        Node n;
+        n.frag = atoi(f[1].c_str());
+        n.xp = f[2];
+        n.text = decode(unescape(f[4]));
+        auto& c = oracleContent[n.frag];
+        n.ordinalBefore = static_cast<int>(c.size());
+        n.internalText = false;
+        for (const char* excluded : {"/style", "/script", "/title", "/rp", "/rt"}) {
+          if (n.xp.find(excluded) != std::string::npos) n.internalText = true;
+        }
+        for (const uint32_t cp : n.text) {
+          if (!isSpace(cp)) {
+            c.push_back(cp);
+            oracleSkip[n.frag].push_back(n.internalText);
+          }
+        }
+        nodes.push_back(std::move(n));
+      } else if (f[0] == "P" && f.size() > 2 && !f[2].empty()) {
+        pages.push_back({f[2]});
+      }
+    }
+  }
+
+  std::map<int, Alignment> alignments;
+  int unmatchedOracle = 0, unmatchedFw = 0;
+  for (size_t s = 0; s < spine.size(); s++) {
+    alignments[static_cast<int>(s + 1)] =
+        align(oracleContent[static_cast<int>(s + 1)], oracleSkip[static_cast<int>(s + 1)], scans[s]->content);
+    unmatchedOracle += alignments[static_cast<int>(s + 1)].unmatchedOracle;
+    unmatchedFw += alignments[static_cast<int>(s + 1)].unmatchedFw;
+  }
+
+  // ---- KOReader to device ----------------------------------------------------------------------
+  Stats k2d;
+  std::string examples;
+  int shown = 0;
+  size_t peakHeap = 0, peakStack = 0;
+  const auto check = [&](const std::string& xp, const int frag, const int oracleOrdinal, const std::string& kind) {
+    if (frag < 1 || frag > static_cast<int>(spine.size())) return;
+    // A spine item with no XHTML body: crengine's placeholder for it is not in the book.
+    if (scans[frag - 1]->bodyDepth < 0) return;
+    k2d.total++;
+    KOReaderPosition pos;
+    pos.xpath = xp;
+    pos.percentage = 0.5f;
+    const size_t liveBefore = g_live;
+    g_peak = g_live;
+    const size_t low = paintStack();
+    const CrossPointPosition got = ProgressMapper::toCrossPoint(epub, pos, -1, 1);
+    peakStack = std::max(peakStack, measureStack(low));
+    peakHeap = std::max(peakHeap, g_peak - liveBefore);
+    const auto& f = scans[frag - 1]->content;
+    const int want = alignments[frag].oracleToFw[std::min<int>(oracleOrdinal, alignments[frag].oracleToFw.size() - 1)];
+    if (!got.hasVisibleTextOffset || got.spineIndex != frag - 1) {
+      k2d.notFound++;
+      if (shown++ < 40) examples += "  k2d not-found " + kind + " " + xp + "\n";
+      return;
+    }
+    const int have = fwIndexAt(f, got.visibleTextOffset);
+    if (have == want) {
+      k2d.exact++;
+    } else {
+      k2d.wrong++;
+      k2d.maxDelta = std::max(k2d.maxDelta, std::abs(have - want));
+      if (shown++ < 40) {
+        examples +=
+            "  k2d wrong " + kind + " " + xp + " fw=" + std::to_string(have) + " want=" + std::to_string(want) + "\n";
+      }
+    }
+  };
+
+  // Sampling keeps every book's nodes represented: each node's start, and offsets through it.
+  int budget = maxPoints;
+  const int perNode = std::max(3, nodes.empty() ? 3 : maxPoints / static_cast<int>(nodes.size()));
+  for (const Node& n : nodes) {
+    if (n.internalText) continue;
+    const std::string base = n.xp.substr(0, n.xp.rfind('.') + 1);
+    const int len = static_cast<int>(n.text.size());
+    const int step = std::max(1, len / perNode);
+    int ordinal = n.ordinalBefore;
+    int nextSample = 0;
+    for (int off = 0; off < len && budget > 0; off++) {
+      if (off == nextSample) {
+        // A space lands on what follows it, on both sides.
+        check(base + std::to_string(off), n.frag, ordinal, "node");
+        budget--;
+        nextSample += step;
+      }
+      if (!isSpace(n.text[off])) ordinal++;
+    }
+    if (budget-- > 0) check(base + std::to_string(len), n.frag, ordinal, "node-end");
+  }
+  // Every page start, the positions KOReader really syncs. Their ordinals come from the oracle.
+  const std::string pageIn = work + "/" + name + ".pages";
+  const std::string pageOut = work + "/" + name + ".pages.out";
+  {
+    std::ofstream out(pageIn, std::ios::binary);
+    for (const auto& p : pages) out << p.xp << "\n";
+  }
+  cmd = "\"\"" + oracle + "\" \"" + dir + "/book.epub\"" + extra + " --resolve \"" + pageIn + "\" --out \"" + pageOut +
+        "\"\"";
+  if (!pages.empty() && system(cmd.c_str()) == 0) {
+    std::ifstream in(pageOut, std::ios::binary);
+    std::string line;
+    while (std::getline(in, line)) {
+      const auto f = split(line);
+      if (f.size() >= 10 && f[2] == "1" && atoi(f[8].c_str()) >= 0)
+        check(f[1], atoi(f[7].c_str()), atoi(f[8].c_str()), "page");
+    }
+  }
+
+  // ---- Device to KOReader ----------------------------------------------------------------------
+  struct Emitted {
+    int frag;
+    int fwIndex;
+    uint32_t visible;
+    std::string xp;
+  };
+  std::vector<Emitted> emitted;
+  Stats d2k;
+  int roundTripBad = 0, roundTripTotal = 0;
+  std::string d2kIn = work + "/" + name + ".d2k";
+  std::string d2kOut = work + "/" + name + ".d2k.out";
+  {
+    std::ofstream out(d2kIn, std::ios::binary);
+    size_t totalContent = 0;
+    for (const auto& s : scans) totalContent += s->content.size();
+    const size_t stride = std::max<size_t>(1, totalContent / std::max(1, maxPoints));
+    for (size_t s = 0; s < scans.size(); s++) {
+      const auto& f = scans[s]->content;
+      for (size_t i = 0; i < f.size(); i += stride) {
+        const size_t liveBefore = g_live;
+        g_peak = g_live;
+        const size_t low = paintStack();
+        const std::string xp =
+            ChapterXPathResolver::findXPathForVisibleTextOffset(epub, static_cast<int>(s), f[i].visible);
+        peakStack = std::max(peakStack, measureStack(low));
+        peakHeap = std::max(peakHeap, g_peak - liveBefore);
+        d2k.total++;
+        if (xp.empty()) {
+          d2k.notFound++;
+          if (shown++ < 40)
+            examples += "  d2k empty spine=" + std::to_string(s) + " visible=" + std::to_string(f[i].visible) + "\n";
+          continue;
+        }
+        emitted.push_back({static_cast<int>(s + 1), static_cast<int>(i), f[i].visible, xp});
+        out << xp << "\n";
+        // Round trip inside the firmware: the same character comes back.
+        ChapterXPathResolver::Resolved r;
+        roundTripTotal++;
+        if (!ChapterXPathResolver::resolve(epub, static_cast<int>(s), xp, r) ||
+            fwIndexAt(f, r.visibleOffset) != static_cast<int>(i)) {
+          roundTripBad++;
+          if (shown++ < 40) examples += "  roundtrip " + xp + "\n";
+        }
+      }
+      // Chapter ends, and offsets on a space.
+      if (!f.empty()) {
+        const std::string xp =
+            ChapterXPathResolver::findXPathForVisibleTextOffset(epub, static_cast<int>(s), scans[s]->visible);
+        if (!xp.empty()) {
+          emitted.push_back({static_cast<int>(s + 1), static_cast<int>(f.size() - 1), scans[s]->visible, xp});
+          out << xp << "\n";
+          d2k.total++;
+        }
+      } else {
+        const std::string xp = ChapterXPathResolver::findXPathForVisibleTextOffset(epub, static_cast<int>(s), 0);
+        if (!xp.empty()) {
+          emitted.push_back({static_cast<int>(s + 1), -1, 0, xp});
+          out << xp << "\n";
+          d2k.total++;
+        }
+      }
+    }
+  }
+  cmd = "\"\"" + oracle + "\" \"" + dir + "/book.epub\"" + extra + " --resolve \"" + d2kIn + "\" --out \"" + d2kOut +
+        "\"\"";
+  if (!emitted.empty() && system(cmd.c_str()) == 0) {
+    std::ifstream in(d2kOut, std::ios::binary);
+    std::string line;
+    size_t k = 0;
+    while (std::getline(in, line) && k < emitted.size()) {
+      const auto f = split(line);
+      const Emitted& e = emitted[k++];
+      if (f.size() < 3 || f[2] != "1") {
+        d2k.wrong++;
+        if (shown++ < 40) examples += "  d2k rejected " + e.xp + "\n";
+        continue;
+      }
+      if (f[3] == e.xp)
+        d2k.canonical++;
+      else if (shown++ < 40)
+        examples += "  d2k non-canonical " + e.xp + " vs " + f[3] + "\n";
+      const int frag = atoi(f[7].c_str());
+      const int ordinal = atoi(f[8].c_str());
+      if (e.fwIndex < 0) {
+        if (frag == e.frag)
+          d2k.exact++;
+        else
+          d2k.wrong++;
+        continue;
+      }
+      const int want = alignments[e.frag].fwToOracle[e.fwIndex];
+      if (frag == e.frag && ordinal == want) {
+        d2k.exact++;
+      } else {
+        d2k.wrong++;
+        d2k.maxDelta = std::max(d2k.maxDelta, std::abs(ordinal - want));
+        if (shown++ < 40) {
+          examples += "  d2k wrong " + e.xp + " frag=" + std::to_string(frag) + " ordinal=" + std::to_string(ordinal) +
+                      " want=" + std::to_string(want) + "\n";
+        }
+      }
+    }
+  }
+
+  // book  k2d: total exact notfound wrong maxdelta  d2k: total exact empty wrong canonical maxdelta  rt: total bad
+  // only-oracle only-fw  peakHeap peakStack
+  printf("%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%zu\t%zu\n", name.c_str(), k2d.total,
+         k2d.exact, k2d.notFound, k2d.wrong, k2d.maxDelta, d2k.total, d2k.exact, d2k.notFound, d2k.wrong, d2k.canonical,
+         d2k.maxDelta, roundTripTotal, roundTripBad, unmatchedOracle, unmatchedFw, peakHeap, peakStack);
+  if (verbose) fputs(examples.c_str(), stdout);
+  return 0;
+}
