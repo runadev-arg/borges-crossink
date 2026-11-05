@@ -22,6 +22,26 @@ def warn(msg):
     print(f'WARNING [git_branch.py]: {msg}', file=sys.stderr)
 
 
+def write_build_info_header(env, scoped):
+    directory = os.path.join(env['PROJECT_DIR'], '.pio', 'build', env['PIOENV'], 'build_info')
+    os.makedirs(directory, exist_ok=True)
+    lines = ['#pragma once\n']
+    for define in scoped:
+        name, value = define if isinstance(define, tuple) else (define, '1')
+        lines.append(f'#define {name} {str(value).replace(chr(92), "")}\n')
+    content = ''.join(lines)
+    path = os.path.join(directory, 'crossink_build_info.h')
+    try:
+        with open(path, encoding='utf-8') as existing:
+            unchanged = existing.read() == content
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        with open(path, 'w', encoding='utf-8', newline='\n') as output:
+            output.write(content)
+    env.Append(CPPPATH=[directory])
+
+
 def get_git_short_hash(project_dir, length=5):
     try:
         return subprocess.check_output(
@@ -232,7 +252,13 @@ def inject_version(env):
         print(f'CrossInk RC build version: {version_string}')
 
     # Keep changing source identity out of unrelated compile commands.
-    if hasattr(env, 'AddBuildMiddleware'):
+    if sys.platform == 'win32':
+        # pioarduino's Windows path-shortening wrapper calls user middlewares for
+        # every node and ignores their pattern, so a clone compiling here makes
+        # SCons see two environments per object. BuildInfo.cpp includes this
+        # header when it exists, which keeps the same one-file rebuild guarantee.
+        write_build_info_header(env, scoped)
+    elif hasattr(env, 'AddBuildMiddleware'):
         def add_build_info_defines(node_env, node):
             build_env = node_env.Clone()
             build_env.Append(CPPDEFINES=scoped)
