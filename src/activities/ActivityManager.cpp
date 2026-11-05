@@ -1026,6 +1026,7 @@ void ActivityManager::goToReaderAndRunMenuAction(std::string path, const uint8_t
 }
 
 void ActivityManager::goToSleep(bool fromTimeout) {
+  enteringSleep = true;
   const bool canSnapshotOverlay = currentActivity && currentActivity->canSnapshotForSleepOverlay();
   const GfxRenderer::Orientation sleepPopupOrientation = renderer.getOrientation();
   std::string currentBookPath = getCurrentBookPath();

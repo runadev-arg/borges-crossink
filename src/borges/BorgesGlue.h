@@ -64,7 +64,9 @@ struct ReaderSnapshot {
 };
 
 // At reader exit, with the book and its clippings still loaded. Local, never the radio.
-void finalizeFromReader(const ReaderTracker& tracker, const std::shared_ptr<Epub>& epub,
+// True: the framebuffer was lent to resolve xpointers, so its bytes are gone. The caller
+// holds the render lock, and rebuilds the frame if something after it needs one.
+bool finalizeFromReader(GfxRenderer& renderer, const ReaderTracker& tracker, const std::shared_ptr<Epub>& epub,
                         const ReaderSnapshot& snapshot);
 // A clipping was just saved: remember when, next to the book.
 void stampClip(const std::string& cachePath, uint16_t spine, uint32_t uptimeStamp);

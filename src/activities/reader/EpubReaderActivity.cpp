@@ -8356,7 +8356,12 @@ void EpubReaderActivity::finalizeForBorges() {
       snapshot.totalPages = static_cast<int32_t>(resolvedTotal);
     }
   }
-  borges::glue::finalizeFromReader(borgesTracker, epub, snapshot);
+  const bool frameLent = borges::glue::finalizeFromReader(renderer, borgesTracker, epub, snapshot);
+  // Quick Resume and the overlay sleep screen keep drawing on this frame after the reader is
+  // gone (on C3 the reader exits first). Every other destination repaints from nothing.
+  if (frameLent && activityManager.isEnteringSleep() && !restoreCurrentPageBufferAfterSilentIndex()) {
+    renderer.clearScreen(ReaderUtils::readerBackgroundColor());
+  }
   // A second exit of this same reading has nothing new to say.
   borgesTracker.paged = false;
 }
