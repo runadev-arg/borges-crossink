@@ -71,6 +71,7 @@ export class Harness {
     this.counter = 0;
     this.ipCounter = 1;
     this.deviceSeq = 0;
+    this.kobo = KOBO;
   }
 
   // ---------------------------------------------------------------------------------

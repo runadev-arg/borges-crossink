@@ -6,8 +6,9 @@ import { Harness } from "./harness.mjs";
 import { Firmware, FirmwareProcess } from "./firmware.mjs";
 import { SCENARIOS as FIRST } from "./scenarios.mjs";
 import { MORE } from "./scenarios_more.mjs";
+import { ROUND2 } from "./scenarios_round2.mjs";
 
-const SCENARIOS = [...FIRST, ...MORE];
+const SCENARIOS = [...FIRST, ...MORE, ...ROUND2];
 
 const argv = process.argv.slice(2);
 const option = (name) => {

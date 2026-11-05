@@ -905,6 +905,13 @@ class Device {
       heap::Scope scope;
       const bool ok = store_.forgetCredential();
       body = std::string("\"forgotten\":") + boolText(ok);
+    } else if (cmd == "disconnect") {
+      heap::Scope scope;
+      const DisconnectResult r = engine_->disconnect(argInt(a, "online", 1) != 0);
+      body = std::string("\"result\":") +
+             (r == DisconnectResult::ServerInvalidated    ? "\"server_invalidated\""
+              : r == DisconnectResult::StillValidOnServer ? "\"still_valid_on_server\""
+                                                          : "\"local_error\"");
     } else if (cmd == "book-opened") {
       BookRef book = bookRef(a);
       heap::Scope scope;

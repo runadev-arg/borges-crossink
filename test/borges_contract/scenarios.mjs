@@ -330,14 +330,13 @@ async function dedupe(h, t) {
   t.eq(again.decision.ask, false, "same event is not asked again");
   t.eq(again.decision.verdict, "already_chosen", "because it was answered");
 
-  // This device read since: the same event counts as new.
+  // This device read since: an answered event stays answered, as in resumeflow.lua.
   await fw.once("finalize-book", { ...bookArgs(b), pct: 6, xp: xp(6), page: 6, turn_epoch: now() - 3000 }, behind);
   await fw.once("sleep-session", {}, behind);
   t.eq((await headOf(h, b.md5, account.id))[0].device_id, kr.deviceId, "still KOReader's head");
   proc = fw.boot(behind);
   const readSince = await proc.cmd("open-session", { ...bookArgs(b), pct: 6, xp: xp(6), page: 6 });
-  t.eq(readSince.decision.ask, true, "asks again after reading since");
-  await proc.cmd("apply-choice", { choice: "stay", total: b.total });
+  t.eq(readSince.decision.ask, false, "does not ask again after reading since");
   await proc.close();
 
   // A new event at the same spot asks again.

@@ -16,6 +16,47 @@ const REQUESTED_SCOPES = ["device:self", "sync:v2", "sync:legacy", "library:read
 
 const utcSeconds = (epoch) => new Date(epoch * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
 
+// annotationadapter.lua, the part that decides whether an annotation can be placed in a
+// book. Same conditions in the same order, with nil as undefined.
+export function normalizedText(value) {
+  return (typeof value === "string" ? value : "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+export function comparableText(value) {
+  return normalizedText(value).replace(/\u00A0/g, " ").replace(/\u00AD/g, "").replace(/\s+/g, " ").trim();
+}
+
+const stringValue = (value) => (typeof value === "string" ? value : undefined);
+const revisionValue = (value) => (/^\d+$/.test(String(value ?? "0")) ? String(value ?? "0") : "0");
+
+// buildItem. { item } or { error }, where the Lua returns item or nil, err.
+export function buildItem(payload, mode, validateXpointer, revision) {
+  const item = {
+    toto_sync_id: payload.sync_id,
+    toto_revision: revisionValue(revision),
+    drawer: payload.kind === "bookmark" ? undefined : stringValue(payload.drawer) ?? "lighten",
+    color: stringValue(payload.color),
+    text: normalizedText(payload.text),
+    chapter: stringValue(payload.chapter),
+    pageno: Number(payload.page) || 0,
+    note: stringValue(payload.note),
+  };
+  if (mode !== "rolling") return { error: "unknown_document_mode" };
+  const pos1 = payload.position?.pos1;
+  if (payload.kind === "bookmark") {
+    if (typeof payload.xpointer !== "string" || !validateXpointer(payload.xpointer)) return { error: "invalid_rolling_locator" };
+    item.page = payload.xpointer;
+    return { item };
+  }
+  if (typeof payload.xpointer !== "string" || typeof pos1 !== "string" || !validateXpointer(payload.xpointer) || !validateXpointer(pos1)) {
+    return { error: "invalid_rolling_locator" };
+  }
+  item.page = payload.xpointer;
+  item.pos0 = payload.xpointer;
+  item.pos1 = pos1;
+  return { item };
+}
+
 export class ApiFailure extends Error {
   constructor(status, body) {
     super(`HTTP ${status}: ${JSON.stringify(body)?.slice(0, 300)}`);

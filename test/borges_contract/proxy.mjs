@@ -174,6 +174,12 @@ export class FaultProxy {
         res.end(copy);
         return;
       }
+      case "rewrite": {
+        const rewritten = Buffer.from(JSON.stringify(rule.rewrite(JSON.parse(upstream.body.toString("utf8")))));
+        res.writeHead(upstream.status, { ...upstream.headers, "content-length": String(rewritten.length) });
+        res.end(rewritten);
+        return;
+      }
       case "garbage":
         res.writeHead(200, { "content-type": "application/json", "content-length": "11" });
         res.end("<html>oops!");

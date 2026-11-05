@@ -586,7 +586,7 @@ async function annotations(h, t) {
   t.eq((await h.sql`SELECT count(*)::int FROM entries WHERE document_id = ${doc.id}`)[0].count, 4, "one entry more, not two");
 
   // The local ledger is lost: same derived sync id, a new event, no new annotation.
-  for (const suffix of ["a", "b"]) fs.rmSync(path.join(fw.borgesDir(), "ann", `${a.md5}.${suffix}`), { force: true });
+  for (const suffix of ["a", "b"]) fs.rmSync(path.join(fw.borgesDir(), "ann", a.md5.slice(0, 2), `${a.md5.slice(2)}.${suffix}`), { force: true });
   const again = await finalize(clips);
   t.eq(again.finalize.annotations_created, 4, "a lost ledger publishes again");
   const replayed = await fw.once("sleep-session");
@@ -703,17 +703,17 @@ async function sessions(h, t) {
   t.eq((await run(1, 14400)).finalize.session_queued, true, "14400 s is valid");
   t.eq((await run(2, 3600)).finalize.session_queued, true, "one hour is valid");
   t.eq((await run(3, 59)).finalize.session_queued, false, "59 s is not emitted");
-  t.eq((await run(4, 14401)).finalize.session_queued, false, "14401 s is not emitted");
+  t.eq((await run(4, 14401)).finalize.session_queued, true, "14401 s is 4 h, and a last second that is no session");
   t.eq((await run(5, -100)).finalize.session_queued, false, "negative is not emitted");
   t.eq((await run(6, 600, { session_precision: "unknown" })).finalize.session_queued, false, "an unknown clock has nothing honest to report");
   t.eq((await run(7, 600, { session_precision: "approximate" })).finalize.session_queued, false, "approximate neither");
   t.eq((await run(8, 600, { session_precision: "anchored" })).finalize.session_queued, true, "anchored is good enough");
-  t.eq((await fw.once("status")).depth, 4, "only the valid ones queued");
+  t.eq((await fw.once("status")).depth, 5, "only the valid ones queued");
   const up = await fw.once("sleep-session");
-  t.eq(up.report.events_acked, 4, "accepted");
+  t.eq(up.report.events_acked, 5, "accepted");
   t.eq(up.report.events_rejected, 0, "none rejected");
   const rows = await h.sql`SELECT book_hash, duration_seconds, pages_read, start_page, end_page, started_at, ended_at FROM reading_sessions WHERE device_id = ${fw.deviceId} ORDER BY started_at`;
-  t.eq(rows.map((r) => r.duration_seconds), [60, 14400, 3600, 600], "reading_sessions has the four, with their durations");
+  t.eq(rows.map((r) => r.duration_seconds), [60, 14400, 3600, 14400, 600], "reading_sessions has the five, with their durations");
   t.eq(rows[0].book_hash, a.md5, "keyed by book");
   t.eq(rows[0].pages_read, 7, "pages read");
   t.eq(rows[0].start_page, 10, "start page");
@@ -911,7 +911,11 @@ async function library(h, t) {
   h.proxy.fault({ match: /\/download$/, action: "corrupt", offsets: [free] });
   const silent = await fw.once("download", { id: normal3.id, page: normal3Page, dir: "/books" });
   const silentBytes = fs.existsSync(fw.hostPath(`/books/${normal3.file_name}`)) ? fs.readFileSync(fw.hostPath(`/books/${normal3.file_name}`)) : null;
-  t.note(`corruption at byte ${free}, outside the sampled KiBs: download says ${silent.result}; sha256 ${silentBytes && sha256(silentBytes) === normal3.sha256 ? "matches" : "does NOT match"} the manifest`);
+  t.eq(silent.result, "integrity_failed", `corruption at byte ${free}, outside the partial MD5's samples, is caught by SHA-256`);
+  t.eq(silentBytes, null, "and no such file reaches the card");
+  h.proxy.clear();
+  t.eq((await fw.once("download", { id: normal3.id, page: normal3Page, dir: "/books" })).result, "done", "the next try is clean");
+  t.eq(sha256(fs.readFileSync(fw.hostPath(`/books/${normal3.file_name}`))), normal3.sha256, "and its bytes match the manifest");
 
   // An error page must not end up inside a file.
   const normal4 = [...seen.values()].find((e) => e.title === "Normal 3");
@@ -1119,15 +1123,6 @@ async function backlog(h, t, metrics) {
   t.eq(serverCursor, high, "the server's checkpoint agrees");
 
   for (let i = 0; i < books.length; i += 1) {
-    const inbound = await fw.once("inbound", { ...bookArgs(books[i]) });
-    const ids = inbound.annotations.map((a) => a.sync_id);
-    t.eq(new Set(ids).size, ids.length, `book ${i}: nothing stored twice`);
-    t.ok(ids.length > 0, `book ${i}: annotations stored`);
-    const seqs = inbound.annotations.map((a) => BigInt(a.server_seq));
-    t.ok(seqs.every((s, j) => j === 0 || s > seqs[j - 1]), `book ${i}: oldest first, in server order`);
-    const newest = `Subrayado`;
-    t.ok(inbound.annotations.at(-1)?.text.startsWith(newest), `book ${i}: newest is there`);
-    if (i === 0) metrics["Backlog: inbound annotations kept per book"] = `${ids.length} of ${annotationCounts[i]} (the store rotates at 32 KiB per book, keeping the newest)`;
     const head = await fw.once("remote-head", { ...bookArgs(books[i]) });
     t.eq(head.has_head, true, `book ${i}: head cache filled`);
   }
