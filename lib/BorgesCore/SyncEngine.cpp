@@ -473,6 +473,10 @@ bool SyncEngine::focus(const BookId& book, const Position* local, ResumeDecision
       return false;
     }
     verdict = resume::evaluate(&event, book, store_.creds().deviceId, ledger);
+    // This device's own head, and nothing local to read from: a card moved between readers,
+    // or a store that lost its place. Opening at page 1 and publishing that would overwrite
+    // the head, so it is offered like anyone else's.
+    if (verdict == resume::Verdict::Own && local && !local->hasPct) verdict = resume::Verdict::Ask;
   } else {
     verdict = resume::evaluate(nullptr, book, store_.creds().deviceId, ledger);
   }
@@ -1544,6 +1548,14 @@ bool SyncEngine::takeUndo(const BookId& book, Position& out) {
   out = scratch_->ledger.undo;
   scratch_->ledger.hasUndo = false;
   return store_.saveBook(scratch_->ledger);
+}
+
+bool SyncEngine::lastFinalized(const BookId& book, Position& out) {
+  if (!scratch_ && !begin()) return false;
+  ledgerLoaded_ = false;
+  if (!store_.loadBook(book, scratch_->ledger) || !scratch_->ledger.hasFinalized) return false;
+  out = scratch_->ledger.lastFinalized;
+  return true;
 }
 
 bool SyncEngine::remoteHead(const BookId& book, RemoteHead& out) {

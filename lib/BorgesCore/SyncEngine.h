@@ -201,6 +201,9 @@ class SyncEngine {
   bool hasUndo(const BookId& book);
   bool takeUndo(const BookId& book, Position& out);
 
+  // Where this device last published itself in this book, xpointer included.
+  bool lastFinalized(const BookId& book, Position& out);
+
   // Latest position another device was seen at, from replayed pulls.
   bool remoteHead(const BookId& book, RemoteHead& out);
 
