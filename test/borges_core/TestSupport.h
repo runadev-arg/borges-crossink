@@ -810,7 +810,7 @@ inline std::vector<std::pair<std::string, uint64_t>> liveEvents(borges::Outbox& 
     std::string buffer(e->payloadLen + 256, '\0');
     borges::JsonWriter w(buffer.data(), buffer.size());
     w.arrayBegin();
-    if (!outbox.writeEnvelope(item, w)) continue;
+    if (outbox.writeEnvelope(item, w) != borges::Outbox::EnvelopeResult::Ok) continue;
     char id[37];
     borges::uuidFormat(item.id, id);
     out.emplace_back(id, item.seq);

@@ -109,9 +109,13 @@ class Outbox {
 
   // Persists "these were attempted" before any network IO.
   bool markAttempted(const Batch& batch);
-  // Serializes one envelope. False if the record no longer verifies; it was then
-  // quarantined and must be dropped from the batch.
-  bool writeEnvelope(BatchItem& item, JsonWriter& out);
+  enum class EnvelopeResult : uint8_t {
+    Ok,
+    Quarantined,  // The record no longer verifies. It left the queue: select again.
+    IoError,      // Could not read it. Says nothing about the record, which stays.
+  };
+  // Serializes one envelope.
+  EnvelopeResult writeEnvelope(BatchItem& item, JsonWriter& out);
 
   // One atomic record: every listed event leaves the queue together.
   bool ack(const uint32_t* offsets, size_t count);
@@ -139,7 +143,8 @@ class Outbox {
   bool appendOffsets(uint8_t type, const uint32_t* offsets, size_t count);
   void quarantineRange(File& source, uint32_t start, uint32_t len);
   void logPath(uint32_t gen, char* out) const;
-  bool verifyRecord(File& f, uint32_t pos, uint32_t fileSize, uint8_t& type, uint32_t& len);
+  enum class Verify : uint8_t { Valid, Invalid, IoError };
+  Verify verifyRecord(File& f, uint32_t pos, uint32_t fileSize, uint8_t& type, uint32_t& len);
   bool saveMeta(uint32_t gen);
 
   IFs& fs_;

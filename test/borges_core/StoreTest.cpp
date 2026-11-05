@@ -70,6 +70,39 @@ TEST(Store, TokenWithBytesEqualToTheKeyRoundTrips) {
   EXPECT_STREQ(again.creds().token, "toto_X_end");
 }
 
+TEST(Store, AnUnreadableCardIsNotAnEmptyOne) {
+  MemFs fs;
+  {
+    Store store(fs, testKey(), 6);
+    ASSERT_TRUE(store.begin());
+    copyText(store.creds().deviceId, sizeof(store.creds().deviceId), kSelfId);
+    copyText(store.creds().token, sizeof(store.creds().token), "t");
+    ASSERT_TRUE(store.saveCredentials());
+    store.state().cursor = 9;
+    ASSERT_TRUE(store.saveState());
+    BookLedger ledger;
+    ASSERT_TRUE(store.loadBook(Device::book(), ledger));
+    ASSERT_TRUE(store.saveBook(ledger));
+  }
+  {
+    fs.failReadsAfter("/.crosspoint/borges/cred.a", 0);
+    Store store(fs, testKey(), 6);
+    EXPECT_FALSE(store.begin());
+  }
+  {
+    fs.failReadsAfter("/.crosspoint/borges/state.a", 0);
+    Store store(fs, testKey(), 6);
+    EXPECT_FALSE(store.begin());
+  }
+  fs.failReadsAfter("", 0);
+  Store store(fs, testKey(), 6);
+  ASSERT_TRUE(store.begin());
+  EXPECT_EQ(store.state().cursor, 9u);
+  fs.failReadsAfter(std::string("/.crosspoint/borges/books/") + kMd5A + ".a", 0);
+  BookLedger ledger;
+  EXPECT_FALSE(store.loadBook(Device::book(), ledger));
+}
+
 TEST(Store, StateRoundTrip) {
   MemFs fs;
   {

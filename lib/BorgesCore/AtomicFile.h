@@ -26,6 +26,9 @@ class AtomicFile {
   bool load(uint8_t* buf, size_t cap, size_t& len);
   bool save(const void* payload, size_t len);
   void removeAll();
+  // The last load() or save() could not read the slots. Nothing can be said about
+  // them, and a save is refused: a new record could lose to a slot that was unreadable.
+  bool ioError() const { return ioError_; }
 
   uint32_t sequence() const { return seq_; }
 
@@ -34,6 +37,7 @@ class AtomicFile {
     bool valid = false;
     uint32_t seq = 0;
     uint32_t len = 0;
+    bool ioError = false;
   };
   Probe probe(char slot);
   void slotPath(char slot, char* out) const;
@@ -42,6 +46,7 @@ class AtomicFile {
   IFs& fs_;
   char base_[kMaxPath];
   bool probed_ = false;
+  bool ioError_ = false;
   char active_ = 0;  // Slot holding the newest valid record; 0 when there is none.
   uint32_t seq_ = 0;
 };

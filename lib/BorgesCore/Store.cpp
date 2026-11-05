@@ -172,6 +172,9 @@ bool Store::begin() {
       }
     }
   }
+  // An unreadable card is not an empty one: starting blank here would look unpaired,
+  // and later writes could lose to the slots that could not be read.
+  if (credFile_.ioError()) return false;
   if (!haveCreds) copyText(creds_.baseUrl, sizeof(creds_.baseUrl), kDefaultBaseUrl);
 
   if (stateFile_.load(buf, sizeof(buf), len)) {
@@ -201,6 +204,7 @@ bool Store::begin() {
       if (r.ok()) state_ = s;
     }
   }
+  if (stateFile_.ioError()) return false;
 
   if (!creds_.paired() && !creds_.pairing.active()) importLegacy();
   return true;
@@ -350,7 +354,7 @@ bool Store::loadBook(const BookId& id, BookLedger& out) {
     }
   }
   delete[] buf;
-  return true;
+  return !file.ioError();
 }
 
 bool Store::saveBook(const BookLedger& l) {
@@ -400,6 +404,10 @@ bool Store::loadAnnotations(const BookId& id, AnnotationRecord** records, uint16
   uint16_t n = 0;
   uint16_t epoch = 0;
   bool loaded = file.load(buf, rawCap, len);
+  if (file.ioError()) {
+    delete[] buf;
+    return false;  // Not "no annotations": that would republish every clipping.
+  }
   if (loaded && len >= 5) {
     ByteReader r(buf, len);
     if (r.u8() == kAnnVersion) {

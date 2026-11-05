@@ -75,6 +75,23 @@ TEST(AtomicFile, BothCorruptMeansNothingNotGarbage) {
   EXPECT_EQ(load(again), "<none>");
 }
 
+TEST(AtomicFile, AReadErrorIsNotAnEmptyFileAndBlocksSaves) {
+  MemFs fs;
+  AtomicFile f(fs, "/s");
+  ASSERT_TRUE(f.save("one", 3));
+  ASSERT_TRUE(f.save("two", 3));
+  fs.failReadsAfter("/s.b", 0);
+  AtomicFile unreadable(fs, "/s");
+  EXPECT_EQ(load(unreadable), "<none>");
+  EXPECT_TRUE(unreadable.ioError());
+  // Saving now could write a lower sequence than the slot it cannot see.
+  EXPECT_FALSE(unreadable.save("three", 5));
+  fs.failReadsAfter("", 0);
+  AtomicFile fresh(fs, "/s");
+  EXPECT_EQ(load(fresh), "two");
+  EXPECT_FALSE(fresh.ioError());
+}
+
 TEST(AtomicFile, TooSmallBufferDoesNotLoad) {
   MemFs fs;
   AtomicFile f(fs, "/s");

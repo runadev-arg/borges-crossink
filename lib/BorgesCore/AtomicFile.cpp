@@ -35,20 +35,36 @@ AtomicFile::Probe AtomicFile::probe(char slot) {
   slotPath(slot, path);
   if (!fs_.exists(path)) return result;
   File f(fs_, path, IFs::Mode::Read);
-  if (!f) return result;
+  if (!f) {
+    result.ioError = true;
+    return result;
+  }
+  const int64_t size = f.size();
+  if (size < 0) {
+    result.ioError = true;
+    return result;
+  }
+  if (size < static_cast<int64_t>(kHeader)) return result;  // Torn before the header was complete.
   uint8_t header[kHeader];
-  if (!f.readExact(header, kHeader) || memcmp(header, kMagic, 4) != 0) return result;
+  if (!f.readExact(header, kHeader)) {
+    result.ioError = true;
+    return result;
+  }
+  if (memcmp(header, kMagic, 4) != 0) return result;
   ByteReader r(header + 4, kHeader - 4);
   const uint32_t seq = r.u32();
   const uint32_t len = r.u32();
   const uint32_t expect = r.u32();
-  if (len > kMaxPayload || f.size() < static_cast<int64_t>(kHeader + len)) return result;
+  if (len > kMaxPayload || size < static_cast<int64_t>(kHeader + len)) return result;
   uint32_t crc = crc32Update(crc32Begin(), header + 4, 8);
   uint8_t chunk[128];
   uint32_t left = len;
   while (left) {
     const size_t want = left < sizeof(chunk) ? left : sizeof(chunk);
-    if (!f.readExact(chunk, want)) return result;
+    if (!f.readExact(chunk, want)) {
+      result.ioError = true;
+      return result;
+    }
     crc = crc32Update(crc, chunk, want);
     left -= static_cast<uint32_t>(want);
   }
@@ -64,6 +80,7 @@ void AtomicFile::refresh() {
   const Probe b = probe('b');
   active_ = 0;
   seq_ = 0;
+  ioError_ = a.ioError || b.ioError;
   if (a.valid && (!b.valid || a.seq >= b.seq)) {
     active_ = 'a';
     seq_ = a.seq;
@@ -76,17 +93,30 @@ void AtomicFile::refresh() {
 
 bool AtomicFile::load(uint8_t* buf, size_t cap, size_t& len) {
   refresh();
+  if (ioError_) {
+    probed_ = false;
+    return false;
+  }
   if (!active_) return false;
   char path[kMaxPath + 3];
   slotPath(active_, path);
   File f(fs_, path, IFs::Mode::Read);
-  if (!f) return false;
+  if (!f) {
+    ioError_ = true;
+    return false;
+  }
   uint8_t header[kHeader];
-  if (!f.readExact(header, kHeader)) return false;
+  if (!f.readExact(header, kHeader)) {
+    ioError_ = true;
+    return false;
+  }
   ByteReader r(header + 8, 4);
   const uint32_t stored = r.u32();
   if (stored > cap) return false;
-  if (stored && !f.readExact(buf, stored)) return false;
+  if (stored && !f.readExact(buf, stored)) {
+    ioError_ = true;
+    return false;
+  }
   len = stored;
   return true;
 }
@@ -94,6 +124,10 @@ bool AtomicFile::load(uint8_t* buf, size_t cap, size_t& len) {
 bool AtomicFile::save(const void* payload, size_t len) {
   if (len > kMaxPayload) return false;
   if (!probed_) refresh();
+  if (ioError_) {
+    probed_ = false;
+    return false;
+  }
   const char target = active_ == 'a' ? 'b' : 'a';
   const uint32_t seq = seq_ + 1;
 

@@ -1125,18 +1125,20 @@ bool SyncEngine::drain(SessionReport& report) {
     w.kvInt("pull_limit", config_.pullLimit);
     w.key("events");
     w.arrayBegin();
-    bool rebuilt = false;
-    for (uint8_t i = 0; i < batch.count; ++i) {
-      if (!outbox_.writeEnvelope(batch.items[i], w)) {
-        // It went bad since the scan and is quarantined now. Select again.
-        ++report.eventsQuarantined;
-        rebuilt = true;
-        break;
-      }
+    Outbox::EnvelopeResult envelope = Outbox::EnvelopeResult::Ok;
+    for (uint8_t i = 0; i < batch.count && envelope == Outbox::EnvelopeResult::Ok; ++i) {
+      envelope = outbox_.writeEnvelope(batch.items[i], w);
     }
-    if (rebuilt) {
+    if (envelope == Outbox::EnvelopeResult::Quarantined) {
+      // It went bad since the scan and left the queue. Select again.
       delete[] body;
+      ++report.eventsQuarantined;
       continue;
+    }
+    if (envelope == Outbox::EnvelopeResult::IoError) {
+      delete[] body;
+      recordLocalError(SyncStage::Drain, "outbox_read", report);
+      return false;
     }
     w.arrayEnd();
     w.key("client");

@@ -152,27 +152,30 @@ void Outbox::removeEntry(uint32_t offset) {
   --count_;
 }
 
-// True when a complete, checksummed record starts at pos.
-bool Outbox::verifyRecord(File& f, uint32_t pos, uint32_t fileSize, uint8_t& type, uint32_t& len) {
-  if (fileSize - pos < kRecordHeader) return false;
+// Whether a complete, checksummed record starts at pos. A failed read is its own answer:
+// treating it as corruption would quarantine good events on a passing SD error.
+Outbox::Verify Outbox::verifyRecord(File& f, uint32_t pos, uint32_t fileSize, uint8_t& type, uint32_t& len) {
+  if (fileSize - pos < kRecordHeader) return Verify::Invalid;
   uint8_t header[kRecordHeader];
-  if (!f.seek(pos) || !f.readExact(header, kRecordHeader)) return false;
-  if (header[0] != kMagic0 || header[1] != kMagic1) return false;
+  if (!f.seek(pos) || !f.readExact(header, kRecordHeader)) return Verify::IoError;
+  if (header[0] != kMagic0 || header[1] != kMagic1) return Verify::Invalid;
   ByteReader r(header + 4, 8);
   len = r.u32();
   const uint32_t expect = r.u32();
   type = header[2];
-  if (header[3] != headerCheck(type, len) || len > kMaxRecordBytes || fileSize - pos - kRecordHeader < len) return false;
+  if (header[3] != headerCheck(type, len) || len > kMaxRecordBytes || fileSize - pos - kRecordHeader < len) {
+    return Verify::Invalid;
+  }
   uint32_t crc = crcBegin(type, len);
   uint8_t chunk[128];
   uint32_t left = len;
   while (left) {
     const size_t want = left < sizeof(chunk) ? left : sizeof(chunk);
-    if (!f.readExact(chunk, want)) return false;
+    if (!f.readExact(chunk, want)) return Verify::IoError;
     crc = crc32Update(crc, chunk, want);
     left -= static_cast<uint32_t>(want);
   }
-  return crc32End(crc) == expect;
+  return crc32End(crc) == expect ? Verify::Valid : Verify::Invalid;
 }
 
 void Outbox::quarantineRange(File& source, uint32_t start, uint32_t len) {
@@ -224,7 +227,9 @@ bool Outbox::scan() {
   while (pos < size) {
     uint8_t type = 0;
     uint32_t len = 0;
-    if (!verifyRecord(f, pos, size, type, len)) {
+    const Verify verdict = verifyRecord(f, pos, size, type, len);
+    if (verdict == Verify::IoError) return false;  // Nothing is decided on a failed read.
+    if (verdict == Verify::Invalid) {
       if (!inBad) {
         inBad = true;
         badStart = pos;
@@ -454,25 +459,25 @@ bool Outbox::markAttempted(const Batch& batch) {
   return true;
 }
 
-bool Outbox::writeEnvelope(BatchItem& item, JsonWriter& out) {
+Outbox::EnvelopeResult Outbox::writeEnvelope(BatchItem& item, JsonWriter& out) {
   const OutboxEntry* entry = findEntry(item.offset);
-  if (!entry) return false;
+  if (!entry) return EnvelopeResult::IoError;
   char path[AtomicFile::kMaxPath + 16];
   logPath(gen_, path);
   File f(fs_, path, IFs::Mode::Read);
-  if (!f) return false;
+  if (!f) return EnvelopeResult::IoError;
   const int64_t rawSize = f.size();
-  if (rawSize < 0) return false;
+  if (rawSize < 0) return EnvelopeResult::IoError;
   uint8_t type = 0;
   uint32_t len = 0;
-  if (!verifyRecord(f, item.offset, static_cast<uint32_t>(rawSize), type, len) || type != kTypeEvent ||
-      len < kEventHeader) {
+  const Verify verdict = verifyRecord(f, item.offset, static_cast<uint32_t>(rawSize), type, len);
+  if (verdict == Verify::IoError) return EnvelopeResult::IoError;
+  if (verdict == Verify::Invalid || type != kTypeEvent || len < kEventHeader) {
     f.close();
-    quarantine(item.offset);
-    return false;
+    return quarantine(item.offset) ? EnvelopeResult::Quarantined : EnvelopeResult::IoError;
   }
   uint8_t head[kEventHeader];
-  if (!f.seek(item.offset + kRecordHeader) || !f.readExact(head, kEventHeader)) return false;
+  if (!f.seek(item.offset + kRecordHeader) || !f.readExact(head, kEventHeader)) return EnvelopeResult::IoError;
   uint8_t id[16];
   memcpy(id, head, 16);
   out.objectBegin();
@@ -484,7 +489,7 @@ bool Outbox::writeEnvelope(BatchItem& item, JsonWriter& out) {
   uint32_t left = len - static_cast<uint32_t>(kEventHeader);
   while (left) {
     const size_t want = left < sizeof(chunk) ? left : sizeof(chunk);
-    if (!f.readExact(chunk, want)) return false;
+    if (!f.readExact(chunk, want)) return EnvelopeResult::IoError;
     out.rawBytes(chunk, want);
     left -= static_cast<uint32_t>(want);
   }
@@ -492,7 +497,7 @@ bool Outbox::writeEnvelope(BatchItem& item, JsonWriter& out) {
   // The id goes back through the item: the caller matches ACKs against it.
   memcpy(item.id, id, 16);
   item.seq = entry->seq;
-  return true;
+  return EnvelopeResult::Ok;
 }
 
 bool Outbox::ack(const uint32_t* offsets, size_t count) {
@@ -589,8 +594,12 @@ bool Outbox::compact() {
         const OutboxEntry& e = entries_[i];
         uint8_t type = 0;
         uint32_t len = 0;
-        if (!verifyRecord(src, e.offset, static_cast<uint32_t>(rawSize), type, len) || type != kTypeEvent ||
-            len != e.payloadLen) {
+        const Verify verdict = verifyRecord(src, e.offset, static_cast<uint32_t>(rawSize), type, len);
+        if (verdict == Verify::IoError) {
+          ok = false;
+          break;
+        }
+        if (verdict == Verify::Invalid || type != kTypeEvent || len != e.payloadLen) {
           // Went bad since the scan. A later scan of this generation will not see it.
           quarantineRange(src, e.offset, static_cast<uint32_t>(kRecordHeader) + e.payloadLen);
           ++quarantined_;

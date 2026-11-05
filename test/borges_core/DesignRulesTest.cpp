@@ -169,7 +169,7 @@ TEST_F(DesignRule, Rule04_OutboxCannotBePoisoned_DepthCountsExactlyWhatNextBatch
       std::string buffer(4096, '\0');
       JsonWriter w(buffer.data(), buffer.size());
       w.arrayBegin();
-      ASSERT_TRUE(d.outbox->writeEnvelope(batch.items[i], w));
+      ASSERT_EQ(d.outbox->writeEnvelope(batch.items[i], w), Outbox::EnvelopeResult::Ok);
       offsets[n++] = batch.items[i].offset;
     }
     returned += n;
@@ -190,6 +190,21 @@ TEST_F(DesignRule, Rule04_OutboxCannotBePoisoned_RotAfterOpenIsCaughtAtSendTime)
   EXPECT_EQ(report.depth, 0u);
   EXPECT_EQ(d.server.byId.count(a), 0u);
   EXPECT_EQ(d.server.byId.count(b), 1u);
+}
+
+TEST_F(DesignRule, Rule04_OutboxCannotBePoisoned_APassingReadErrorDiscardsNothing) {
+  std::string a;
+  ASSERT_EQ(d.appendRaw("a", &a), Outbox::AppendResult::Ok);
+  d.fs.failReadsAfter(std::string(kOutboxDir) + "/outbox.1.log", 0);
+  const SessionReport report = manual();
+  EXPECT_EQ(report.outcome, SessionOutcome::LocalError);
+  EXPECT_STREQ(d.store->state().diag.code, "outbox_read");
+  EXPECT_EQ(report.eventsQuarantined, 0);
+  EXPECT_EQ(d.outbox->depth(), 1u);
+  EXPECT_FALSE(d.fs.has(std::string(kOutboxDir) + "/outbox.bad"));
+  d.fs.failReadsAfter("", 0);
+  EXPECT_EQ(manual().outcome, SessionOutcome::Ok);
+  EXPECT_EQ(d.server.byId.count(a), 1u);
 }
 
 // 5. No per-page disk churn.

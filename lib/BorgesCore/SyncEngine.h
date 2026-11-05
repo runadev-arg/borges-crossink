@@ -6,13 +6,14 @@
 // book loaded, TLS needs 35 KB of that).
 //
 //   Heap, whole engine lifetime
-//     Scratch (one RemoteEvent, BookLedger, InboundAnnotation, Batch)   ~7.2 KB
+//     Scratch (one RemoteEvent, BookLedger, InboundAnnotation, Batch)   6.9 KB
 //     Outbox index                  24 B per live event, 128 at most    ~3.1 KB
 //   Heap, one request at a time
 //     Exchange body: default bound 8 KiB + one envelope. A single oversized event
 //     goes alone, so the worst case is that event (a queued event is under 48 KiB).
 //     If that allocation fails, the event waits and the rest of the queue moves on.
-//   Stack, peak: Store::begin/saveState 1 KB; JsonScanner window 192 B; chunks 128 B.
+//   Stack: 2 KB at most in any one frame (measured with -fstack-usage: Catalog::fetchPage,
+//   PairingFlow::requestCode, Store::begin; the frames of the sync path are smaller).
 //
 // Not budgeted because it cannot grow: responses. They are spooled to SD and walked
 // with a 192-byte window, so memory use is independent of what the server sends, and

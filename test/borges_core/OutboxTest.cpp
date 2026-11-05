@@ -20,7 +20,7 @@ std::vector<std::string> selectIds(Outbox& outbox, size_t maxEvents, size_t maxB
     std::string buffer(64 * 1024, '\0');
     JsonWriter w(buffer.data(), buffer.size());
     w.arrayBegin();
-    if (!outbox.writeEnvelope(batch.items[i], w)) continue;
+    if (outbox.writeEnvelope(batch.items[i], w) != Outbox::EnvelopeResult::Ok) continue;
     char id[37];
     uuidFormat(batch.items[i].id, id);
     ids.push_back(id);
@@ -271,6 +271,32 @@ TEST_F(OutboxTest, TransientReadFailureDoesNotDiscardAnything) {
   d.fs.failOpen("");
   d.boot();
   EXPECT_EQ(d.outbox->depth(), 1u);
+}
+
+TEST_F(OutboxTest, AReadErrorDuringTheScanIsNotCorruption) {
+  std::string a, b;
+  ASSERT_EQ(d.appendRaw("a", &a), Outbox::AppendResult::Ok);
+  ASSERT_EQ(d.appendRaw("b", &b), Outbox::AppendResult::Ok);
+  d.fs.failReadsAfter(log(), 20);
+  Outbox failing(d.fs, d.random, kOutboxDir);
+  EXPECT_FALSE(failing.open());
+  EXPECT_FALSE(d.fs.has(std::string(kOutboxDir) + "/outbox.bad"));
+  d.fs.failReadsAfter("", 0);
+  d.boot();
+  EXPECT_EQ(selectIds(*d.outbox, 20, 8192), (std::vector<std::string>{a, b}));
+}
+
+TEST_F(OutboxTest, AReadErrorDuringCompactionKeepsTheOldGeneration) {
+  std::string a;
+  ASSERT_EQ(d.appendRaw("a", &a), Outbox::AppendResult::Ok);
+  const uint32_t gen = d.outbox->generation();
+  d.fs.failReadsAfter(log(), 0);
+  EXPECT_FALSE(d.outbox->compact());
+  d.fs.failReadsAfter("", 0);
+  EXPECT_EQ(d.outbox->generation(), gen);
+  EXPECT_FALSE(d.fs.has(std::string(kOutboxDir) + "/outbox.bad"));
+  d.crashAndBoot();
+  EXPECT_EQ(selectIds(*d.outbox, 20, 8192), std::vector<std::string>{a});
 }
 
 TEST_F(OutboxTest, QuarantineMovesTheBytesAndRemovesTheEvent) {
