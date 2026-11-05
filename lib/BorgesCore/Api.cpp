@@ -2,6 +2,7 @@
 
 #include <cstring>
 
+#include "Backoff.h"
 #include "JsonStream.h"
 #include "Store.h"
 
@@ -21,6 +22,17 @@ void Api::beginSession(uint32_t budgetMs) {
 }
 
 void Api::endSession() { http_.disconnect(); }
+
+// The one door a Retry-After comes through: a server cannot silence this device for longer
+// than the backoff's own cap, however large the number or whichever flow reads it.
+void Api::copyTransport(ApiResult& result) const {
+  result.status = response_.status;
+  result.stage = response_.stage;
+  result.transportCode = response_.transportCode;
+  result.hasRetryAfter = response_.hasRetryAfter;
+  result.retryAfterSec = response_.retryAfterSec > backoff::kCapSec ? backoff::kCapSec : response_.retryAfterSec;
+  copyText(result.requestId, sizeof(result.requestId), response_.requestId);
+}
 
 bool Api::cancelled() { return cancel_.cancelled(); }
 
@@ -74,12 +86,7 @@ ApiResult Api::callTo(const char* method, const char* path, IHttpSink& sink, con
     return result;
   }
   perform(method, path, nullptr, 0, sink, extraHeaders, extraCount, response_);
-  result.status = response_.status;
-  result.stage = response_.stage;
-  result.transportCode = response_.transportCode;
-  result.hasRetryAfter = response_.hasRetryAfter;
-  result.retryAfterSec = response_.retryAfterSec;
-  copyText(result.requestId, sizeof(result.requestId), response_.requestId);
+  copyTransport(result);
   copyText(result.etag, sizeof(result.etag), response_.etag);
   copyText(result.koreaderMd5, sizeof(result.koreaderMd5), response_.koreaderMd5);
   copyText(result.contentSha256, sizeof(result.contentSha256), response_.contentSha256);
@@ -122,12 +129,7 @@ ApiResult Api::call(const char* method, const char* path, const uint8_t* body, s
     }
 
     result = ApiResult{};
-    result.status = response_.status;
-    result.stage = response_.stage;
-    result.transportCode = response_.transportCode;
-    result.hasRetryAfter = response_.hasRetryAfter;
-    result.retryAfterSec = response_.retryAfterSec;
-    copyText(result.requestId, sizeof(result.requestId), response_.requestId);
+    copyTransport(result);
 
     if (response_.status <= 0 || !response_.complete) {
       if (cancelled()) {

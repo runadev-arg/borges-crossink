@@ -74,6 +74,7 @@ class Api {
   void perform(const char* method, const char* path, const uint8_t* body, size_t bodyLen, IHttpSink& sink,
                const HttpHeader* extraHeaders, uint8_t extraCount, HttpResponse& out);
   void decodeError(ApiResult& result);
+  void copyTransport(ApiResult& result) const;
 
   IFs& fs_;
   IHttp& http_;

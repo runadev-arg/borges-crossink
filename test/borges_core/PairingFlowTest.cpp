@@ -240,6 +240,15 @@ TEST_F(PairingFlowTest, RateLimitAtRequestWaitsAndRetries) {
   EXPECT_EQ(flow->step(), PairingState::WaitingForApproval);
 }
 
+TEST_F(PairingFlowTest, AHugeRetryAfterCannotPostponeTheRetryBeyondTheCap) {
+  Reply limited = apiError(429, "rate_limited");
+  limited.hasRetryAfter = true;
+  limited.retryAfter = 0xFFFFFFFFu;
+  d.http.script.push_back(limited);
+  EXPECT_FALSE(flow->start());
+  EXPECT_LE(flow->nextPollAtMs(), d.clock.mono + 6ull * 3600 * 1000);
+}
+
 TEST_F(PairingFlowTest, RateLimitWhilePollingStretchesTheWait) {
   ASSERT_TRUE(startFlow());
   Reply limited = apiError(429, "rate_limited");

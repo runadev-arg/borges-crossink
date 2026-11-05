@@ -1,3 +1,4 @@
+#include "Backoff.h"
 #include "TestSupport.h"
 
 using namespace borges;
@@ -561,6 +562,17 @@ TEST_F(SyncEngineTest, RateLimit429HonoursRetryAfter) {
   EXPECT_EQ(d.engine->gate(SessionKind::Sleep), Gate::BackedOff);
   EXPECT_EQ(d.engine->gate(SessionKind::Manual), Gate::Go);
   d.clock.wall.epochSec = kNow + 3601;
+  EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::Go);
+}
+
+TEST_F(SyncEngineTest, AHugeRetryAfterCannotSilenceTheDeviceBeyondTheCap) {
+  Reply reply = apiError(429, "rate_limited");
+  reply.hasRetryAfter = true;
+  reply.retryAfter = 0xFFFFFFFFu;
+  d.http.script.push_back(reply);
+  EXPECT_EQ(manual().outcome, SessionOutcome::RateLimited);
+  EXPECT_LE(d.store->state().nextAttemptEpoch, kNow + backoff::kCapSec);
+  d.clock.wall.epochSec = kNow + backoff::kCapSec;
   EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::Go);
 }
 
