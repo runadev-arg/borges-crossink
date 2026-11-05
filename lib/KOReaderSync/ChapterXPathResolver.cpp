@@ -402,6 +402,11 @@ class CreWalker final : public Print {
     }
   }
 
+  // setNodeStyle() in lvrend.cpp: whatever a publisher sets, a <br> stays inline unless hidden.
+  static void applyForcedDisplay(const char* name, const size_t nameLen, Display& display) {
+    if (nameLen == 2 && name[0] == 'b' && name[1] == 'r' && display != Display::None) display = Display::Inline;
+  }
+
   // Classes repeat all through a chapter, and a look-up may seek the SD card.
   uint8_t styleFromCss(const char* name, const size_t nameLen, const char* classes) {
     uint32_t key = hashName(name, nameLen);
@@ -461,6 +466,7 @@ class CreWalker final : public Print {
     Display display;
     bool pre;
     styleOf(name, nameLen, atts, parent.pre, display, pre);
+    applyForcedDisplay(name, nameLen, display);
     if (!parent.hidden) applyChildToParent(parent, display);
     parent.hasChild = true;
     parent.kids++;

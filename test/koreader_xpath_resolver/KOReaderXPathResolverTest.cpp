@@ -217,6 +217,15 @@ TEST(KOReaderXPathRegression, EmptyTextBeforeABlockIsNotANode) {
   expectBothWays(mixed, "end", "/body/DocFragment/body/div/text()[5].1");
 }
 
+TEST(KOReaderXPathRegression, ABrIsInlineWhateverItsDisplaySays) {
+  // Calibre output sets display: block on a class that <br> carries.
+  const std::string body =
+      "<h1>\nLead words <br style=\"display:block\"/>\n<br style=\"display:block\"/>\nSecond part "
+      "<br style=\"display:block\"/>\n</h1>";
+  expectBothWays(body, "Lead", "/body/DocFragment/body/h1/text()[1].1");
+  expectBothWays(body, "Second", "/body/DocFragment/body/h1/text()[3].1");
+}
+
 TEST(KOReaderXPathRegression, APageStartingAtAnImageNamesTheTextAfterIt) {
   const std::string body = "<div><p>aaa</p>\n<img src=\"x\"/>\n<p>bbb</p></div>";
   const auto epub = epubWith("<html><body>" + body + "</body></html>");

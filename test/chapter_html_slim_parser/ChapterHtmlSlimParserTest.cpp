@@ -88,6 +88,11 @@ TEST_F(ChapterHtmlSlimParserTest, VisibleTextOffsetCountsWhatLayoutSkips) {
   EXPECT_EQ(parser.getVisibleTextLength(), 10u);
   element("p", nullptr, "jk");
   EXPECT_EQ(parser.getVisibleTextLength(), 12u);
+
+  // What stands in for an image that cannot be shown is not in the document's text.
+  const XML_Char* image[] = {"src", "missing.png", "alt", "a picture", nullptr};
+  element("img", image, nullptr);
+  EXPECT_EQ(parser.getVisibleTextLength(), 12u);
 }
 
 TEST_F(ChapterHtmlSlimParserTest, BlockquoteParagraphsInheritItalicAndRestoreFollowingText) {

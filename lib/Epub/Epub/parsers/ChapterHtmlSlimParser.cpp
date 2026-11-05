@@ -2264,7 +2264,10 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     }
     const char* altAttr = getAttribute(atts, "alt");
     if (altAttr && altAttr[0] != '\0') {
+      // Text this parser adds: not in the document, so not in the visible offset.
+      self->visibleExcludedNesting++;
       self->characterData(userData, altAttr, strlen(altAttr));
+      self->visibleExcludedNesting--;
       if (self->partWordBufferIndex > 0) {
         self->flushPartWordBuffer();
       }
@@ -2677,7 +2680,10 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
         self->italicUntilDepth = std::min(self->italicUntilDepth, self->depth);
         self->pushCssAncestor(self->depth, name, classAttr);
         self->depth += 1;
+        // Text this parser adds: not in the document, so not in the visible offset.
+        self->visibleExcludedNesting++;
         self->characterData(userData, alt.c_str(), alt.length());
+        self->visibleExcludedNesting--;
         self->skipDescendantsOfCurrentElement();
         return;
       }
