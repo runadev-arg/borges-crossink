@@ -165,6 +165,13 @@ class Handler(BaseHTTPRequestHandler):
                                          "bookmark.upserted", "bookmark.deleted", "session.ended",
                                          "page_stat.recorded")}
             self.reply(200, {"protocol_version": 2, "event_versions": versions})
+        elif path == "/api/sync/v2/progress/positions":
+            self.reply(200, {"protocol_version": 2, "positions": [
+                {"device_id": ARGS.device_id, "device_name": "X4", "percentage": 10, "is_current_device": True,
+                 "recovery_id": "progress:self:1", "xpointer": None},
+                {"device_id": "other-device", "device_name": "Kobo Libra de Toto", "percentage": 41.5,
+                 "xpointer": "/body/DocFragment[3]/body/p[2]/text().0", "occurred_at": "2026-11-05T13:00:00.000Z",
+                 "time_precision": "exact", "is_current_device": False, "recovery_id": "progress:other:7"}]})
         elif path == "/api/library/plugin/books":
             params = dict(p.split("=") for p in query.split("&") if "=" in p)
             page = int(params.get("page", 1))
