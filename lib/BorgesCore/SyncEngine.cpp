@@ -17,6 +17,7 @@ constexpr const char* kCapabilitiesPath = "/api/sync/v2/capabilities";
 constexpr const char* kHealthPath = "/api/devices/self/health";
 constexpr const char* kRotatePath = "/api/devices/self/credentials/rotate";
 constexpr int64_t kRotateMarginSec = 14 * 24 * 3600;
+constexpr size_t kPullBodyBytes = 448;  // protocol, cursor, focus book, limit and the client block.
 
 bool isSequenceConflict(const ApiResult& r) { return r.status == 409 && strcmp(r.code, "client_sequence_conflict") == 0; }
 
@@ -416,8 +417,24 @@ SessionReport SyncEngine::applyChoice(const ResumeDecision& decision, ResumeChoi
 // Focus check
 // ---------------------------------------------------------------------------------
 
+// On every request that takes one, as the plugin does: the server overwrites queue_depth
+// with what each request says, and a request with no client block says zero.
+void SyncEngine::writeClient(JsonWriter& w) const {
+  w.key("client");
+  w.objectBegin();
+  w.kvInt("protocol_version", 2);
+  if (config_.firmwareVersion[0]) w.kv("firmware_version", config_.firmwareVersion);
+  if (config_.clientVersion[0]) w.kv("client_version", config_.clientVersion);
+  w.kvInt("queue_depth", static_cast<int64_t>(outbox_.depth()));
+  w.key("capabilities");
+  w.objectBegin();
+  w.kvBool("atomic_sd_outbox", true);
+  w.objectEnd();
+  w.objectEnd();
+}
+
 bool SyncEngine::focus(const BookId& book, const Position* local, ResumeDecision* out, SessionReport& report) {
-  char body[192];
+  char body[kPullBodyBytes];
   JsonWriter w(body, sizeof(body));
   w.objectBegin();
   w.kvInt("protocol_version", 2);
@@ -428,7 +445,12 @@ bool SyncEngine::focus(const BookId& book, const Position* local, ResumeDecision
   w.kv("value", book.hex);
   w.objectEnd();
   w.kvBool("focus_only", true);
+  writeClient(w);
   w.objectEnd();
+  if (!w.ok()) {
+    recordLocalError(SyncStage::Focus, "body_overflow", report);
+    return false;
+  }
 
   const ApiResult r = api_.call("POST", kPullPath, reinterpret_cast<const uint8_t*>(body), w.size());
   if (r.kind != ApiKind::Ok) {
@@ -789,13 +811,18 @@ bool SyncEngine::pullPages(SessionReport& report) {
       return false;
     }
     const uint64_t requested = store_.state().cursor;
-    char body[96];
+    char body[kPullBodyBytes];
     JsonWriter w(body, sizeof(body));
     w.objectBegin();
     w.kvInt("protocol_version", 2);
     w.kvSeq("cursor", requested);
     w.kvInt("limit", config_.pullLimit);
+    writeClient(w);
     w.objectEnd();
+    if (!w.ok()) {
+      recordLocalError(SyncStage::Pull, "body_overflow", report);
+      return false;
+    }
 
     const ApiResult r = api_.call("POST", kPullPath, reinterpret_cast<const uint8_t*>(body), w.size());
     if (r.kind == ApiKind::HttpError && isCursorRecoverable(r) && !recovered && recoverCursor(r, report)) {
@@ -1146,17 +1173,7 @@ bool SyncEngine::drain(SessionReport& report) {
       return false;
     }
     w.arrayEnd();
-    w.key("client");
-    w.objectBegin();
-    w.kvInt("protocol_version", 2);
-    if (config_.firmwareVersion[0]) w.kv("firmware_version", config_.firmwareVersion);
-    if (config_.clientVersion[0]) w.kv("client_version", config_.clientVersion);
-    w.kvInt("queue_depth", static_cast<int64_t>(outbox_.depth()));
-    w.key("capabilities");
-    w.objectBegin();
-    w.kvBool("atomic_sd_outbox", true);
-    w.objectEnd();
-    w.objectEnd();
+    writeClient(w);
     w.objectEnd();
     if (!w.ok()) {
       delete[] body;

@@ -231,6 +231,7 @@ class SyncEngine {
   bool drain(SessionReport& report);
   bool ensureCapabilities(SessionReport& report);
   void commitCursor(SessionReport& report);
+  void writeClient(JsonWriter& w) const;
   void reportHealth(const SessionReport& report);
   void maybeRotate(SessionReport& report);
   void resolveSuggestion(const BookId& book);

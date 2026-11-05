@@ -89,6 +89,23 @@ TEST_F(SyncEngineTest, ClientBlockMatchesTheProtocol) {
   EXPECT_TRUE(sawExchange);
 }
 
+TEST_F(SyncEngineTest, EveryPullTellsTheServerTheQueueDepth) {
+  ASSERT_EQ(d.appendRaw("held"), Outbox::AppendResult::Ok);
+  d.store->state().holds.add(Device::book().md5);
+  ResumeDecision decision;
+  ASSERT_EQ(open(decision).outcome, SessionOutcome::Ok);
+  size_t pulls = 0;
+  for (const auto& r : d.http.log) {
+    if (r.path != "/api/sync/v2/pull") continue;
+    ++pulls;
+    JsonDocument doc;
+    ASSERT_FALSE(deserializeJson(doc, r.body)) << r.body;
+    EXPECT_EQ(doc["client"]["queue_depth"], 1) << r.body;
+    EXPECT_EQ(doc["client"]["client_version"], "crossink-borges/1.6.1");
+  }
+  EXPECT_EQ(pulls, 2u) << "the focus check and the pull";
+}
+
 // --- Exchange outcomes ------------------------------------------------------------
 
 TEST_F(SyncEngineTest, PartialRejectionsLeaveTheOutboxAndAreCounted) {
