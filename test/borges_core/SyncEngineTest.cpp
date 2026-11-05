@@ -604,6 +604,95 @@ TEST_F(SyncEngineTest, AServerTimeOutOfBoundsMovesNeitherTheClockNorTheAnchor) {
   EXPECT_EQ(d.store->state().anchorEpoch, kNow - 100);
 }
 
+TEST_F(SyncEngineTest, HeldEventsDoNotPowerTheRadioAtEverySleep) {
+  // A book that wants a prompt, closed unanswered, with its progress held.
+  d.store->state().holds.add(Device::book().md5);
+  FinalizeInput input = d.finalizeInput(30);
+  ASSERT_TRUE(d.engine->finalizeBook(input).progressQueued);
+  d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
+  EXPECT_EQ(d.engine->gate(SessionKind::Sleep), Gate::Go) << "the first sleep asks, once";
+  EXPECT_EQ(d.engine->runSleepSession().outcome, SessionOutcome::Ok);
+  EXPECT_EQ(d.http.countPath("/api/sync/v2/exchange"), 0u) << "still held";
+  EXPECT_EQ(d.engine->gate(SessionKind::Sleep), Gate::NothingToDo) << "nothing new to ask";
+
+  // It survives a reboot, or every wake would ask again.
+  d.crashAndBoot();
+  EXPECT_EQ(d.engine->gate(SessionKind::Sleep), Gate::NothingToDo);
+
+  // Reading it again is news.
+  FinalizeInput later = d.finalizeInput(35, "/body/p[2].0", kNow + 60);
+  ASSERT_TRUE(d.engine->finalizeBook(later).progressQueued);
+  EXPECT_EQ(d.engine->gate(SessionKind::Sleep), Gate::Go);
+
+  // Something that can actually go up is always work.
+  d.crashAndBoot();
+  d.server.focusEvent = "null";
+  EXPECT_EQ(d.engine->runSleepSession().outcome, SessionOutcome::Ok);
+  EXPECT_EQ(d.store->state().holds.size(), 0);
+  ASSERT_EQ(d.appendRaw("uno"), Outbox::AppendResult::Ok);
+  EXPECT_EQ(d.engine->gate(SessionKind::Sleep), Gate::Go);
+}
+
+TEST_F(SyncEngineTest, HoldSetKeepsTheCheckedMarksThroughItsShifts) {
+  HoldSet holds;
+  uint8_t a[16] = {1}, b[16] = {2}, c[16] = {3};
+  holds.add(a);
+  holds.add(b);
+  holds.add(c);
+  holds.markChecked(a);
+  holds.markChecked(c);
+  holds.remove(b);
+  EXPECT_TRUE(holds.checked(0));
+  EXPECT_TRUE(holds.checked(1));
+  EXPECT_TRUE(holds.clearChecked(c));
+  EXPECT_FALSE(holds.clearChecked(c));
+  EXPECT_FALSE(holds.checked(1));
+}
+
+TEST_F(SyncEngineTest, TwoLinkFailuresSkipTheNextFiveAutomaticAttempts) {
+  ASSERT_EQ(d.appendRaw("uno"), Outbox::AppendResult::Ok);
+  EXPECT_EQ(d.engine->decideAutomatic(SessionKind::Open), Gate::Go);
+  d.engine->noteLinkFailure();
+  EXPECT_EQ(d.engine->decideAutomatic(SessionKind::Open), Gate::Go) << "one failure is not a pattern";
+  d.engine->noteLinkFailure();
+  for (int i = 0; i < 5; ++i) {
+    EXPECT_EQ(d.engine->decideAutomatic(i % 2 ? SessionKind::Open : SessionKind::Sleep), Gate::BackedOff) << i;
+  }
+  EXPECT_EQ(d.engine->gate(SessionKind::Manual), Gate::Go);
+  EXPECT_EQ(d.engine->decideAutomatic(SessionKind::Open), Gate::Go);
+  // Still failing: another five, not one more try each time.
+  d.engine->noteLinkFailure();
+  EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::BackedOff);
+}
+
+TEST_F(SyncEngineTest, LinkSkipsDoNotDependOnTheClockAndSurviveAReboot) {
+  d.clock.setWall(0, TimePrecision::Unknown);
+  d.engine->noteLinkFailure();
+  d.engine->noteLinkFailure();
+  d.crashAndBoot();
+  d.clock.setWall(0, TimePrecision::Unknown);
+  EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::BackedOff);
+  EXPECT_EQ(d.engine->decideAutomatic(SessionKind::Open), Gate::BackedOff);
+  EXPECT_EQ(d.store->state().linkSkipsLeft, 4);
+}
+
+TEST_F(SyncEngineTest, AnySessionWithALinkClearsTheSkips) {
+  d.engine->noteLinkFailure();
+  d.engine->noteLinkFailure();
+  ASSERT_EQ(d.engine->gate(SessionKind::Open), Gate::BackedOff);
+  EXPECT_EQ(manual().outcome, SessionOutcome::Ok);
+  EXPECT_EQ(d.store->state().linkSkipsLeft, 0);
+  EXPECT_EQ(d.store->state().linkFailStreak, 0);
+  EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::Go);
+}
+
+TEST_F(SyncEngineTest, ASleepWithNothingToSendDoesNotSpendALinkSkip) {
+  d.engine->noteLinkFailure();
+  d.engine->noteLinkFailure();
+  EXPECT_EQ(d.engine->decideAutomatic(SessionKind::Sleep), Gate::NothingToDo);
+  EXPECT_EQ(d.store->state().linkSkipsLeft, 5);
+}
+
 TEST_F(SyncEngineTest, ServerErrorsBackOffExponentiallyAndSuccessResets) {
   d.http.handler = [](const RecordedRequest&) { return apiError(503, "sync_service_unavailable"); };
   int64_t previous = 0;

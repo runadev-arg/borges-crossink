@@ -173,8 +173,16 @@ class SyncEngine {
   bool begin();
   void end();
 
-  // No IO. Call before bringing the radio up.
+  // No IO. For a screen to show. Call before bringing the radio up.
   Gate gate(SessionKind kind) const;
+  // gate(), when this answer decides whether an automatic session runs: a skip for link
+  // failures is spent here, and saved.
+  Gate decideAutomatic(SessionKind kind);
+  // An automatic session could not get a link. A network out of reach costs seconds of radio
+  // at every open and sleep and heals by itself, so after two in a row the next five automatic
+  // attempts are skipped. Counted in attempts, because the clock may be what is missing. Any
+  // session that gets a link clears it. Manual sessions neither count nor care.
+  void noteLinkFailure();
 
   // Local, no network. Holds this book's progress until a check resolves it. Must run
   // whenever a book opens, including when no session will run.
@@ -214,6 +222,7 @@ class SyncEngine {
   struct Scratch;
   struct PageInfo;
 
+  bool hasSleepWork() const;
   bool startSession(SessionKind kind, SessionReport& report);
   SessionReport finish(SessionReport report, SessionKind kind);
   void pullAndDrain(SessionReport& report);

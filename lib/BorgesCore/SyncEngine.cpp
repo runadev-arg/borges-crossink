@@ -18,6 +18,8 @@ constexpr const char* kCapabilitiesPath = "/api/sync/v2/capabilities";
 constexpr const char* kHealthPath = "/api/devices/self/health";
 constexpr const char* kRotatePath = "/api/devices/self/credentials/rotate";
 constexpr int64_t kRotateMarginSec = 14 * 24 * 3600;
+constexpr uint8_t kLinkFailuresBeforeSkipping = 2;
+constexpr uint8_t kLinkSkips = 5;
 constexpr size_t kPullBodyBytes = 448;  // protocol, cursor, focus book, limit and the client block.
 
 bool isSequenceConflict(const ApiResult& r) { return r.status == 409 && strcmp(r.code, "client_sequence_conflict") == 0; }
@@ -132,8 +134,38 @@ Gate SyncEngine::gate(SessionKind kind) const {
   const SyncState& s = store_.state();
   if (s.needsRelink) return Gate::NeedsRelink;
   if (backoff::blocked(clock_.wallNow(), s.nextAttemptEpoch)) return Gate::BackedOff;
-  if (kind == SessionKind::Sleep && outbox_.isOpen() && outbox_.depth() == 0) return Gate::NothingToDo;
+  if (kind == SessionKind::Sleep && outbox_.isOpen() && !hasSleepWork()) return Gate::NothingToDo;
+  if (s.linkSkipsLeft > 0) return Gate::BackedOff;
   return Gate::Go;
+}
+
+// Events that would actually go up, or a held book with news to ask about. Events held for
+// an answer only the reader can give are not work: they would power the radio at every
+// sleep, for as long as the book stays unopened.
+bool SyncEngine::hasSleepWork() const {
+  const HoldSet& holds = store_.state().holds;
+  if (outbox_.sendableDepth(&holds) > 0) return true;
+  for (uint8_t i = 0; i < holds.size(); ++i) {
+    if (!holds.checked(i) && outbox_.hasEventFor(bookTagOf(holds.at(i)), EventKind::Progress)) return true;
+  }
+  return false;
+}
+
+Gate SyncEngine::decideAutomatic(SessionKind kind) {
+  const Gate decided = gate(kind);
+  SyncState& s = store_.state();
+  if (decided == Gate::BackedOff && s.linkSkipsLeft > 0 && !backoff::blocked(clock_.wallNow(), s.nextAttemptEpoch)) {
+    --s.linkSkipsLeft;
+    store_.saveState();
+  }
+  return decided;
+}
+
+void SyncEngine::noteLinkFailure() {
+  SyncState& s = store_.state();
+  if (s.linkFailStreak < 250) ++s.linkFailStreak;
+  if (s.linkFailStreak >= kLinkFailuresBeforeSkipping) s.linkSkipsLeft = kLinkSkips;
+  store_.saveState();
 }
 
 bool SyncEngine::onBookOpened(const BookId& book) {
@@ -238,6 +270,9 @@ bool SyncEngine::startSession(SessionKind kind, SessionReport& report) {
   const uint32_t budget = kind == SessionKind::Open    ? config_.openBudgetMs
                           : kind == SessionKind::Sleep ? config_.sleepBudgetMs
                                                        : config_.manualBudgetMs;
+  // Whoever calls this has a link.
+  store_.state().linkFailStreak = 0;
+  store_.state().linkSkipsLeft = 0;
   api_.configure(store_.creds().baseUrl, store_.creds().token);
   api_.beginSession(budget);
   return true;
@@ -560,15 +595,20 @@ bool SyncEngine::checkHeldBooks(const BookId* except, SessionReport& report) {
       ++index;
       continue;
     }
-    // Only books with something waiting are worth a request.
-    if (!outbox_.hasEventFor(bookTagOf(book.md5), EventKind::Progress)) {
+    // Only books with something waiting are worth a request, and at sleep only once for
+    // each thing read: the answer will not change until a person opens the book.
+    if (!outbox_.hasEventFor(bookTagOf(book.md5), EventKind::Progress) ||
+        (currentKind_ == SessionKind::Sleep && store_.state().holds.checked(index))) {
       ++index;
       continue;
     }
     const uint8_t before = store_.state().holds.size();
     if (!focus(book, nullptr, nullptr, report)) return false;
     ++checks;
-    if (store_.state().holds.size() == before) ++index;
+    if (store_.state().holds.size() == before) {
+      store_.state().holds.markChecked(book.md5);
+      ++index;
+    }
   }
   return true;
 }
@@ -1389,6 +1429,8 @@ FinalizeResult SyncEngine::finalizeBook(const FinalizeInput& input) {
       ledger.hasFinalized = true;
       ledger.lastTurnEpoch = input.lastTurn.epochSec;
       if (!store_.saveBook(ledger)) ok = false;
+      // Something new was read: if the book is held, that is worth asking about once more.
+      if (store_.state().holds.clearChecked(input.book.id.md5) && !store_.saveState()) ok = false;
     } else {
       ok = false;
     }

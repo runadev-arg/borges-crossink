@@ -12,7 +12,7 @@ namespace {
 
 constexpr uint8_t kCredVersionXor = 1;  // Token and nonce XORed with the MAC. Read to migrate.
 constexpr uint8_t kCredVersion = 2;
-constexpr uint8_t kStateVersion = 1;
+constexpr uint8_t kStateVersion = 2;  // 1 is still read: it ends before the checked mask.
 constexpr uint8_t kBookVersion = 3;
 constexpr uint8_t kAnnVersion = 1;
 constexpr size_t kLegacyMaxBytes = 8 * 1024;
@@ -81,15 +81,35 @@ bool HoldSet::add(const uint8_t md5[16]) {
     memmove(items_[0], items_[1], 16 * (kMax - 1));
     --count_;
     ++evicted_;
+    checked_ >>= 1;
   }
+  checked_ &= ~(1u << count_);
   memcpy(items_[count_++], md5, 16);
   return true;
+}
+
+void HoldSet::markChecked(const uint8_t md5[16]) {
+  for (uint8_t i = 0; i < count_; ++i) {
+    if (memcmp(items_[i], md5, 16) == 0) checked_ |= 1u << i;
+  }
+}
+
+bool HoldSet::clearChecked(const uint8_t md5[16]) {
+  for (uint8_t i = 0; i < count_; ++i) {
+    if (memcmp(items_[i], md5, 16) == 0 && ((checked_ >> i) & 1u)) {
+      checked_ &= ~(1u << i);
+      return true;
+    }
+  }
+  return false;
 }
 
 bool HoldSet::remove(const uint8_t md5[16]) {
   for (uint8_t i = 0; i < count_; ++i) {
     if (memcmp(items_[i], md5, 16) == 0) {
       memmove(items_[i], items_[i + 1], 16 * (count_ - i - 1u));
+      const uint32_t below = checked_ & ((1u << i) - 1u);
+      checked_ = below | ((checked_ >> (i + 1)) << i);
       --count_;
       return true;
     }
@@ -173,7 +193,8 @@ bool Store::begin() {
   if (stateFile_.load(buf, sizeof(buf), len)) {
     ByteReader r(buf, len);
     SyncState s;
-    if (r.u8() == kStateVersion) {
+    const uint8_t version = r.u8();
+    if (version == kStateVersion || version == 1) {
       s.cursor = r.u64();
       s.committedCursor = r.u64();
       s.accountEpoch = r.u16();
@@ -193,6 +214,11 @@ bool Store::begin() {
       if (holds <= HoldSet::kMax) {
         for (uint8_t i = 0; i < holds; ++i) r.bytes(s.holds.items_[i], 16);
         s.holds.count_ = holds;
+      }
+      if (version >= 2) {
+        s.holds.checked_ = r.u32();
+        s.linkFailStreak = r.u8();
+        s.linkSkipsLeft = r.u8();
       }
       if (r.ok()) state_ = s;
     }
@@ -331,6 +357,9 @@ bool Store::saveState() {
   w.u32(s.holds.evicted());
   w.u8(s.holds.size());
   for (uint8_t i = 0; i < s.holds.size(); ++i) w.bytes(s.holds.at(i), 16);
+  w.u32(s.holds.checked_);
+  w.u8(s.linkFailStreak);
+  w.u8(s.linkSkipsLeft);
   if (!w.ok()) return false;
   return stateFile_.save(buf, w.size());
 }

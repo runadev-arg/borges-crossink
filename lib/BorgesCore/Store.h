@@ -68,16 +68,26 @@ class HoldSet : public IHoldFilter {
   // True if the set changed. A full set evicts its oldest hold and counts it.
   bool add(const uint8_t md5[16]);
   bool remove(const uint8_t md5[16]);
+  // Checked: the server was asked about this hold and it stays until the book is opened. A
+  // sleep session does not ask again until there is something new to ask about.
+  bool checked(uint8_t index) const { return (checked_ >> index) & 1u; }
+  void markChecked(const uint8_t md5[16]);
+  // False if it was not marked: nothing to save.
+  bool clearChecked(const uint8_t md5[16]);
   uint8_t size() const { return count_; }
   const uint8_t* at(uint8_t i) const { return items_[i]; }
   uint32_t evicted() const { return evicted_; }
-  void clear() { count_ = 0; }
+  void clear() {
+    count_ = 0;
+    checked_ = 0;
+  }
 
  private:
   friend class Store;
   uint8_t items_[kMax][16];
   uint8_t count_ = 0;
   uint32_t evicted_ = 0;
+  uint32_t checked_ = 0;  // Bit i: items_[i]. kMax must fit.
 };
 
 struct SyncState {
@@ -87,6 +97,8 @@ struct SyncState {
   uint8_t failures = 0;
   bool needsRelink = false;      // 401/403: stop automatic sessions, keep the queue.
   uint32_t capsClientHash = 0;   // Non-zero: capabilities verified for this client_version.
+  uint8_t linkFailStreak = 0;    // Automatic sessions in a row that never got a link.
+  uint8_t linkSkipsLeft = 0;     // Automatic attempts to skip before trying the radio again.
   int64_t nextAttemptEpoch = 0;
   int64_t anchorEpoch = 0;       // Last server_time seen.
   int64_t lastSuccessEpoch = 0;
