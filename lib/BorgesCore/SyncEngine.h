@@ -147,6 +147,12 @@ struct FinalizeResult {
   bool annotationsPending = false;  // Limit reached; the rest go at the next finalize.
 };
 
+enum class DisconnectResult : uint8_t {
+  ServerInvalidated,   // The server confirmed that the token no longer works.
+  StillValidOnServer,  // Forgotten here. The server still honours it: say so on the screen.
+  LocalError,          // Could not write to the card: nothing changed.
+};
+
 struct EngineStatus {
   bool paired = false;
   bool needsRelink = false;
@@ -214,6 +220,12 @@ class SyncEngine {
 
   // Latest position another device was seen at, from replayed pulls.
   bool remoteHead(const BookId& book, RemoteHead& out);
+
+  // Forgets this device's credential. There is no revoke route a device may call, so when
+  // online this rotates it into one that expires in a minute, with no grace for the old
+  // one, and throws the new one away: the old token dies at once and the new one is known
+  // to nobody. The queue stays: re-pairing the same account finds it.
+  DisconnectResult disconnect(bool online);
 
   EngineStatus status() const;
   const Diagnostics& diagnostics() const { return store_.state().diag; }

@@ -18,6 +18,8 @@ constexpr const char* kCapabilitiesPath = "/api/sync/v2/capabilities";
 constexpr const char* kHealthPath = "/api/devices/self/health";
 constexpr const char* kRotatePath = "/api/devices/self/credentials/rotate";
 constexpr int64_t kRotateMarginSec = 14 * 24 * 3600;
+constexpr int64_t kShortestCredentialTtlSec = 60;  // normalizeRotationTtlSeconds refuses less.
+constexpr uint32_t kDisconnectBudgetMs = 15000;
 constexpr uint8_t kLinkFailuresBeforeSkipping = 2;
 constexpr uint8_t kLinkSkips = 5;
 constexpr size_t kPullBodyBytes = 448;  // protocol, cursor, focus book, limit and the client block.
@@ -1373,6 +1375,27 @@ void SyncEngine::maybeRotate(SessionReport& report) {
   c.expiresAtEpoch = expires;
   c.renewAfterEpoch = 0;
   store_.saveCredentials();
+}
+
+DisconnectResult SyncEngine::disconnect(bool online) {
+  bool invalidated = false;
+  SessionReport ignored;
+  if (online && startSession(SessionKind::Manual, ignored)) {
+    api_.beginSession(kDisconnectBudgetMs);
+    char body[64];
+    JsonWriter w(body, sizeof(body));
+    w.objectBegin();
+    w.kvInt("expires_in_seconds", kShortestCredentialTtlSec);
+    w.kvInt("grace_seconds", 0);
+    w.objectEnd();
+    const ApiResult r = api_.call("POST", kRotatePath, reinterpret_cast<const uint8_t*>(body), w.size());
+    // Already refused is just as dead.
+    invalidated = r.kind == ApiKind::Ok || (r.kind == ApiKind::HttpError && (r.status == 401 || r.status == 403));
+    scrubFile(fs_, kSpoolPath);
+    api_.endSession();
+  }
+  if (!store_.forgetCredential()) return DisconnectResult::LocalError;
+  return invalidated ? DisconnectResult::ServerInvalidated : DisconnectResult::StillValidOnServer;
 }
 
 // ---------------------------------------------------------------------------------

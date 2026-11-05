@@ -693,6 +693,45 @@ TEST_F(SyncEngineTest, ASleepWithNothingToSendDoesNotSpendALinkSkip) {
   EXPECT_EQ(d.store->state().linkSkipsLeft, 5);
 }
 
+TEST_F(SyncEngineTest, DisconnectOnlineRotatesAwayTheTokenAndKeepsNothingOfTheNewOne) {
+  ASSERT_EQ(d.appendRaw("sin enviar"), Outbox::AppendResult::Ok);
+  d.http.handler = nullptr;
+  d.http.script.push_back(jsonReply(200, "{\"credential\":{\"token\":\"toto_THROWN_AWAY\"},\"grace_seconds\":0}"));
+  EXPECT_EQ(d.engine->disconnect(true), DisconnectResult::ServerInvalidated);
+  ASSERT_EQ(d.http.log.size(), 1u);
+  EXPECT_EQ(d.http.log[0].path, "/api/devices/self/credentials/rotate");
+  EXPECT_EQ(d.http.log[0].headers.at("Authorization"), "Bearer toto_SECRET_TOKEN_VALUE");
+  JsonDocument doc;
+  ASSERT_FALSE(deserializeJson(doc, d.http.log[0].body));
+  EXPECT_EQ(doc["expires_in_seconds"], 60);
+  EXPECT_EQ(doc["grace_seconds"], 0);
+  EXPECT_FALSE(d.store->creds().paired());
+  for (const std::string& path : d.fs.paths()) {
+    EXPECT_EQ(d.fs.content(path).find("toto_THROWN_AWAY"), std::string::npos) << path;
+  }
+  EXPECT_EQ(d.outbox->depth(), 1u) << "re-pairing the same account finds its queue";
+}
+
+TEST_F(SyncEngineTest, DisconnectOfflineSaysTheServerStillHasIt) {
+  EXPECT_EQ(d.engine->disconnect(false), DisconnectResult::StillValidOnServer);
+  EXPECT_TRUE(d.http.log.empty());
+  EXPECT_FALSE(d.store->creds().paired());
+}
+
+TEST_F(SyncEngineTest, DisconnectWithTheServerUnreachableSaysTheServerStillHasIt) {
+  d.http.handler = nullptr;
+  d.http.script.push_back(dropped());
+  d.http.script.push_back(dropped());
+  EXPECT_EQ(d.engine->disconnect(true), DisconnectResult::StillValidOnServer);
+  EXPECT_FALSE(d.store->creds().paired());
+}
+
+TEST_F(SyncEngineTest, DisconnectWithARevokedTokenIsAlreadyDone) {
+  d.http.handler = nullptr;
+  d.http.script.push_back(apiError(401, "device_revoked"));
+  EXPECT_EQ(d.engine->disconnect(true), DisconnectResult::ServerInvalidated);
+}
+
 TEST_F(SyncEngineTest, ServerErrorsBackOffExponentiallyAndSuccessResets) {
   d.http.handler = [](const RecordedRequest&) { return apiError(503, "sync_service_unavailable"); };
   int64_t previous = 0;

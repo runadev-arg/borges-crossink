@@ -139,6 +139,10 @@ posiciones es chica.` · `La ubicación es aproximada: puede caer unos renglones
 - Health: `POST /api/devices/self/health` with `outcome`, `queue_depth`, `error_code`.
 - Rotate after `renew_after` when known. Pairing credentials may have no expiry.
 - 401/`device_revoked`: stop automatic sessions, keep the queue, and show "Volvé a conectar".
+- Disconnect: no route lets a device revoke itself, so online it rotates with
+  `expires_in_seconds:60` and `grace_seconds:0` and discards the result. Offline, the screen says the
+  server still has the credential. Another account on re-pair resets queue, cursor and ledgers; the
+  same account keeps them (by `account.id`, or by `account.username` when no id is sent).
 
 ## 7. Highlights
 
