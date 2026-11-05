@@ -139,6 +139,20 @@ TEST(Events, BookmarksUseTheirOwnEventTypes) {
   EXPECT_EQ(del["event_type"], "bookmark.deleted");
 }
 
+// Found by the contract tests: delete a highlight, highlight the same passage again, and
+// the server kept the tombstone and opened a conflict.
+TEST(Events, AnnotationsCarryABaseRevisionAsKOReaderDoes) {
+  ClipKey key;
+  ClipDetail detail;
+  detail.text = "t";
+  detail.page = 1;
+  uint8_t syncId[16] = {1};
+  auto created = parse(render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
+  EXPECT_STREQ(created["payload"]["base_revision"] | "", "0");
+  auto deleted = parse(render([&](JsonWriter& w) { events::writeAnnotationDeleted(w, Device::bookRef(), exactTime(), false, syncId); }));
+  EXPECT_STREQ(deleted["payload"]["base_revision"] | "", "0");
+}
+
 TEST(Events, AnnotationThatCannotBeValidIsRefused) {
   ClipKey key;
   ClipDetail noText;

@@ -46,6 +46,12 @@ void writeBook(JsonWriter& w, const BookRef& book) {
   w.objectEnd();
 }
 
+// As KOReader does before it has heard otherwise. Without it, highlighting a passage
+// again after deleting it reads as a legacy client resurrecting a tombstone: the server
+// opens a conflict and the entry stays gone. With it, the server follows this device's
+// own chain of events, and still compares branches if another device touched it since.
+void writeBaseRevision(JsonWriter& w) { w.kv("base_revision", "0"); }
+
 bool hasNonSpace(const char* text) {
   if (!text) return false;
   for (const char* p = text; *p; ++p) {
@@ -103,6 +109,7 @@ bool writeAnnotation(JsonWriter& w, const BookRef& book, const EventTime& time, 
     w.key("percentage");
     w.valuePercent(d.pctMicro > 100000000u ? 100000000u : d.pctMicro);
   }
+  writeBaseRevision(w);
   writeBook(w, book);
   w.objectEnd();
   return true;
@@ -116,6 +123,7 @@ void writeAnnotationDeleted(JsonWriter& w, const BookRef& book, const EventTime&
   w.objectBegin();
   w.key("sync_id");
   w.valueUuid(syncId);
+  writeBaseRevision(w);
   writeBook(w, book);
   w.objectEnd();
 }
