@@ -873,10 +873,8 @@ class Device {
   bool boot() {
     heap::Scope scope;
     if (!store_.begin()) return false;
-    if (!opt_.server.empty() && opt_.server != store_.creds().baseUrl) {
-      copyText(store_.creds().baseUrl, sizeof(store_.creds().baseUrl), opt_.server.c_str());
-      store_.saveCredentials();
-    }
+    // In RAM, as the simulator does: nothing on the card can move a real device.
+    if (!opt_.server.empty()) copyText(store_.creds().baseUrl, sizeof(store_.creds().baseUrl), opt_.server.c_str());
     engine_ = std::unique_ptr<SyncEngine>(new (std::nothrow) SyncEngine(store_, outbox_, fs_, http_, clock_, random_, cancel_, config_));
     return engine_ && engine_->begin();
   }

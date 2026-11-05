@@ -44,6 +44,8 @@ struct PendingPairing {
 };
 
 struct Credentials {
+  // Always the compiled-in host when begin() returns: nothing on the card can point this
+  // device, and its token, at another server. Only test builds change it, in RAM.
   char baseUrl[96] = {0};
   char deviceId[40] = {0};
   char token[128] = {0};

@@ -315,7 +315,7 @@ TEST(LegacyImport, ReadsThePreviousFirmwaresCredentialOnce) {
     EXPECT_TRUE(store.creds().paired());
     EXPECT_STREQ(store.creds().token, kLegacyToken);
     EXPECT_STREQ(store.creds().deviceId, kSelfId);
-    EXPECT_STREQ(store.creds().baseUrl, "https://borges.runadev.com");
+    EXPECT_STREQ(store.creds().baseUrl, kDefaultBaseUrl);
     EXPECT_STREQ(store.creds().serverIp, "104.21.0.166");
     EXPECT_STREQ(store.creds().serverIpHost, "borges.runadev.com");
   }
@@ -375,9 +375,25 @@ TEST(LegacyImport, HostileFilesDoNothing) {
   }
 }
 
-TEST(LegacyImport, ABadBaseUrlKeepsTheDefault) {
+TEST(Store, ABaseUrlOnTheCardCannotMoveTheServer) {
   MemFs fs;
-  fs.put(kLegacyCredentialPath, std::string("{\"baseUrl\":\"http://evil.example\",\"deviceId\":\"") + kSelfId + "\",\"token\":\"t\"}");
+  {
+    Store store(fs, testKey(), 6);
+    ASSERT_TRUE(store.begin());
+    copyText(store.creds().baseUrl, sizeof(store.creds().baseUrl), "https://borges.runadev.com@evil.example");
+    copyText(store.creds().deviceId, sizeof(store.creds().deviceId), kSelfId);
+    copyText(store.creds().token, sizeof(store.creds().token), "t");
+    ASSERT_TRUE(store.saveCredentials());
+  }
+  Store again(fs, testKey(), 6);
+  ASSERT_TRUE(again.begin());
+  EXPECT_TRUE(again.creds().paired());
+  EXPECT_STREQ(again.creds().baseUrl, kDefaultBaseUrl);
+}
+
+TEST(LegacyImport, ABaseUrlInTheOldFileIsNeverBelieved) {
+  MemFs fs;
+  fs.put(kLegacyCredentialPath, std::string("{\"baseUrl\":\"https://evil.example\",\"deviceId\":\"") + kSelfId + "\",\"token\":\"t\"}");
   Store store(fs, testKey(), 6);
   ASSERT_TRUE(store.begin());
   EXPECT_TRUE(store.creds().paired());

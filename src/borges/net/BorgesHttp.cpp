@@ -45,7 +45,7 @@ bool hostOf(const char* url, char* out, const size_t cap) {
   if (start == nullptr) return false;
   start += 3;
   size_t n = strcspn(start, ":/?#");
-  if (n == 0 || n >= cap) return false;
+  if (n == 0 || n >= cap || memchr(start, '@', n) != nullptr) return false;  // No userinfo: it is another host.
   memcpy(out, start, n);
   out[n] = '\0';
   return true;
@@ -57,6 +57,10 @@ void copyHeader(const freeink::SecureHttpClient& http, const char* name, char* o
   out[cap - 1] = '\0';
 }
 
+}  // namespace
+
+namespace {
+constexpr uint32_t kMinBlockForRequest = 4 * 1024;
 }  // namespace
 
 BorgesHttp::BorgesHttp(IFs& fs, BorgesDns& dns, BorgesClock* clock, const char* userAgent)
@@ -86,6 +90,9 @@ void BorgesHttp::perform(const HttpRequest& request, IHttpSink& sink, ICancel& a
   char host[64];
   if (!hostOf(request.url, host, sizeof(host))) return finish(TransportStage::Connect, kCodeBadUrl);
   if (abort.cancelled()) return finish(TransportStage::Aborted, 0);
+
+  // The URL, the headers and the response strings below abort if they cannot allocate.
+  if (ESP.getMaxAllocHeap() < kMinBlockForRequest) return finish(TransportStage::Connect, kCodeLowMemory);
 
   http_.setTrustAnchors(trustAnchors(), kTrustAnchorCount);
   http_.setUserAgent(userAgent_);

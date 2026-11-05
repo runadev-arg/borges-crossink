@@ -150,7 +150,8 @@ bool Store::begin() {
   if (credFile_.load(buf, sizeof(buf), len)) {
     ByteReader r(buf, len);
     if (r.u8() == kCredVersion) {
-      r.str(creds_.baseUrl, sizeof(creds_.baseUrl));
+      char storedUrl[sizeof(creds_.baseUrl)];  // Read past, never believed.
+      r.str(storedUrl, sizeof(storedUrl));
       r.str(creds_.deviceId, sizeof(creds_.deviceId));
       const size_t tokenLen = r.str(creds_.token, sizeof(creds_.token));
       r.str(creds_.accountId, sizeof(creds_.accountId));
@@ -177,7 +178,7 @@ bool Store::begin() {
   // An unreadable card is not an empty one: starting blank here would look unpaired,
   // and later writes could lose to the slots that could not be read.
   if (credFile_.ioError()) return false;
-  if (!haveCreds) copyText(creds_.baseUrl, sizeof(creds_.baseUrl), kDefaultBaseUrl);
+  copyText(creds_.baseUrl, sizeof(creds_.baseUrl), kDefaultBaseUrl);
 
   if (stateFile_.load(buf, sizeof(buf), len)) {
     ByteReader r(buf, len);
@@ -490,16 +491,13 @@ bool Store::importLegacy() {
   if (!scan.enterObject()) return false;
 
   char key[32];
-  char baseUrl[sizeof(creds_.baseUrl)] = {0};
   char deviceId[sizeof(creds_.deviceId)] = {0};
   char tokenObf[256] = {0};
   char tokenPlain[sizeof(creds_.token)] = {0};
   char serverIp[sizeof(creds_.serverIp)] = {0};
   char serverIpHost[sizeof(creds_.serverIpHost)] = {0};
   while (scan.nextMember(key, sizeof(key))) {
-    if (strcmp(key, "baseUrl") == 0) {
-      scan.readString(baseUrl, sizeof(baseUrl));
-    } else if (strcmp(key, "deviceId") == 0) {
+    if (strcmp(key, "deviceId") == 0) {
       scan.readString(deviceId, sizeof(deviceId));
     } else if (strcmp(key, "token_obf") == 0) {
       scan.readString(tokenObf, sizeof(tokenObf));
@@ -531,11 +529,6 @@ bool Store::importLegacy() {
     if (*p < 0x21 || *p > 0x7E) return false;
   }
 
-  size_t urlLen = strlen(baseUrl);
-  while (urlLen > 0 && baseUrl[urlLen - 1] == '/') baseUrl[--urlLen] = '\0';
-  if (strncmp(baseUrl, "https://", 8) == 0 && urlLen > 8) {
-    copyText(creds_.baseUrl, sizeof(creds_.baseUrl), baseUrl);
-  }
   copyText(creds_.deviceId, sizeof(creds_.deviceId), deviceId);
   copyText(creds_.token, sizeof(creds_.token), token);
   memset(token, 0, sizeof(token));
