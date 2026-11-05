@@ -90,7 +90,6 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
-#include "borges/BorgesGlue.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/boot_sleep/ImageFolderIndex.h"
@@ -104,6 +103,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "activities/settings/KOReaderSettingsActivity.h"
 #include "activities/settings/OtaUpdateActivity.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
+#include "borges/BorgesGlue.h"
 #include "components/UITheme.h"
 #include "components/icons/tablerFilledIcons.h"
 #include "fontIds.h"
@@ -338,6 +338,9 @@ void logMemoryStats(const char* phase) {
 // Retain only a successfully reconciled Library across real deep-sleep wakes.
 // Consume the pair on every boot, including resets that preserve RTC memory.
 RTC_NOINIT_ATTR library::ScanSleepToken libraryScanSleepToken;
+// Borges: a flush boot starts with a reset that consumes the token above. This one carries the
+// answer across it, so the next Library visit does not rescan the whole card.
+RTC_NOINIT_ATTR library::ScanSleepToken borgesFlushScanToken;
 
 // Definitions for SilentRestart.h. RTC_NOINIT survives ESP.restart() but not power loss.
 RTC_NOINIT_ATTR uint32_t silentRebootMagic;
@@ -376,6 +379,8 @@ using BootResume = SleepWakePolicy::Resume;
 static bool deepSleepInProgress = false;
 // Borges: a flush out of a network boot must not bracket itself again.
 static bool bootedForNetwork = false;
+// Borges: its screens run on the small network stack. Only sleep may leave them by shortcut.
+static bool bootedForBorges = false;
 
 static void restartWithSilentToken() {
   // Capture the live state for every destination without changing wake preferences.
@@ -601,6 +606,10 @@ void notifyQuickLockChanged() {
 
 bool handleGlobalPowerButtonAction(const CrossPointSettings::SHORT_PWRBTN action,
                                    const QuickLockTrigger quickLockTrigger) {
+  if (bootedForBorges && action != CrossPointSettings::SHORT_PWRBTN::SLEEP &&
+      action != CrossPointSettings::SHORT_PWRBTN::SLEEP_ONLY && action != CrossPointSettings::SHORT_PWRBTN::WAKE_ONLY) {
+    return false;  // Not handled, and nothing else happens: this also runs with no button pressed.
+  }
   switch (action) {
     case CrossPointSettings::SHORT_PWRBTN::SLEEP:
     case CrossPointSettings::SHORT_PWRBTN::SLEEP_ONLY:
@@ -1093,6 +1102,7 @@ void mirrorWakeShortPressToNvs() {
 // nothing a flush left half-done can hold it back.
 void finishDeepSleepAfterBorgesFlush() {
   deepSleepInProgress = true;
+  libraryScanSleepToken.save(borgesFlushScanToken.consume(true));
   Storage.shutdown();
   putTiltSensorToSleepForDeepSleep();
   display.deepSleep();
@@ -1132,15 +1142,6 @@ void enterDeepSleep(bool fromTimeout) {
     }
   }
 
-  // Borges: the sleep image is on the glass and everything is saved. Flush in a clean
-  // boot; finishDeepSleepAfterBorgesFlush() completes this sleep from there.
-  if (borges::glue::shouldFlushBeforeSleep(powerManager.getBatteryPercentage(), bootedForNetwork)) {
-    silentRebootTarget = static_cast<uint32_t>(NetworkBootTarget::BORGES);
-    silentRebootPayload = static_cast<uint32_t>(borges::glue::NetPayload::SleepFlush);
-    silentRebootMagic = SILENT_REBOOT_MAGIC;
-    restartWithSilentToken();
-  }
-
   if (halClock.isAvailable() && SETTINGS.shouldTrackReadingStats() && SETTINGS.autoBackupStats != 0) {
     ReadingStatsDateTime now;
     if (getCurrentLocalReadingStatsDateTime(now) && !backupGlobalStats(false)) {
@@ -1154,6 +1155,17 @@ void enterDeepSleep(bool fromTimeout) {
   // All sleep-time file writes are complete. Stop SDMMC before the power path
   // cuts peripheral rails and isolates the bus pads; SPI boards are a no-op.
   libraryScanSleepToken.save(!library::libraryIndexNeedsRefresh());
+
+  // Borges: the sleep image is on the glass and everything above is done. Flush in a clean
+  // boot; finishDeepSleepAfterBorgesFlush() completes this sleep from there.
+  if (borges::glue::shouldFlushBeforeSleep(powerManager.getBatteryPercentage(), bootedForNetwork)) {
+    borgesFlushScanToken.save(!library::libraryIndexNeedsRefresh());
+    silentRebootTarget = static_cast<uint32_t>(NetworkBootTarget::BORGES);
+    silentRebootPayload = static_cast<uint32_t>(borges::glue::NetPayload::SleepFlush);
+    silentRebootMagic = SILENT_REBOOT_MAGIC;
+    restartWithSilentToken();
+  }
+
   Storage.shutdown();
 
   putTiltSensorToSleepForDeepSleep();
@@ -1389,8 +1401,12 @@ void setup() {
     snapshotPayload = static_cast<uint32_t>(borges::glue::NetPayload::OpenBook);
     isNetworkResume = true;
     useReaderRenderStack = FREEINK_MCU_S3;
+    // The guard every other wake takes below. The reader's clean exit clears it.
+    APP_STATE.readerActivityLoadCount++;
+    APP_STATE.saveToFile();
   }
   bootedForNetwork = isNetworkResume;
+  bootedForBorges = isNetworkResume && snapshotTarget == static_cast<uint32_t>(NetworkBootTarget::BORGES);
   // Normal boot store deferral adapted from Sichroteph/YACP commit
   // 20af8aee8d3e1d560456753b08d1f52e5488621f (MIT). Accessors load these
   // stores when Home, reader bookkeeping, or sync actually need them.
@@ -1620,10 +1636,11 @@ void setup() {
   } else {
     // Clear app state to avoid getting into a boot loop if the epub doesn't load
     const auto path = APP_STATE.openEpubPath;
-    borges::glue::noteOpenedWithoutSession(path);
     APP_STATE.openEpubPath = "";
     APP_STATE.readerActivityLoadCount++;
     APP_STATE.saveToFile();
+    // After the guard: it reads the book, and a crash here must not repeat at every wake.
+    borges::glue::noteOpenedWithoutSession(path);
     activityManager.goToReader(path, false, allowFastInitialReaderRefresh);
   }
 

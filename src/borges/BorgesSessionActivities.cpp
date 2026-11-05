@@ -207,6 +207,7 @@ void BorgesOpenActivity::render(RenderLock&&) {
   const int bodyLine = renderer.getLineHeight(UI_10_FONT_ID);
   const int block = titleLine * 2 + kBlockGap + bodyLine;
   int y = area.y + std::max(0, (area.height - block) / 2 - titleLine);
+  APP_STATE.readerActivityLoadCount = 0;  // Only sleep exits here, and it is not a crash.
   y = drawWrappedCentered(renderer, area, UI_12_FONT_ID, y, title_.c_str(), 3, EpdFontFamily::BOLD);
   y += kBlockGap;
   drawWrappedCentered(renderer, area, UI_10_FONT_ID, y, tr(STR_BORGES_LOOKING), 2);
@@ -261,6 +262,7 @@ void BorgesResumeActivity::drainMain(void* self) {
   if (stack.bringUp(kChoiceLinkBudgetMs) == net::LinkResult::Connected) stack.engine.runSleepSession();
   stack.bringDown();
 }
+  APP_STATE.readerActivityLoadCount = 0;  // Only sleep exits here, and it is not a crash.
 
 void BorgesResumeActivity::loop() {
   switch (state_) {
