@@ -30,6 +30,7 @@ constexpr uint32_t kOpenBudgetMs = 12000;
 constexpr uint32_t kOpenLinkBudgetMs = 9000;
 constexpr uint32_t kOpenHardDeadlineMs = kOpenBudgetMs + 2000;
 constexpr uint32_t kStayBudgetMs = 5000;
+constexpr uint32_t kChoiceLinkBudgetMs = 3000;
 constexpr uint32_t kSleepBudgetMs = 15000;
 constexpr uint32_t kSleepLinkBudgetMs = 6000;
 // One uninterruptible TCP connect, about 3.5 s, on top of the budget.
@@ -225,8 +226,18 @@ void BorgesResumeActivity::onExit() {
 void BorgesResumeActivity::stayMain(void* self) {
   auto* activity = static_cast<BorgesResumeActivity*>(self);
   BorgesStack& stack = *activity->stack_;
-  const Position& here = activity->decision_->local;
-  stack.engine.applyChoice(*activity->decision_, ResumeChoice::StayHere, here, here, stack.link.connected());
+  const Position& here = *activity->stayAt_;
+  // The radio may have gone down while the prompt waited, or to map the page. Once more,
+  // briefly: this device becoming the head is what the reader just asked for. Without a
+  // link the choice is still stored, and the next session sends it.
+  const bool online = stack.bringUp(kChoiceLinkBudgetMs) == net::LinkResult::Connected;
+  stack.engine.applyChoice(*activity->decision_, ResumeChoice::StayHere, here, here, online);
+  stack.bringDown();
+}
+
+void BorgesResumeActivity::drainMain(void* self) {
+  BorgesStack& stack = *static_cast<BorgesResumeActivity*>(self)->stack_;
+  if (stack.bringUp(kChoiceLinkBudgetMs) == net::LinkResult::Connected) stack.engine.runSleepSession();
   stack.bringDown();
 }
 
@@ -239,7 +250,7 @@ void BorgesResumeActivity::loop() {
       }
       return;
     case State::Working:
-      if (mappedInput.wasAnyPressed() || worker_.finished()) leave(worker_.finished());
+      if (mappedInput.wasAnyPressed() || worker_.finished()) leave(choiceStored_ || worker_.finished());
       return;
     case State::Choosing:
       break;
@@ -257,8 +268,7 @@ void BorgesResumeActivity::loop() {
     if (focus_ == 0) {
       goThere();
     } else {
-      stack_->cancel.arm(kStayBudgetMs);
-      if (!worker_.start(&BorgesResumeActivity::stayMain, this)) leave(false);
+      stayHere();
     }
     return;
   }
@@ -344,7 +354,11 @@ void BorgesResumeActivity::goThere() {
   // Wi-Fi off before the book loads: this is the most memory the mapping can have.
   stack_->bringDown();
   if (applyJump()) {
-    leave(true);
+    // The place is on disk and the choice stored. A short try at sending it now, as the
+    // plugin does; any button goes on, and the next session sends it otherwise.
+    choiceStored_ = true;
+    stack_->cancel.arm(kStayBudgetMs);
+    if (!worker_.start(&BorgesResumeActivity::drainMain, this)) leave(true);
     return;
   }
   state_ = State::CouldNotLocate;
@@ -361,6 +375,50 @@ void BorgesResumeActivity::leave(const bool success) {
   }
   if (!worker_.waitForExit(1000)) {
     silentRestart();
+void BorgesResumeActivity::stayHere() {
+  stayAt_ = makeUniqueNoThrow<Position>(decision_->local);
+  auto finalized = makeUniqueNoThrow<Position>();
+  if (!stayAt_ || !finalized) {
+    leave(false);
+    return;
+  }
+  const bool hasFinalized = stack_->engine.lastFinalized(decision_->book, *finalized);
+  if (chooseStaySource(hasFinalized, *finalized, decision_->local) == StaySource::Ledger) {
+    *stayAt_ = *finalized;
+  } else {
+    // Wi-Fi off before the book loads, as for a jump.
+    stack_->bringDown();
+    mapSavedPage(*stayAt_);
+  }
+  stack_->cancel.arm(kStayBudgetMs);
+  if (!worker_.start(&BorgesResumeActivity::stayMain, this)) {
+    stack_->engine.applyChoice(*decision_, ResumeChoice::StayHere, *stayAt_, *stayAt_, false);
+    leave(false);
+  }
+}
+
+void BorgesResumeActivity::mapSavedPage(Position& out) {
+  auto epub = std::make_shared<Epub>(path_, "/.crosspoint");
+  epub->setupCacheDir();
+  if (!epub->load(true, true, Epub::XLocationLoadMode::Immediate, true)) {
+    LOG_ERR("BORGES", "Could not load the book to place this reader");
+    return;
+  }
+  EpubReaderUtils::Progress progress;
+  if (!EpubReaderUtils::loadProgress(*epub, progress, "BORGES")) return;  // Nothing saved: no position to send.
+  CrossPointPosition local = {progress.spineIndex, progress.pageNumber,
+                              progress.hasPageCount ? std::max(1, progress.pageCount) : 1};
+  if (progress.hasVisibleTextOffset) {
+    local.visibleTextOffset = progress.visibleTextOffset;
+    local.hasVisibleTextOffset = true;
+  }
+  const KOReaderPosition mapped = ProgressMapper::toKOReader(epub, local);
+  if (!mapped.valid) return;
+  out.setPercent(mapped.percentage * 100.0);
+  out.xpointer[0] = '\0';
+  if (mapped.xpath.size() < kMaxXpointer) strncpy(out.xpointer, mapped.xpath.c_str(), kMaxXpointer - 1);
+}
+
     return;
   }
   if (stack_) stack_->bringDown();

@@ -200,6 +200,15 @@ bool planJump(const bool xpointerUsable, const char* xpointer, const bool hasPct
   return true;
 }
 
+StaySource chooseStaySource(const bool hasFinalized, const Position& finalized, const Position& local) {
+  if (!hasFinalized || !finalized.hasPct || finalized.xpointer[0] == '\0' || !local.hasPct) {
+    return StaySource::MapSavedPage;
+  }
+  const uint32_t delta =
+      finalized.pctMicro > local.pctMicro ? finalized.pctMicro - local.pctMicro : local.pctMicro - finalized.pctMicro;
+  return delta <= kStayLedgerToleranceMicro ? StaySource::Ledger : StaySource::MapSavedPage;
+}
+
 bool ClipTimes::append(const char* path, const ClipStamp& stamp) {
   uint8_t rec[kStampBytes];
   rec[0] = static_cast<uint8_t>(stamp.spine);

@@ -74,19 +74,25 @@ class BorgesResumeActivity final : public Activity {
  private:
   enum class State : uint8_t { Choosing, Working, CouldNotLocate };
   static void stayMain(void* self);
+  static void drainMain(void* self);
   void goThere();
+  void stayHere();
   bool applyJump();
+  // What the saved page maps to, for a book the ledger cannot answer for. Radio already off.
+  void mapSavedPage(Position& out);
   void leave(bool success);
 
   std::unique_ptr<BorgesStack> stack_;
   std::unique_ptr<ResumeDecision> decision_;
   std::unique_ptr<Position> before_;
+  std::unique_ptr<Position> stayAt_;
   std::string path_;
   std::string title_;
   Return back_;
   State state_ = State::Choosing;
   int focus_ = 0;
   bool firstPaint_ = true;
+  bool choiceStored_ = false;
   unsigned long noticeUntil_ = 0;
   ButtonNavigator navigator_;
   SessionWorker worker_;

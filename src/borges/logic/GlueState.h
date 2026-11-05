@@ -13,6 +13,7 @@
 #include <cstdint>
 
 #include "Ports.h"
+#include "Types.h"
 
 namespace borges {
 namespace glue {
@@ -112,6 +113,13 @@ struct JumpRequest {
   float fraction = 0;
 };
 bool planJump(bool xpointerUsable, const char* xpointer, bool hasPct, uint32_t pctMicro, JumpRequest& out);
+
+// Where "stay here" takes its position from. The ledger already holds the xpointer of the
+// last place this device published: if the book has not moved since, reading it costs no
+// book load and keeps the radio up. Anything else has to be mapped from the saved page.
+enum class StaySource : uint8_t { Ledger, MapSavedPage };
+constexpr uint32_t kStayLedgerToleranceMicro = 1000000;  // 1%: a page, on a long chapter.
+StaySource chooseStaySource(bool hasFinalized, const Position& finalized, const Position& local);
 
 // Wall time of a clipping, kept next to the book so the clip file format stays as it is.
 // A clip is identified by its chapter and the uptime stamp CrossInk already stores.
