@@ -18,6 +18,7 @@
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "net/NetFailure.h"
 #include "util/QrUtils.h"
 
 namespace borges {
@@ -28,6 +29,7 @@ namespace {
 constexpr uint32_t kSyncLinkBudgetMs = 20000;
 constexpr uint32_t kPairLinkBudgetMs = 20000;
 constexpr uint32_t kManualBudgetMs = 120000;
+constexpr uint32_t kDisconnectBudgetMs = 30000;
 constexpr unsigned long kResultOkMs = 1500;
 constexpr unsigned long kResultErrorMs = 3000;
 constexpr int kMaxCodeRenewals = 3;
@@ -42,6 +44,23 @@ Rect contentArea(const GfxRenderer& renderer, const int top) {
 
 }  // namespace
 
+struct BorgesActivity::Shared {
+  std::unique_ptr<BorgesStack> stack_;
+  std::unique_ptr<PairingFlow> pairing_;
+  std::unique_ptr<ResumeDecision> decision_;
+  std::unique_ptr<BookRef> bookRef_;
+  std::unique_ptr<Position> local_;
+  std::string bookTitle_;
+  std::string bookPath_;
+  // Written by the session task, read by the main task.
+  std::atomic<View> requestedView_{View::Status};
+  std::atomic<bool> viewChanged_{false};
+  std::atomic<StrId> resultText_{StrId::STR_NONE_OPT};
+  std::atomic<bool> resultOk_{false};
+  std::atomic<bool> needsChoice_{false};
+  bool askOtherDevices_ = false;
+};
+
 BorgesActivity::BorgesActivity(GfxRenderer& renderer, MappedInputManager& input, const bool networkBoot,
                                const NetPayload start)
     : Activity("Borges", renderer, input), networkBoot_(networkBoot), start_(start) {}
@@ -50,9 +69,21 @@ BorgesActivity::~BorgesActivity() = default;
 
 void BorgesActivity::onEnter() {
   Activity::onEnter();
-  stack_ = makeStack();
-  stackOk_ = stack_ && stack_->openStore() && stack_->openEngine();
-  if (start_ == NetPayload::ManualFromReader) ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
+  s_ = makeUniqueNoThrow<Shared>();
+  if (!s_) {
+    LOG_ERR("BORGES", "OOM: screen state");
+    if (networkBoot_) {
+      silentRestart();
+    } else {
+      finish();
+    }
+    return;
+  }
+  s_->stack_ = makeStack();
+  stackOk_ = s_->stack_ && s_->stack_->openStore() && s_->stack_->openEngine();
+  if (start_ == NetPayload::ManualFromReader || start_ == NetPayload::OtherDevice) {
+    ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
+  }
   buildRows();
   fullPaint_ = true;
   if (networkBoot_ && stackOk_) {
@@ -60,8 +91,13 @@ void BorgesActivity::onEnter() {
       startPair();
       return;
     }
-    if (start_ == NetPayload::ManualFromHome || start_ == NetPayload::ManualFromReader) {
+    if (start_ == NetPayload::ManualFromHome || start_ == NetPayload::ManualFromReader ||
+        start_ == NetPayload::OtherDevice) {
       startSync();
+      return;
+    }
+    if (start_ == NetPayload::Disconnect) {
+      startDisconnect();
       return;
     }
   }
@@ -69,12 +105,12 @@ void BorgesActivity::onEnter() {
 }
 
 void BorgesActivity::onExit() {
-  if (stack_) stack_->cancel.request();
+  if (s_ && s_->stack_) s_->stack_->cancel.request();
   if (!worker_.waitForExit(4000)) {
-    stack_.release();  // Only on the way to deep sleep, which ends every task.
-    pairing_.release();
-  } else if (stack_) {
-    stack_->bringDown();
+    // Only on the way to deep sleep, which ends every task.
+    (void)s_.release();
+  } else if (s_ && s_->stack_) {
+    s_->stack_->bringDown();
   }
   Activity::onExit();
 }
@@ -82,8 +118,8 @@ void BorgesActivity::onExit() {
 void BorgesActivity::buildRows() {
   rows_.clear();
   rows_.reserve(6);
-  const bool paired = stackOk_ && stack_->store.creds().paired();
-  const bool relink = paired && stack_->store.state().needsRelink;
+  const bool paired = stackOk_ && s_->stack_->store.creds().paired();
+  const bool relink = paired && s_->stack_->store.state().needsRelink;
   if (!paired || relink) rows_.push_back(Row::Connect);
   if (paired) {
     rows_.push_back(Row::SyncNow);
@@ -96,7 +132,7 @@ void BorgesActivity::buildRows() {
 }
 
 void BorgesActivity::savePrefs() {
-  if (!stack_->glueStore.save(stack_->glue)) LOG_ERR("BORGES", "Could not save preferences");
+  if (!s_->stack_->glueStore.save(s_->stack_->glue)) LOG_ERR("BORGES", "Could not save preferences");
 }
 
 void BorgesActivity::setView(const View view) {
@@ -123,8 +159,12 @@ void BorgesActivity::activate(const Row row) {
       return;
     case Row::Library:
       if (networkBoot_) {
-        stack_->bringDown();
-        stack_.reset();
+        {
+          RenderLock lock(*this);
+          s_->stack_->bringDown();
+          s_->stack_.reset();
+          stackOk_ = false;
+        }
         auto library = makeUniqueNoThrow<BorgesLibraryActivity>(renderer, mappedInput);
         if (library) {
           activityManager.replaceActivity(std::move(library));
@@ -136,28 +176,28 @@ void BorgesActivity::activate(const Row row) {
       }
       return;
     case Row::OnOpen:
-      stack_->glue.autoOnOpen = !stack_->glue.autoOnOpen;
+      s_->stack_->glue.autoOnOpen = !s_->stack_->glue.autoOnOpen;
       savePrefs();
       requestUpdate();
       return;
     case Row::OnSleep:
-      stack_->glue.syncOnSleep = !stack_->glue.syncOnSleep;
+      s_->stack_->glue.syncOnSleep = !s_->stack_->glue.syncOnSleep;
       savePrefs();
       requestUpdate();
       return;
     case Row::Disconnect:
-      startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_BORGES_DISCONNECT),
-                                                                    tr(STR_BORGES_DISCONNECT_CONFIRM)),
-                             [this](const ActivityResult& result) {
-                               if (!result.isCancelled) {
-                                 // The credential goes, and only it: what is queued waits for a new pairing.
-                                 if (!stack_->store.forgetCredential())
-                                   LOG_ERR("BORGES", "Could not forget the credential");
-                                 focus_ = 0;
-                                 buildRows();
-                               }
-                               fullPaint_ = true;
-                             });
+      startActivityForResult(
+          std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_BORGES_DISCONNECT),
+                                                 tr(STR_BORGES_DISCONNECT_CONFIRM)),
+          [this](const ActivityResult& result) {
+            fullPaint_ = true;
+            if (result.isCancelled) return;
+            if (networkBoot_) {
+              startDisconnect();
+            } else {
+              activityManager.replaceActivity(makeHandoff(renderer, mappedInput, NetPayload::Disconnect));
+            }
+          });
       return;
   }
 }
@@ -167,7 +207,7 @@ void BorgesActivity::activate(const Row row) {
 // ---------------------------------------------------------------------------------
 
 void BorgesActivity::startSync() {
-  if (!hasSavedWifi() && !stack_->link.connected()) {
+  if (!hasSavedWifi() && !s_->stack_->link.connected()) {
     // First network ever. The picker owns the connection and the password.
     startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, true, true),
                            [this](const ActivityResult& result) {
@@ -179,57 +219,100 @@ void BorgesActivity::startSync() {
                            });
     return;
   }
-  stack_->cancel.arm(kManualBudgetMs);
-  if (start_ == NetPayload::ManualFromReader && !APP_STATE.openEpubPath.empty()) {
-    bookPath_ = APP_STATE.openEpubPath;
-    bookTitle_ = bookTitleFor(bookPath_);
-    bookRef_ = makeUniqueNoThrow<BookRef>();
-    local_ = makeUniqueNoThrow<Position>();
-    decision_ = makeUniqueNoThrow<ResumeDecision>();
+  s_->stack_->cancel.arm(kManualBudgetMs);
+  s_->askOtherDevices_ = start_ == NetPayload::OtherDevice;
+  if ((start_ == NetPayload::ManualFromReader || start_ == NetPayload::OtherDevice) &&
+      !APP_STATE.openEpubPath.empty()) {
+    s_->bookPath_ = APP_STATE.openEpubPath;
+    s_->bookTitle_ = bookTitleFor(s_->bookPath_);
+    s_->bookRef_ = makeUniqueNoThrow<BookRef>();
+    s_->local_ = makeUniqueNoThrow<Position>();
+    s_->decision_ = makeUniqueNoThrow<ResumeDecision>();
   }
   setView(View::Syncing);
-  if (!worker_.start(&BorgesActivity::syncMain, this)) {
-    resultText_.store(StrId::STR_BORGES_ERR_LOCAL);
-    resultOk_.store(false);
+  if (!worker_.start(&BorgesActivity::syncMain, s_.get())) {
+    s_->resultText_.store(StrId::STR_BORGES_ERR_LOCAL);
+    s_->resultOk_.store(false);
     setView(View::SyncResult);
     autoLeaveAt_ = millis() + kResultErrorMs;
   }
 }
 
-void BorgesActivity::syncMain(void* self) {
-  auto* activity = static_cast<BorgesActivity*>(self);
-  BorgesStack& stack = *activity->stack_;
-  const auto finish = [activity](const StrId text, const bool ok) {
-    activity->resultText_.store(text);
-    activity->resultOk_.store(ok);
-    activity->requestedView_.store(View::SyncResult);
-    activity->viewChanged_.store(true, std::memory_order_release);
+void BorgesActivity::syncMain(void* shared) {
+  auto* s = static_cast<BorgesActivity::Shared*>(shared);
+  BorgesStack& stack = *s->stack_;
+  const auto finish = [s](const StrId text, const bool ok) {
+    s->resultText_.store(text);
+    s->resultOk_.store(ok);
+    s->requestedView_.store(View::SyncResult);
+    s->viewChanged_.store(true, std::memory_order_release);
   };
 
+  // A person pressing sync is what lets a reader left in a drawer accept a much later time.
+  stack.clock.allowLongGap();
   const net::LinkResult link = stack.bringUp(kSyncLinkBudgetMs);
   if (link != net::LinkResult::Connected) {
     finish(describeLink(link), false);
     return;
   }
 
-  const bool withBook = activity->bookRef_ && activity->local_ && activity->decision_ &&
-                        partialMd5(stack.fs, activity->bookPath_.c_str(), activity->bookRef_->id);
+  const bool withBook =
+      s->bookRef_ && s->local_ && s->decision_ && partialMd5(stack.fs, s->bookPath_.c_str(), s->bookRef_->id);
   if (withBook) {
-    activity->bookRef_->title = activity->bookTitle_.c_str();
-    const float percent = localPercentFor(activity->bookPath_);
-    if (percent >= 0) activity->local_->setPercent(percent);
+    s->bookRef_->title = s->bookTitle_.c_str();
+    const float percent = localPercentFor(s->bookPath_);
+    if (percent >= 0) s->local_->setPercent(percent);
   }
+  const bool askOthers = withBook && s->askOtherDevices_;
   const SessionReport report =
-      withBook
-          ? stack.engine.runManualSession(activity->bookRef_.get(), activity->local_.get(), activity->decision_.get())
-          : stack.engine.runManualSession(nullptr, nullptr, nullptr);
+      askOthers  ? stack.engine.runPositionsSession(*s->bookRef_, *s->local_, *s->decision_)
+      : withBook ? stack.engine.runManualSession(s->bookRef_.get(), s->local_.get(), s->decision_.get())
+                 : stack.engine.runManualSession(nullptr, nullptr, nullptr);
   if (report.outcome == SessionOutcome::AwaitingChoice) {
-    activity->needsChoice_.store(true);
-    activity->viewChanged_.store(true, std::memory_order_release);
+    s->needsChoice_.store(true);
+    s->viewChanged_.store(true, std::memory_order_release);
     return;
   }
   stack.bringDown();
-  finish(describeOutcome(report.outcome), report.outcome == SessionOutcome::Ok);
+  if (askOthers && report.outcome == SessionOutcome::Ok) {
+    finish(StrId::STR_BORGES_NO_OTHER_DEVICE, false);
+    return;
+  }
+  // The engine's word for a lost connection is general. The diagnostics know which one it was.
+  finish(report.outcome == SessionOutcome::Transport ? describeDiagnostics(stack.store.state().diag)
+                                                     : describeOutcome(report.outcome),
+         report.outcome == SessionOutcome::Ok);
+}
+
+// ---------------------------------------------------------------------------------
+// Disconnect
+// ---------------------------------------------------------------------------------
+
+void BorgesActivity::startDisconnect() {
+  s_->stack_->cancel.arm(kDisconnectBudgetMs);
+  focus_ = 0;
+  setView(View::Syncing);
+  if (!worker_.start(&BorgesActivity::disconnectMain, s_.get())) {
+    s_->stack_->engine.disconnect(false);
+    s_->resultText_.store(StrId::STR_BORGES_DISCONNECT_PENDING);
+    s_->resultOk_.store(false);
+    setView(View::SyncResult);
+    autoLeaveAt_ = millis() + kResultErrorMs;
+  }
+}
+
+void BorgesActivity::disconnectMain(void* shared) {
+  auto* s = static_cast<BorgesActivity::Shared*>(shared);
+  BorgesStack& stack = *s->stack_;
+  const bool online = stack.bringUp(kSyncLinkBudgetMs) == net::LinkResult::Connected;
+  const DisconnectResult result = stack.engine.disconnect(online);
+  stack.bringDown();
+  s->resultText_.store(result == DisconnectResult::ServerInvalidated    ? StrId::STR_BORGES_DISCONNECT_DONE
+                       : result == DisconnectResult::StillValidOnServer ? StrId::STR_BORGES_DISCONNECT_PENDING
+                                                                        : StrId::STR_BORGES_ERR_LOCAL);
+  s->resultOk_.store(result == DisconnectResult::ServerInvalidated);
+  s->requestedView_.store(View::SyncResult);
+  s->viewChanged_.store(true, std::memory_order_release);
 }
 
 // ---------------------------------------------------------------------------------
@@ -237,7 +320,7 @@ void BorgesActivity::syncMain(void* self) {
 // ---------------------------------------------------------------------------------
 
 void BorgesActivity::startPair() {
-  if (!hasSavedWifi() && !stack_->link.connected()) {
+  if (!hasSavedWifi() && !s_->stack_->link.connected()) {
     startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, true, true),
                            [this](const ActivityResult& result) {
                              if (result.isCancelled) {
@@ -253,43 +336,43 @@ void BorgesActivity::startPair() {
 
 void BorgesActivity::beginPairSession() {
   PairingConfig config;
-  config.externalId = stack_->externalId;
+  config.externalId = s_->stack_->externalId;
   // The account lists devices by this name. "CrossInk X4" says less than "X4".
-  bookTitle_ = SETTINGS.getEffectiveDeviceName();
+  s_->bookTitle_ = SETTINGS.getEffectiveDeviceName();
   constexpr char kPrefix[] = "CrossInk ";
-  if (bookTitle_.rfind(kPrefix, 0) == 0) bookTitle_.erase(0, sizeof(kPrefix) - 1);
-  config.deviceName = bookTitle_.c_str();
-  config.firmwareVersion = stack_->clientVersion + strlen("crossink-borges/");
-  config.clientVersion = stack_->clientVersion;
-  pairing_ = makeUniqueNoThrow<PairingFlow>(stack_->store, stack_->outbox, stack_->fs, stack_->http, stack_->clock,
-                                            stack_->random, stack_->cancel, config);
-  if (!pairing_) {
-    resultText_.store(StrId::STR_BORGES_ERR_LOCAL);
-    resultOk_.store(false);
+  if (s_->bookTitle_.rfind(kPrefix, 0) == 0) s_->bookTitle_.erase(0, sizeof(kPrefix) - 1);
+  config.deviceName = s_->bookTitle_.c_str();
+  config.firmwareVersion = s_->stack_->clientVersion + strlen("crossink-borges/");
+  config.clientVersion = s_->stack_->clientVersion;
+  s_->pairing_ = makeUniqueNoThrow<PairingFlow>(s_->stack_->store, s_->stack_->outbox, s_->stack_->fs, s_->stack_->http,
+                                                s_->stack_->clock, s_->stack_->random, s_->stack_->cancel, config);
+  if (!s_->pairing_) {
+    s_->resultText_.store(StrId::STR_BORGES_ERR_LOCAL);
+    s_->resultOk_.store(false);
     setView(View::PairResult);
     return;
   }
-  stack_->cancel.arm(0);
+  s_->stack_->cancel.arm(0);
   setView(View::PairConnecting);
-  if (!worker_.start(&BorgesActivity::pairMain, this)) {
-    resultText_.store(StrId::STR_BORGES_ERR_LOCAL);
-    resultOk_.store(false);
+  if (!worker_.start(&BorgesActivity::pairMain, s_.get())) {
+    s_->resultText_.store(StrId::STR_BORGES_ERR_LOCAL);
+    s_->resultOk_.store(false);
     setView(View::PairResult);
   }
 }
 
-void BorgesActivity::pairMain(void* self) {
-  auto* activity = static_cast<BorgesActivity*>(self);
-  BorgesStack& stack = *activity->stack_;
-  PairingFlow& flow = *activity->pairing_;
-  const auto show = [activity](const View view) {
-    activity->requestedView_.store(view);
-    activity->viewChanged_.store(true, std::memory_order_release);
+void BorgesActivity::pairMain(void* shared) {
+  auto* s = static_cast<BorgesActivity::Shared*>(shared);
+  BorgesStack& stack = *s->stack_;
+  PairingFlow& flow = *s->pairing_;
+  const auto show = [s](const View view) {
+    s->requestedView_.store(view);
+    s->viewChanged_.store(true, std::memory_order_release);
   };
   const auto finish = [&](const StrId text, const bool ok) {
     stack.bringDown();
-    activity->resultText_.store(text);
-    activity->resultOk_.store(ok);
+    s->resultText_.store(text);
+    s->resultOk_.store(ok);
     show(View::PairResult);
   };
 
@@ -347,10 +430,10 @@ void BorgesActivity::pairMain(void* self) {
 // ---------------------------------------------------------------------------------
 
 void BorgesActivity::leave() {
-  if (stack_) stack_->cancel.request();
+  if (s_->stack_) s_->stack_->cancel.request();
   (void)worker_.waitForExit(4000);
   if (networkBoot_) {
-    if (start_ == NetPayload::ManualFromReader) {
+    if (readerSession()) {
       silentRestartToReader(true);
     } else {
       silentRestart();
@@ -361,12 +444,13 @@ void BorgesActivity::leave() {
 }
 
 void BorgesActivity::loop() {
-  if (viewChanged_.exchange(false, std::memory_order_acquire)) {
-    if (needsChoice_.exchange(false)) {
+  if (s_->viewChanged_.exchange(false, std::memory_order_acquire)) {
+    if (s_->needsChoice_.exchange(false)) {
+      RenderLock lock(*this);
+      stackOk_ = false;
       auto resume = makeUniqueNoThrow<BorgesResumeActivity>(
-          renderer, mappedInput, std::move(stack_), std::move(decision_), bookPath_, bookTitle_,
-          start_ == NetPayload::ManualFromReader ? BorgesResumeActivity::Return::Reader
-                                                 : BorgesResumeActivity::Return::Status);
+          renderer, mappedInput, std::move(s_->stack_), std::move(s_->decision_), s_->bookPath_, s_->bookTitle_,
+          readerSession() ? BorgesResumeActivity::Return::Reader : BorgesResumeActivity::Return::Status);
       if (resume) {
         activityManager.replaceActivity(std::move(resume));
       } else {
@@ -374,11 +458,11 @@ void BorgesActivity::loop() {
       }
       return;
     }
-    const View next = requestedView_.load();
+    const View next = s_->requestedView_.load();
     if (next == View::SyncResult || next == View::PairResult) {
-      autoLeaveAt_ = millis() + (resultOk_.load() ? kResultOkMs : kResultErrorMs);
-      const Diagnostics& diagnostics = stack_->store.state().diag;
-      snprintf(requestId_, sizeof(requestId_), "%s", resultOk_.load() ? "" : diagnostics.requestId);
+      autoLeaveAt_ = millis() + (s_->resultOk_.load() ? kResultOkMs : kResultErrorMs);
+      const Diagnostics& diagnostics = s_->stack_->store.state().diag;
+      snprintf(requestId_, sizeof(requestId_), "%s", s_->resultOk_.load() ? "" : diagnostics.requestId);
     }
     setView(next);
     return;
@@ -389,14 +473,17 @@ void BorgesActivity::loop() {
     case View::PairConnecting:
     case View::PairCode:
       if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-        stack_->cancel.request();
+        s_->stack_->cancel.request();
         if (!worker_.waitForExit(4000)) {
           leave();
           return;
         }
-        stack_->bringDown();
-        pairing_.reset();
-        if (start_ == NetPayload::ManualFromReader) {
+        s_->stack_->bringDown();
+        {
+          RenderLock lock(*this);
+          s_->pairing_.reset();
+        }
+        if (readerSession()) {
           leave();
         } else {
           buildRows();
@@ -407,11 +494,14 @@ void BorgesActivity::loop() {
     case View::SyncResult:
     case View::PairResult:
       if (mappedInput.wasAnyPressed() || millis() >= autoLeaveAt_) {
-        if (start_ == NetPayload::ManualFromReader) {
+        if (readerSession()) {
           leave();
           return;
         }
-        pairing_.reset();
+        {
+          RenderLock lock(*this);
+          s_->pairing_.reset();
+        }
         buildRows();
         setView(View::Status);
       }
@@ -469,7 +559,7 @@ void BorgesActivity::renderPairCode() {
   area.width -= kSideMargin * 2;
 
   // Step one is the phone. The URL is what a person types when a QR will not scan.
-  std::string url = pairing_->qrUrl();
+  std::string url = s_->pairing_->qrUrl();
   const size_t scheme = url.find("://");
   if (scheme != std::string::npos) url.erase(0, scheme + 3);
   const size_t query = url.find('?');
@@ -485,7 +575,7 @@ void BorgesActivity::renderPairCode() {
   constexpr int kCodeFont = LEXENDDECA_16_FONT_ID;
 #endif
   // Wide-set: read aloud or typed, a character at a time.
-  const char* code = pairing_->userCode();
+  const char* code = s_->pairing_->userCode();
   constexpr int kCodeGap = 6;
   int codeWidth = 0;
   char glyph[2] = {0, 0};
@@ -506,7 +596,7 @@ void BorgesActivity::renderPairCode() {
   const int qr = std::min(area.width, available);
   if (qr > 96) {
     const Rect bounds{area.x + (area.width - qr) / 2, y, qr, qr};
-    QrUtils::drawQrCode(renderer, bounds, pairing_->qrUrl());
+    QrUtils::drawQrCode(renderer, bounds, s_->pairing_->qrUrl());
   }
   drawWrappedCentered(renderer, area, SMALL_FONT_ID, area.y + area.height - footer, tr(STR_BORGES_PAIR_WAITING), 1);
 }
@@ -519,15 +609,15 @@ void BorgesActivity::renderStatus() {
   const int x = kSideMargin;
   const int width = renderer.getScreenWidth() - kSideMargin * 2;
 
-  const bool paired = stackOk_ && stack_->store.creds().paired();
+  const bool paired = stackOk_ && s_->stack_->store.creds().paired();
   if (!paired) {
     y = drawWrapped(renderer, UI_12_FONT_ID, x, y, width, tr(STR_BORGES_NOT_CONNECTED), 2, EpdFontFamily::BOLD);
     y += kLineGap;
     y = drawWrapped(renderer, UI_10_FONT_ID, x, y, width, tr(STR_BORGES_NOT_CONNECTED_HINT), 4);
     y += kBlockGap;
   } else {
-    const EngineStatus status = stack_->engine.status();
-    const Credentials& creds = stack_->store.creds();
+    const EngineStatus status = s_->stack_->engine.status();
+    const Credentials& creds = s_->stack_->store.creds();
     char value[48];
 
     snprintf(value, sizeof(value), "%.8s", creds.accountId[0] ? creds.accountId : creds.deviceId);
@@ -536,7 +626,7 @@ void BorgesActivity::renderStatus() {
     if (status.lastSuccessEpoch <= 0) {
       snprintf(value, sizeof(value), "%s", tr(STR_BORGES_NEVER));
     } else {
-      formatAge(value, sizeof(value), ageOf(status.lastSuccessEpoch, stack_->clock.wallNow()));
+      formatAge(value, sizeof(value), ageOf(status.lastSuccessEpoch, s_->stack_->clock.wallNow()));
       if (!value[0]) snprintf(value, sizeof(value), "%s", tr(STR_BORGES_A_WHILE_AGO));
     }
     y = drawLabelValue(renderer, x, y, width, tr(STR_BORGES_LAST_SYNC), value) + kLineGap;
@@ -556,6 +646,11 @@ void BorgesActivity::renderStatus() {
     } else if (status.diag.hasError()) {
       y = drawWrapped(renderer, SMALL_FONT_ID, x, y, width, tr(STR_BORGES_LAST_ERROR), 1, EpdFontFamily::BOLD);
       y = drawWrapped(renderer, UI_10_FONT_ID, x, y, width, I18N.get(describeDiagnostics(status.diag)), 2);
+      // Literal, for a report: the words above group several failures.
+      if (const char* failure =
+              net::failureCode(status.diag.transportStage, status.diag.transportCode, TimePrecision::Unknown)) {
+        y = drawWrapped(renderer, SMALL_FONT_ID, x, y, width, failure, 1);
+      }
       if (status.diag.requestId[0]) {
         snprintf(value, sizeof(value), tr(STR_BORGES_REQUEST_ID_FMT), status.diag.requestId);
         y = drawWrapped(renderer, SMALL_FONT_ID, x, y, width, value, 2);
@@ -584,8 +679,9 @@ void BorgesActivity::renderStatus() {
     return {};
   };
   const auto valueOf = [this](const int index) -> std::string {
-    if (rows_[index] == Row::OnOpen) return stack_->glue.autoOnOpen ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
-    if (rows_[index] == Row::OnSleep) return stack_->glue.syncOnSleep ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    if (!stackOk_) return {};
+    if (rows_[index] == Row::OnOpen) return s_->stack_->glue.autoOnOpen ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
+    if (rows_[index] == Row::OnSleep) return s_->stack_->glue.syncOnSleep ? tr(STR_STATE_ON) : tr(STR_STATE_OFF);
     return {};
   };
   GUI.drawList(renderer, list, static_cast<int>(rows_.size()), focus_, labelOf, nullptr, nullptr, valueOf);
@@ -597,6 +693,7 @@ void BorgesActivity::renderStatus() {
 }
 
 void BorgesActivity::render(RenderLock&&) {
+  if (view_ == View::Status && !stackOk_ && !s_->stack_) return;  // Handed over: this screen is leaving.
   renderer.clearScreen();
   switch (view_) {
     case View::Status:
@@ -615,7 +712,7 @@ void BorgesActivity::render(RenderLock&&) {
     case View::PairResult: {
       char id[64] = {0};
       if (requestId_[0]) snprintf(id, sizeof(id), tr(STR_BORGES_REQUEST_ID_FMT), requestId_);
-      renderCentered(I18N.get(resultText_.load()), id);
+      renderCentered(I18N.get(s_->resultText_.load()), id);
       break;
     }
   }

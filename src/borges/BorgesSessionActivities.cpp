@@ -26,11 +26,17 @@ namespace glue {
 
 namespace {
 
-constexpr uint32_t kOpenBudgetMs = 12000;
-constexpr uint32_t kOpenLinkBudgetMs = 9000;
-constexpr uint32_t kOpenHardDeadlineMs = kOpenBudgetMs + 2000;
-constexpr uint32_t kStayBudgetMs = 5000;
-constexpr uint32_t kChoiceLinkBudgetMs = 3000;
+// The contract is 12 s from the press to the book, and a network boot and the reboot back cost
+// about 1.2 s each. So this is what is left, with half a second for an uninterruptible step.
+constexpr uint32_t kOpenBudgetMs = 9000;
+constexpr uint32_t kOpenLinkBudgetMs = 7000;
+constexpr uint32_t kOpenHardDeadlineMs = kOpenBudgetMs + 500;
+constexpr uint32_t kStayBudgetMs = 9000;
+constexpr uint32_t kChoiceLinkBudgetMs = 6000;
+// Most answers come within this, on a connection already open. After it, the choice raises
+// the link again by itself: a prompt can sit for an hour on a nightstand.
+constexpr unsigned long kPromptLinkMs = 20000;
+constexpr uint32_t kSleepExitWaitMs = 4000;
 constexpr uint32_t kSleepBudgetMs = 15000;
 constexpr uint32_t kSleepLinkBudgetMs = 6000;
 // One uninterruptible TCP connect, about 3.5 s, on top of the budget.
@@ -90,11 +96,15 @@ void BorgesHandoffActivity::onEnter() {
 // ---------------------------------------------------------------------------------
 
 struct BorgesOpenActivity::Session {
+  BorgesStack* stack = nullptr;
+  std::string path;
+  std::string title;
   BookRef ref;
   Position local;
   ResumeDecision decision;
   SessionReport report;
   bool ran = false;
+  std::atomic<bool> awaitingChoice{false};
 };
 
 BorgesOpenActivity::BorgesOpenActivity(GfxRenderer& renderer, MappedInputManager& input, std::string path)
@@ -112,39 +122,45 @@ void BorgesOpenActivity::onEnter() {
     openBook();
     return;
   }
+  session_->stack = stack_.get();
+  session_->path = path_;
+  session_->title = title_;
   stack_->cancel.arm(kOpenBudgetMs);
   requestUpdate(true);
-  if (!worker_.start(&BorgesOpenActivity::sessionMain, this)) openBook();
+  if (!worker_.start(&BorgesOpenActivity::sessionMain, session_.get())) openBook();
 }
 
-void BorgesOpenActivity::sessionMain(void* self) {
-  auto* activity = static_cast<BorgesOpenActivity*>(self);
-  BorgesStack& stack = *activity->stack_;
-  Session& session = *activity->session_;
+void BorgesOpenActivity::sessionMain(void* context) {
+  Session& session = *static_cast<Session*>(context);
+  BorgesStack& stack = *session.stack;
   if (!stack.openStore() || !stack.openEngine()) return;
-  if (!partialMd5(stack.fs, activity->path_.c_str(), session.ref.id)) {
-    LOG_ERR("BORGES", "No identity for %s: opening without a check", activity->path_.c_str());
+  if (!partialMd5(stack.fs, session.path.c_str(), session.ref.id)) {
+    LOG_ERR("BORGES", "No identity for %s: opening without a check", session.path.c_str());
     return;
   }
   // Also here: this boot may have been reached by a path that did not go through routeBook.
   if (!stack.engine.onBookOpened(session.ref.id)) LOG_ERR("BORGES", "Could not hold the book");
-  session.ref.title = activity->title_.c_str();
-  const float percent = localPercentFor(activity->path_);
+  session.ref.title = session.title.c_str();
+  const float percent = localPercentFor(session.path);
   if (percent >= 0) session.local.setPercent(percent);
   // A place imported from the old firmware comes without the book's metadata, which is what
   // turns it into a percent. Built here, once per book, and the reader would build it anyway:
   // it must not look like "never opened" to the check.
-  if (percent < 0 && hasSavedPlace(activity->path_)) {
-    const float built = buildMetadataAndPercent(activity->path_);
+  if (percent < 0 && hasSavedPlace(session.path)) {
+    const float built = buildMetadataAndPercent(session.path);
     if (built >= 0) session.local.setPercent(built);
     stack.cancel.arm(kOpenBudgetMs);
   }
 
-  if (stack.bringUp(kOpenLinkBudgetMs) != net::LinkResult::Connected) return;
+  const net::LinkResult link = stack.bringUp(kOpenLinkBudgetMs);
+  if (link != net::LinkResult::Connected) {
+    if (link != net::LinkResult::Cancelled) stack.engine.noteLinkFailure();
+    return;
+  }
   session.report = stack.engine.runOpenSession(session.ref, session.local, session.decision);
   session.ran = true;
   if (session.report.outcome == SessionOutcome::AwaitingChoice) {
-    activity->awaitingChoice_.store(true, std::memory_order_release);
+    session.awaitingChoice.store(true, std::memory_order_release);
   } else {
     stack.bringDown();
   }
@@ -158,7 +174,7 @@ void BorgesOpenActivity::loop() {
     return;
   }
   if (worker_.finished()) {
-    if (awaitingChoice_.load(std::memory_order_acquire)) {
+    if (session_->awaitingChoice.load(std::memory_order_acquire)) {
       auto decision = makeUniqueNoThrow<ResumeDecision>(session_->decision);
       if (decision) {
         session_.reset();
@@ -191,23 +207,28 @@ void BorgesOpenActivity::openBook() {
 }
 
 void BorgesOpenActivity::onExit() {
+  APP_STATE.readerActivityLoadCount = 0;  // Only sleep exits here, and it is not a crash.
   if (stack_) stack_->cancel.request();
-  if (!worker_.waitForExit(4000)) {
+  if (!worker_.waitForExit(kSleepExitWaitMs)) {
     // Only reachable on the way to deep sleep, which ends every task within moments.
-    stack_.release();
-    session_.release();
+    (void)stack_.release();
+    (void)session_.release();
+  } else {
+    completeSession(false, path_, nullptr);  // Came back, if only to sleep.
   }
   Activity::onExit();
 }
 
 void BorgesOpenActivity::render(RenderLock&&) {
+  // The boot asks for a paint too, and what this says never changes.
+  if (painted_) return;
+  painted_ = true;
   renderer.clearScreen();
   const Rect area = screenArea(renderer);
   const int titleLine = renderer.getLineHeight(UI_12_FONT_ID);
   const int bodyLine = renderer.getLineHeight(UI_10_FONT_ID);
   const int block = titleLine * 2 + kBlockGap + bodyLine;
   int y = area.y + std::max(0, (area.height - block) / 2 - titleLine);
-  APP_STATE.readerActivityLoadCount = 0;  // Only sleep exits here, and it is not a crash.
   y = drawWrappedCentered(renderer, area, UI_12_FONT_ID, y, title_.c_str(), 3, EpdFontFamily::BOLD);
   y += kBlockGap;
   drawWrappedCentered(renderer, area, UI_10_FONT_ID, y, tr(STR_BORGES_LOOKING), 2);
@@ -236,33 +257,45 @@ BorgesResumeActivity::~BorgesResumeActivity() = default;
 void BorgesResumeActivity::onEnter() {
   Activity::onEnter();
   ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
+  linkDownAt_ = millis() + kPromptLinkMs;
   requestUpdate();
 }
 
 void BorgesResumeActivity::onExit() {
+  APP_STATE.readerActivityLoadCount = 0;  // Only sleep exits here, and it is not a crash.
   if (stack_) stack_->cancel.request();
-  if (!worker_.waitForExit(4000)) stack_.release();  // Only on the way to deep sleep.
+  if (worker_.waitForExit(kSleepExitWaitMs)) {
+    completeSession(false, path_, nullptr);
+  } else {
+    leaveWorkBehind();
+  }
   Activity::onExit();
 }
 
-void BorgesResumeActivity::stayMain(void* self) {
-  auto* activity = static_cast<BorgesResumeActivity*>(self);
-  BorgesStack& stack = *activity->stack_;
-  const Position& here = *activity->stayAt_;
+void BorgesResumeActivity::leaveWorkBehind() {
+  // Only on the way to deep sleep, which ends every task.
+  (void)stack_.release();
+  (void)decision_.release();
+  (void)work_.release();
+}
+
+void BorgesResumeActivity::stayMain(void* context) {
+  Work& work = *static_cast<Work*>(context);
+  BorgesStack& stack = *work.stack;
+  const Position& here = work.stayAt;
   // The radio may have gone down while the prompt waited, or to map the page. Once more,
   // briefly: this device becoming the head is what the reader just asked for. Without a
   // link the choice is still stored, and the next session sends it.
   const bool online = stack.bringUp(kChoiceLinkBudgetMs) == net::LinkResult::Connected;
-  stack.engine.applyChoice(*activity->decision_, ResumeChoice::StayHere, here, here, online);
+  stack.engine.applyChoice(*work.decision, ResumeChoice::StayHere, here, here, online);
   stack.bringDown();
 }
 
-void BorgesResumeActivity::drainMain(void* self) {
-  BorgesStack& stack = *static_cast<BorgesResumeActivity*>(self)->stack_;
+void BorgesResumeActivity::drainMain(void* context) {
+  BorgesStack& stack = *static_cast<Work*>(context)->stack;
   if (stack.bringUp(kChoiceLinkBudgetMs) == net::LinkResult::Connected) stack.engine.runSleepSession();
   stack.bringDown();
 }
-  APP_STATE.readerActivityLoadCount = 0;  // Only sleep exits here, and it is not a crash.
 
 void BorgesResumeActivity::loop() {
   switch (state_) {
@@ -277,6 +310,11 @@ void BorgesResumeActivity::loop() {
       return;
     case State::Choosing:
       break;
+  }
+
+  if (linkDownAt_ != 0 && millis() >= linkDownAt_) {
+    stack_->bringDown();
+    linkDownAt_ = 0;
   }
 
   // Back answers nothing: the book opens where it was, and this asks again next time.
@@ -374,23 +412,26 @@ bool BorgesResumeActivity::applyJump() {
 }
 
 void BorgesResumeActivity::stayHere() {
-  stayAt_ = makeUniqueNoThrow<Position>(decision_->local);
+  work_ = makeUniqueNoThrow<Work>();
   auto finalized = makeUniqueNoThrow<Position>();
-  if (!stayAt_ || !finalized) {
+  if (!work_ || !finalized) {
     leave(false);
     return;
   }
+  work_->stack = stack_.get();
+  work_->decision = decision_.get();
+  work_->stayAt = decision_->local;
   const bool hasFinalized = stack_->engine.lastFinalized(decision_->book, *finalized);
   if (chooseStaySource(hasFinalized, *finalized, decision_->local) == StaySource::Ledger) {
-    *stayAt_ = *finalized;
+    work_->stayAt = *finalized;
   } else {
     // Wi-Fi off before the book loads, as for a jump.
     stack_->bringDown();
-    mapSavedPage(*stayAt_);
+    mapSavedPage(work_->stayAt);
   }
   stack_->cancel.arm(kStayBudgetMs);
-  if (!worker_.start(&BorgesResumeActivity::stayMain, this)) {
-    stack_->engine.applyChoice(*decision_, ResumeChoice::StayHere, *stayAt_, *stayAt_, false);
+  if (!worker_.start(&BorgesResumeActivity::stayMain, work_.get())) {
+    stack_->engine.applyChoice(*decision_, ResumeChoice::StayHere, work_->stayAt, work_->stayAt, false);
     leave(false);
   }
 }
@@ -424,8 +465,14 @@ void BorgesResumeActivity::goThere() {
     // The place is on disk and the choice stored. A short try at sending it now, as the
     // plugin does; any button goes on, and the next session sends it otherwise.
     choiceStored_ = true;
+    work_ = makeUniqueNoThrow<Work>();
+    if (!work_) {
+      leave(true);
+      return;
+    }
+    work_->stack = stack_.get();
     stack_->cancel.arm(kStayBudgetMs);
-    if (!worker_.start(&BorgesResumeActivity::drainMain, this)) leave(true);
+    if (!worker_.start(&BorgesResumeActivity::drainMain, work_.get())) leave(true);
     return;
   }
   state_ = State::CouldNotLocate;
@@ -544,14 +591,18 @@ void BorgesSleepFlushActivity::onEnter() {
     return;
   }
   stack_->cancel.arm(kSleepBudgetMs);
-  if (!worker_.start(&BorgesSleepFlushActivity::sessionMain, this)) sleepNow();
+  if (!worker_.start(&BorgesSleepFlushActivity::sessionMain, stack_.get())) sleepNow();
 }
 
-void BorgesSleepFlushActivity::sessionMain(void* self) {
-  auto* activity = static_cast<BorgesSleepFlushActivity*>(self);
-  BorgesStack& stack = *activity->stack_;
+void BorgesSleepFlushActivity::sessionMain(void* context) {
+  BorgesStack& stack = *static_cast<BorgesStack*>(context);
   if (!stack.openStore() || !stack.openEngine()) return;
-  if (stack.bringUp(kSleepLinkBudgetMs) == net::LinkResult::Connected) stack.engine.runSleepSession();
+  const net::LinkResult link = stack.bringUp(kSleepLinkBudgetMs);
+  if (link == net::LinkResult::Connected) {
+    stack.engine.runSleepSession();
+  } else if (link != net::LinkResult::Cancelled) {
+    stack.engine.noteLinkFailure();
+  }
   stack.bringDown();
 }
 

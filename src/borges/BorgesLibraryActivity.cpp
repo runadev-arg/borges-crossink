@@ -25,6 +25,8 @@ constexpr uint32_t kFetchBudgetMs = 30000;
 constexpr uint32_t kDownloadBudgetMs = 15UL * 60UL * 1000UL;
 constexpr unsigned long kProgressPaintMs = 2500;
 constexpr uint32_t kProgressPaintStep = 5;
+// Reading a list needs no radio. The next page or download raises it again.
+constexpr unsigned long kIdleLinkMs = 30000;
 
 int rowHeightFor(const GfxRenderer& renderer) {
   return renderer.getLineHeight(UI_10_FONT_ID) + renderer.getLineHeight(SMALL_FONT_ID) + 14;
@@ -52,15 +54,33 @@ class BorgesLibraryActivity::Progress final : public IDownloadProgress {
   std::atomic<uint32_t>& percent_;
 };
 
+struct BorgesLibraryActivity::Shared {
+  std::unique_ptr<BorgesStack> stack_;
+  std::unique_ptr<Catalog> catalog_;
+  std::unique_ptr<Progress> progress_;
+  std::vector<CatalogEntry> entries_;
+  std::vector<uint8_t> onSd_;
+  uint16_t page_ = 1;
+  uint16_t requestedPage_ = 1;
+  bool hasNext_ = false;
+  bool hasPrevious_ = false;
+  CatalogEntry downloading_;
+  std::atomic<View> requestedView_{View::Loading};
+  std::atomic<bool> viewChanged_{false};
+  std::atomic<StrId> note_{StrId::STR_NONE_OPT};
+  std::atomic<bool> hasNote_{false};
+  std::atomic<uint32_t> downloadPercent_{0};
+};
+
 struct BorgesLibraryActivity::Visitor final : ICatalogVisitor {
-  explicit Visitor(BorgesLibraryActivity& activity) : activity(activity) {}
+  explicit Visitor(Shared& shared) : shared(shared) {}
   void onBook(uint16_t, const CatalogEntry& entry) override {
-    if (activity.entries_.size() < activity.entries_.capacity()) {
-      activity.entries_.push_back(entry);
-      activity.onSd_.push_back(activity.catalog_->isOnSd(entry, kBorgesBooksDir) ? 1 : 0);
+    if (shared.entries_.size() < shared.entries_.capacity()) {
+      shared.entries_.push_back(entry);
+      shared.onSd_.push_back(shared.catalog_->isOnSd(entry, kBorgesBooksDir) ? 1 : 0);
     }
   }
-  BorgesLibraryActivity& activity;
+  Shared& shared;
 };
 
 BorgesLibraryActivity::BorgesLibraryActivity(GfxRenderer& renderer, MappedInputManager& input)
@@ -75,31 +95,36 @@ int BorgesLibraryActivity::pageSize() const {
 
 void BorgesLibraryActivity::onEnter() {
   Activity::onEnter();
-  stack_ = makeStack();
-  if (!stack_ || !stack_->openStore()) {
+  s_ = makeUniqueNoThrow<Shared>();
+  if (!s_) {
     silentRestart();
     return;
   }
-  catalog_ = makeUniqueNoThrow<Catalog>(stack_->store, stack_->fs, stack_->http, stack_->clock, stack_->cancel);
-  progress_ = makeUniqueNoThrow<Progress>(downloadPercent_);
-  if (!catalog_ || !progress_) {
+  s_->stack_ = makeStack();
+  if (!s_->stack_ || !s_->stack_->openStore()) {
+    silentRestart();
+    return;
+  }
+  s_->catalog_ = makeUniqueNoThrow<Catalog>(s_->stack_->store, s_->stack_->fs, s_->stack_->http, s_->stack_->clock,
+                                            s_->stack_->cancel, s_->stack_->sha);
+  s_->progress_ = makeUniqueNoThrow<Progress>(s_->downloadPercent_);
+  if (!s_->catalog_ || !s_->progress_) {
     silentRestart();
     return;
   }
   // One screen of entries: under 400 bytes each, kept for this activity's lifetime.
-  entries_.reserve(pageSize());
-  onSd_.reserve(pageSize());
+  s_->entries_.reserve(pageSize());
+  s_->onSd_.reserve(pageSize());
   startLoad(1);
 }
 
 void BorgesLibraryActivity::onExit() {
-  if (stack_) stack_->cancel.request();
+  if (s_ && s_->stack_) s_->stack_->cancel.request();
   if (!worker_.waitForExit(4000)) {
-    stack_.release();  // Only on the way to deep sleep, which ends every task.
-    catalog_.release();
-    progress_.release();
-  } else if (stack_) {
-    stack_->bringDown();
+    // Only on the way to deep sleep, which ends every task.
+    (void)s_.release();
+  } else if (s_ && s_->stack_) {
+    s_->stack_->bringDown();
   }
   Activity::onExit();
 }
@@ -107,41 +132,41 @@ void BorgesLibraryActivity::onExit() {
 void BorgesLibraryActivity::setView(const View view) {
   view_ = view;
   fullPaint_ = true;
+  linkDownAt_ = millis() + kIdleLinkMs;
   requestUpdate();
 }
 
 void BorgesLibraryActivity::startLoad(const uint16_t page) {
-  requestedPage_ = page;
-  hasNote_.store(false);
-  stack_->cancel.arm(kLoadLinkBudgetMs + kFetchBudgetMs);
+  s_->requestedPage_ = page;
+  s_->hasNote_.store(false);
+  s_->stack_->cancel.arm(kLoadLinkBudgetMs + kFetchBudgetMs);
   setView(View::Loading);
-  if (!worker_.start(&BorgesLibraryActivity::loadMain, this)) silentRestart();
+  if (!worker_.start(&BorgesLibraryActivity::loadMain, s_.get())) silentRestart();
 }
 
-void BorgesLibraryActivity::loadMain(void* self) {
-  auto* activity = static_cast<BorgesLibraryActivity*>(self);
-  BorgesStack& stack = *activity->stack_;
-  const auto note = [activity](const StrId text) {
-    activity->note_.store(text);
-    activity->hasNote_.store(true);
+void BorgesLibraryActivity::loadMain(void* shared) {
+  auto* s = static_cast<BorgesLibraryActivity::Shared*>(shared);
+  BorgesStack& stack = *s->stack_;
+  const auto note = [s](const StrId text) {
+    s->note_.store(text);
+    s->hasNote_.store(true);
   };
 
   CatalogPage info;
   CatalogResult result = CatalogResult::Offline;
   const net::LinkResult link = stack.bringUp(kLoadLinkBudgetMs);
   if (link == net::LinkResult::Connected) {
-    result =
-        activity->catalog_->fetchPage(activity->requestedPage_, activity->entries_.capacity(), info, kFetchBudgetMs);
+    result = s->catalog_->fetchPage(s->requestedPage_, s->entries_.capacity(), info, kFetchBudgetMs);
   }
 
-  activity->entries_.clear();
-  activity->onSd_.clear();
-  Visitor visitor(*activity);
-  const bool loaded = activity->catalog_->loadPage(activity->requestedPage_, info, visitor);
+  s->entries_.clear();
+  s->onSd_.clear();
+  Visitor visitor(*s);
+  const bool loaded = s->catalog_->loadPage(s->requestedPage_, info, visitor);
   if (loaded) {
-    activity->page_ = activity->requestedPage_;
-    activity->hasNext_ = info.hasNext;
-    activity->hasPrevious_ = info.hasPrevious;
+    s->page_ = s->requestedPage_;
+    s->hasNext_ = info.hasNext;
+    s->hasPrevious_ = info.hasPrevious;
   }
   switch (result) {
     case CatalogResult::Ok:
@@ -161,32 +186,32 @@ void BorgesLibraryActivity::loadMain(void* self) {
       note(StrId::STR_BORGES_ERR_LOCAL);
       break;
   }
-  activity->requestedView_.store(View::List);
-  activity->viewChanged_.store(true, std::memory_order_release);
+  s->requestedView_.store(View::List);
+  s->viewChanged_.store(true, std::memory_order_release);
 }
 
 void BorgesLibraryActivity::startDownload() {
-  downloading_ = entries_[focus_];
-  downloadPercent_.store(0);
-  shownPercent_.store(0);
+  s_->downloading_ = s_->entries_[focus_];
+  s_->downloadPercent_.store(0);
+  shownPercent_ = 0;
   lastProgressPaint_ = millis();
-  stack_->cancel.arm(kDownloadBudgetMs);
+  s_->stack_->cancel.arm(kDownloadBudgetMs);
   setView(View::Downloading);
-  if (!worker_.start(&BorgesLibraryActivity::downloadMain, this)) {
-    note_.store(StrId::STR_BORGES_ERR_LOCAL);
+  if (!worker_.start(&BorgesLibraryActivity::downloadMain, s_.get())) {
+    s_->note_.store(StrId::STR_BORGES_ERR_LOCAL);
     setView(View::DownloadFailed);
   }
 }
 
-void BorgesLibraryActivity::downloadMain(void* self) {
-  auto* activity = static_cast<BorgesLibraryActivity*>(self);
-  BorgesStack& stack = *activity->stack_;
-  const auto done = [activity](const View view) {
-    activity->requestedView_.store(view);
-    activity->viewChanged_.store(true, std::memory_order_release);
+void BorgesLibraryActivity::downloadMain(void* shared) {
+  auto* s = static_cast<BorgesLibraryActivity::Shared*>(shared);
+  BorgesStack& stack = *s->stack_;
+  const auto done = [s](const View view) {
+    s->requestedView_.store(view);
+    s->viewChanged_.store(true, std::memory_order_release);
   };
-  const auto fail = [activity, &done](const StrId text) {
-    activity->note_.store(text);
+  const auto fail = [s, &done](const StrId text) {
+    s->note_.store(text);
     done(View::DownloadFailed);
   };
 
@@ -199,13 +224,12 @@ void BorgesLibraryActivity::downloadMain(void* self) {
     fail(describeLink(link));
     return;
   }
-  switch (activity->catalog_->download(activity->downloading_, kBorgesBooksDir, activity->progress_.get(),
-                                       kDownloadBudgetMs)) {
+  switch (s->catalog_->download(s->downloading_, kBorgesBooksDir, s->progress_.get(), kDownloadBudgetMs)) {
     case DownloadResult::Done:
     case DownloadResult::AlreadyPresent:
       library::invalidateLibraryIndex();
-      for (size_t i = 0; i < activity->entries_.size(); ++i) {
-        if (activity->catalog_->isOnSd(activity->entries_[i], kBorgesBooksDir)) activity->onSd_[i] = 1;
+      for (size_t i = 0; i < s->entries_.size(); ++i) {
+        if (s->catalog_->isOnSd(s->entries_[i], kBorgesBooksDir)) s->onSd_[i] = 1;
       }
       done(View::Downloaded);
       return;
@@ -213,8 +237,8 @@ void BorgesLibraryActivity::downloadMain(void* self) {
       fail(StrId::STR_BORGES_LIB_INTERRUPTED);
       return;
     case DownloadResult::Cancelled:
-      activity->requestedView_.store(View::List);
-      activity->viewChanged_.store(true, std::memory_order_release);
+      s->requestedView_.store(View::List);
+      s->viewChanged_.store(true, std::memory_order_release);
       return;
     case DownloadResult::NeedsRelink:
       fail(StrId::STR_BORGES_ERR_RELINK);
@@ -233,10 +257,10 @@ void BorgesLibraryActivity::downloadMain(void* self) {
 
 void BorgesLibraryActivity::openDownloaded() {
   char path[128];
-  snprintf(path, sizeof(path), "%s/%s", kBorgesBooksDir, downloading_.fileName);
-  stack_->bringDown();
-  catalog_.reset();
-  stack_.reset();  // interceptOpen builds its own, and this boot's heap is already tight.
+  snprintf(path, sizeof(path), "%s/%s", kBorgesBooksDir, s_->downloading_.fileName);
+  s_->stack_->bringDown();
+  s_->catalog_.reset();
+  s_->stack_.reset();  // interceptOpen builds its own, and this boot's heap is already tight.
   APP_STATE.openEpubPath = path;
   APP_STATE.saveToFile();
   // The same door as any other open: the account may have read this book elsewhere, and a
@@ -249,14 +273,14 @@ void BorgesLibraryActivity::openDownloaded() {
 }
 
 void BorgesLibraryActivity::leave() {
-  if (stack_) stack_->cancel.request();
+  if (s_->stack_) s_->stack_->cancel.request();
   if (!worker_.waitForExit(4000)) {
     silentRestart();
     return;
   }
-  stack_->bringDown();
-  catalog_.reset();
-  stack_.reset();
+  s_->stack_->bringDown();
+  s_->catalog_.reset();
+  s_->stack_.reset();
   auto status = makeUniqueNoThrow<BorgesActivity>(renderer, mappedInput, true, NetPayload::Status);
   if (status) {
     activityManager.replaceActivity(std::move(status));
@@ -266,15 +290,20 @@ void BorgesLibraryActivity::leave() {
 }
 
 void BorgesLibraryActivity::loop() {
-  if (viewChanged_.exchange(false, std::memory_order_acquire)) {
-    const View next = requestedView_.load();
-    if (next == View::List && (focus_ >= static_cast<int>(entries_.size()) || wantLastRow_)) {
-      focus_ = std::max(0, static_cast<int>(entries_.size()) - 1);
+  if (s_->viewChanged_.exchange(false, std::memory_order_acquire)) {
+    const View next = s_->requestedView_.load();
+    if (next == View::List && (focus_ >= static_cast<int>(s_->entries_.size()) || wantLastRow_)) {
+      focus_ = std::max(0, static_cast<int>(s_->entries_.size()) - 1);
     }
     wantLastRow_ = false;
     worker_.reset();
     setView(next);
     return;
+  }
+
+  if (linkDownAt_ != 0 && millis() >= linkDownAt_ && !worker_.running()) {
+    s_->stack_->bringDown();
+    linkDownAt_ = 0;
   }
 
   switch (view_) {
@@ -283,13 +312,13 @@ void BorgesLibraryActivity::loop() {
       return;
     case View::Downloading: {
       if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-        stack_->cancel.request();
+        s_->stack_->cancel.request();
         return;
       }
       // E-ink: a bar that moves every few seconds, never one that flickers.
-      const uint32_t percent = downloadPercent_.load(std::memory_order_relaxed);
-      if (percent >= shownPercent_.load() + kProgressPaintStep && millis() - lastProgressPaint_ >= kProgressPaintMs) {
-        shownPercent_.store(percent);
+      const uint32_t percent = s_->downloadPercent_.load(std::memory_order_relaxed);
+      if (percent >= shownPercent_ + kProgressPaintStep && millis() - lastProgressPaint_ >= kProgressPaintMs) {
+        shownPercent_ = percent;
         lastProgressPaint_ = millis();
         requestUpdate();
       }
@@ -331,14 +360,14 @@ void BorgesLibraryActivity::loop() {
     leave();
     return;
   }
-  const int count = static_cast<int>(entries_.size());
+  const int count = static_cast<int>(s_->entries_.size());
   if (count == 0) {
-    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) startLoad(page_);
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) startLoad(s_->page_);
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (onSd_[focus_]) {
-      downloading_ = entries_[focus_];
+    if (s_->onSd_[focus_]) {
+      s_->downloading_ = s_->entries_[focus_];
       downloadFocus_ = 0;
       setView(View::Downloaded);
     } else {
@@ -347,18 +376,18 @@ void BorgesLibraryActivity::loop() {
     return;
   }
   navigator_.onNextRelease([this, count] {
-    if (focus_ + 1 >= count && hasNext_) {
+    if (focus_ + 1 >= count && s_->hasNext_) {
       focus_ = 0;
-      startLoad(page_ + 1);
+      startLoad(s_->page_ + 1);
       return;
     }
     focus_ = ButtonNavigator::nextIndex(focus_, count);
     requestUpdate();
   });
   navigator_.onPreviousRelease([this, count] {
-    if (focus_ == 0 && hasPrevious_) {
+    if (focus_ == 0 && s_->hasPrevious_) {
       wantLastRow_ = true;
-      startLoad(page_ - 1);
+      startLoad(s_->page_ - 1);
       return;
     }
     focus_ = ButtonNavigator::previousIndex(focus_, count);
@@ -373,21 +402,21 @@ void BorgesLibraryActivity::renderList() {
   constexpr int kCheckSize = 16;
   int y = area.y;
 
-  if (entries_.empty()) {
+  if (s_->entries_.empty()) {
     Rect text = area;
     text.x += padding;
     text.width -= padding * 2;
-    const StrId message = hasNote_.load() ? note_.load() : StrId::STR_BORGES_LIB_EMPTY;
+    const StrId message = s_->hasNote_.load() ? s_->note_.load() : StrId::STR_BORGES_LIB_EMPTY;
     drawWrappedCentered(renderer, text, UI_10_FONT_ID, area.y + area.height / 3, I18N.get(message), 3);
     return;
   }
 
   char size[16];
-  for (size_t i = 0; i < entries_.size(); ++i) {
-    const CatalogEntry& entry = entries_[i];
+  for (size_t i = 0; i < s_->entries_.size(); ++i) {
+    const CatalogEntry& entry = s_->entries_[i];
     const bool focused = static_cast<int>(i) == focus_;
     if (focused) renderer.fillRect(area.x, y, area.width, rowHeight, true);
-    const int textWidth = area.width - padding * 2 - (onSd_[i] ? kCheckSize + 12 : 0);
+    const int textWidth = area.width - padding * 2 - (s_->onSd_[i] ? kCheckSize + 12 : 0);
     const std::string title = renderer.truncatedText(UI_10_FONT_ID, entry.title, textWidth);
     renderer.drawText(UI_10_FONT_ID, area.x + padding, y + 6, title.c_str(), !focused);
 
@@ -398,15 +427,15 @@ void BorgesLibraryActivity::renderList() {
     const std::string metaLine = renderer.truncatedText(SMALL_FONT_ID, meta.c_str(), textWidth);
     renderer.drawText(SMALL_FONT_ID, area.x + padding, y + 6 + renderer.getLineHeight(UI_10_FONT_ID), metaLine.c_str(),
                       !focused);
-    if (onSd_[i]) {
+    if (s_->onSd_[i]) {
       drawCheckMark(renderer, area.x + area.width - padding - kCheckSize, y + (rowHeight - kCheckSize) / 2, kCheckSize,
                     !focused);
     }
     y += rowHeight;
   }
-  if (hasNote_.load()) {
+  if (s_->hasNote_.load()) {
     const int noteY = area.y + area.height - renderer.getLineHeight(SMALL_FONT_ID);
-    if (noteY >= y) renderer.drawText(SMALL_FONT_ID, area.x + padding, noteY, I18N.get(note_.load()));
+    if (noteY >= y) renderer.drawText(SMALL_FONT_ID, area.x + padding, noteY, I18N.get(s_->note_.load()));
   }
 }
 
@@ -415,21 +444,21 @@ void BorgesLibraryActivity::renderDownload() {
   area.x += kSideMargin;
   area.width -= kSideMargin * 2;
   int y = area.y + kBlockGap * 2;
-  y = drawWrapped(renderer, UI_12_FONT_ID, area.x, y, area.width, downloading_.title, 3, EpdFontFamily::BOLD);
-  if (downloading_.author[0]) {
-    y = drawWrapped(renderer, UI_10_FONT_ID, area.x, y + kLineGap, area.width, downloading_.author, 1);
+  y = drawWrapped(renderer, UI_12_FONT_ID, area.x, y, area.width, s_->downloading_.title, 3, EpdFontFamily::BOLD);
+  if (s_->downloading_.author[0]) {
+    y = drawWrapped(renderer, UI_10_FONT_ID, area.x, y + kLineGap, area.width, s_->downloading_.author, 1);
   }
   y += kBlockGap * 2;
 
   if (view_ == View::Downloading) {
     y = drawWrapped(renderer, UI_10_FONT_ID, area.x, y, area.width, tr(STR_BORGES_LIB_DOWNLOADING), 1);
     y += kLineGap;
-    const uint32_t percent = shownPercent_.load();
+    const uint32_t percent = shownPercent_;
     drawProgressBar(renderer, area.x, y, area.width, 12, percent);
     y += 12 + kLineGap;
     char text[48];
     char total[16];
-    formatSize(total, sizeof(total), downloading_.fileSize);
+    formatSize(total, sizeof(total), s_->downloading_.fileSize);
     snprintf(text, sizeof(text), "%u%% \xC2\xB7 %s", static_cast<unsigned>(percent), total);
     renderer.drawText(SMALL_FONT_ID, area.x, y, text);
   } else if (view_ == View::Downloaded) {
@@ -441,7 +470,7 @@ void BorgesLibraryActivity::renderDownload() {
     drawActionRow(renderer, area.x, y + rowHeight + 8, area.width, rowHeight, tr(STR_BORGES_LIB_KEEP_BROWSING),
                   downloadFocus_ == 1);
   } else {
-    y = drawWrapped(renderer, UI_10_FONT_ID, area.x, y, area.width, I18N.get(note_.load()), 3);
+    y = drawWrapped(renderer, UI_10_FONT_ID, area.x, y, area.width, I18N.get(s_->note_.load()), 3);
     y += kLineGap;
     drawWrapped(renderer, SMALL_FONT_ID, area.x, y, area.width, tr(STR_BORGES_LIB_RETRY_HINT), 2);
   }
@@ -451,8 +480,8 @@ void BorgesLibraryActivity::render(RenderLock&&) {
   renderer.clearScreen();
   const auto& metrics = UITheme::getInstance().getMetrics();
   char subtitle[24] = {0};
-  if (view_ == View::List && (hasNext_ || hasPrevious_)) {
-    snprintf(subtitle, sizeof(subtitle), tr(STR_BORGES_LIB_PAGE_FMT), static_cast<unsigned>(page_));
+  if (view_ == View::List && (s_->hasNext_ || s_->hasPrevious_)) {
+    snprintf(subtitle, sizeof(subtitle), tr(STR_BORGES_LIB_PAGE_FMT), static_cast<unsigned>(s_->page_));
   }
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight},
                  tr(STR_BORGES_LIBRARY), subtitle[0] ? subtitle : nullptr);
@@ -471,7 +500,7 @@ void BorgesLibraryActivity::render(RenderLock&&) {
     }
     case View::List:
       renderList();
-      if (entries_.empty()) {
+      if (s_->entries_.empty()) {
         confirm = tr(STR_SELECT);
       } else {
         confirm = tr(STR_SELECT);

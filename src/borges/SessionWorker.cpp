@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <Logging.h>
 
+#include <new>
+
 namespace borges {
 namespace glue {
 
@@ -11,23 +13,30 @@ constexpr uint32_t kStackBytes = 16384;
 constexpr int kPriority = 1;
 }  // namespace
 
-void SessionWorker::trampoline(void* self) {
-  auto* worker = static_cast<SessionWorker*>(self);
-  worker->fn_(worker->context_);
-  worker->running_.store(false, std::memory_order_release);
+void SessionWorker::trampoline(void* state) {
+  auto* self = static_cast<State*>(state);
+  self->fn(self->context);
+  self->running.store(false, std::memory_order_release);
   vTaskDelete(nullptr);
+}
+
+SessionWorker::~SessionWorker() {
+  // Still running: left behind with the context, until the reboot or sleep that is coming.
+  if (!running()) delete state_;
 }
 
 bool SessionWorker::start(const Fn fn, void* context) {
   if (running()) return false;
-  fn_ = fn;
-  context_ = context;
+  if (!state_) state_ = new (std::nothrow) State;
+  if (!state_) return false;
+  state_->fn = fn;
+  state_->context = context;
   started_ = true;
-  running_.store(true, std::memory_order_release);
+  state_->running.store(true, std::memory_order_release);
   TaskHandle_t handle = nullptr;
-  if (xTaskCreate(&SessionWorker::trampoline, "borges", kStackBytes, this, kPriority, &handle) != pdPASS) {
+  if (xTaskCreate(&SessionWorker::trampoline, "borges", kStackBytes, state_, kPriority, &handle) != pdPASS) {
     LOG_ERR("BORGES", "OOM: session task (%u bytes, free=%u)", static_cast<unsigned>(kStackBytes), ESP.getFreeHeap());
-    running_.store(false, std::memory_order_release);
+    state_->running.store(false, std::memory_order_release);
     return false;
   }
   return true;

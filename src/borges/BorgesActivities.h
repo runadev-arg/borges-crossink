@@ -47,15 +47,15 @@ class BorgesOpenActivity final : public Activity {
 
  private:
   struct Session;
-  static void sessionMain(void* self);
+  static void sessionMain(void* session);
   void openBook();
 
   std::string path_;
   std::string title_;
   std::unique_ptr<BorgesStack> stack_;
-  std::unique_ptr<Session> session_;
+  std::unique_ptr<Session> session_;  // All the session task touches. See SessionWorker.
   SessionWorker worker_;
-  std::atomic<bool> awaitingChoice_{false};
+  bool painted_ = false;
 };
 
 // ¿Dónde querés seguir leyendo? Owns the live stack: the engine keeps the pending choice.
@@ -70,22 +70,31 @@ class BorgesResumeActivity final : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
   bool isReaderActivity() const override { return back_ == Return::Reader; }
+  bool preventAutoSleep() override { return state_ == State::Working; }
 
  private:
   enum class State : uint8_t { Choosing, Working, CouldNotLocate };
-  static void stayMain(void* self);
-  static void drainMain(void* self);
+  static void stayMain(void* work);
+  static void drainMain(void* work);
   void goThere();
   void stayHere();
   bool applyJump();
   // What the saved page maps to, for a book the ledger cannot answer for. Radio already off.
   void mapSavedPage(Position& out);
   void leave(bool success);
+  void leaveWorkBehind();
+
+  // All the session task touches. See SessionWorker.
+  struct Work {
+    BorgesStack* stack = nullptr;
+    ResumeDecision* decision = nullptr;
+    Position stayAt;
+  };
 
   std::unique_ptr<BorgesStack> stack_;
   std::unique_ptr<ResumeDecision> decision_;
   std::unique_ptr<Position> before_;
-  std::unique_ptr<Position> stayAt_;
+  std::unique_ptr<Work> work_;
   std::string path_;
   std::string title_;
   Return back_;
@@ -93,6 +102,7 @@ class BorgesResumeActivity final : public Activity {
   int focus_ = 0;
   bool firstPaint_ = true;
   bool choiceStored_ = false;
+  unsigned long linkDownAt_ = 0;
   unsigned long noticeUntil_ = 0;
   ButtonNavigator navigator_;
   SessionWorker worker_;
@@ -110,7 +120,7 @@ class BorgesSleepFlushActivity final : public Activity {
   bool preventAutoSleep() override { return true; }
 
  private:
-  static void sessionMain(void* self);
+  static void sessionMain(void* stack);
   void sleepNow();
 
   std::unique_ptr<BorgesStack> stack_;
@@ -129,17 +139,26 @@ class BorgesActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
+  // Sleeping out of a manual sync started in a book wakes back into that book.
+  bool isReaderActivity() const override { return readerSession(); }
+  bool preventAutoSleep() override {
+    return view_ == View::Syncing || view_ == View::PairConnecting || view_ == View::PairCode;
+  }
 
  private:
   enum class View : uint8_t { Status, Syncing, SyncResult, PairConnecting, PairCode, PairResult };
   enum class Row : uint8_t { Connect, SyncNow, Library, OnOpen, OnSleep, Disconnect };
 
-  static void syncMain(void* self);
-  static void pairMain(void* self);
+  struct Shared;
+  bool readerSession() const { return start_ == NetPayload::ManualFromReader || start_ == NetPayload::OtherDevice; }
+  static void syncMain(void* shared);
+  static void pairMain(void* shared);
+  static void disconnectMain(void* shared);
   void buildRows();
   void activate(Row row);
   void startSync();
   void startPair();
+  void startDisconnect();
   void beginPairSession();
   void leave();
   void setView(View view);
@@ -150,13 +169,7 @@ class BorgesActivity final : public Activity {
 
   bool networkBoot_;
   NetPayload start_;
-  std::unique_ptr<BorgesStack> stack_;
-  std::unique_ptr<PairingFlow> pairing_;
-  std::unique_ptr<ResumeDecision> decision_;
-  std::unique_ptr<BookRef> bookRef_;
-  std::unique_ptr<Position> local_;
-  std::string bookTitle_;
-  std::string bookPath_;
+  std::unique_ptr<Shared> s_;  // All the session task touches. See SessionWorker.
   View view_ = View::Status;
   std::vector<Row> rows_;
   int focus_ = 0;
@@ -164,13 +177,6 @@ class BorgesActivity final : public Activity {
   bool fullPaint_ = true;
   SessionWorker worker_;
   ButtonNavigator navigator_;
-
-  // Written by the session task, read by the main task.
-  std::atomic<View> requestedView_{View::Status};
-  std::atomic<bool> viewChanged_{false};
-  std::atomic<StrId> resultText_{StrId::STR_NONE_OPT};
-  std::atomic<bool> resultOk_{false};
-  std::atomic<bool> needsChoice_{false};
   unsigned long autoLeaveAt_ = 0;
   char requestId_[40] = {0};
 };
@@ -183,13 +189,15 @@ class BorgesLibraryActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
+  bool preventAutoSleep() override { return view_ == View::Loading || view_ == View::Downloading; }
 
  private:
   enum class View : uint8_t { Loading, List, Downloading, Downloaded, DownloadFailed };
   struct Visitor;
+  struct Shared;
 
-  static void loadMain(void* self);
-  static void downloadMain(void* self);
+  static void loadMain(void* shared);
+  static void downloadMain(void* shared);
   void startLoad(uint16_t page);
   void startDownload();
   void openDownloaded();
@@ -199,32 +207,18 @@ class BorgesLibraryActivity final : public Activity {
   void renderDownload();
   int pageSize() const;
 
-  std::unique_ptr<BorgesStack> stack_;
-  std::unique_ptr<Catalog> catalog_;
-  std::vector<CatalogEntry> entries_;
-  std::vector<uint8_t> onSd_;
-  uint16_t page_ = 1;
-  uint16_t requestedPage_ = 1;
-  bool hasNext_ = false;
-  bool hasPrevious_ = false;
+  std::unique_ptr<Shared> s_;  // All the session task touches. See SessionWorker.
   int focus_ = 0;
   int downloadFocus_ = 0;
   bool wantLastRow_ = false;
   View view_ = View::Loading;
   bool fullPaint_ = true;
-  CatalogEntry downloading_;
   SessionWorker worker_;
   ButtonNavigator navigator_;
-
-  std::atomic<View> requestedView_{View::Loading};
-  std::atomic<bool> viewChanged_{false};
-  std::atomic<StrId> note_{StrId::STR_NONE_OPT};
-  std::atomic<bool> hasNote_{false};
-  std::atomic<uint32_t> downloadPercent_{0};
-  std::atomic<uint32_t> shownPercent_{0};
+  uint32_t shownPercent_ = 0;
   unsigned long lastProgressPaint_ = 0;
+  unsigned long linkDownAt_ = 0;
   class Progress;
-  std::unique_ptr<Progress> progress_;
 };
 
 }  // namespace glue

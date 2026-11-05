@@ -1,12 +1,16 @@
 #include "BorgesUi.h"
 
+#include <Epub.h>
+#include <Epub/BookMetadataCache.h>
+
 #include <cstdio>
 #include <cstring>
 #include <vector>
 
 #include "RecentBooksStore.h"
-#include "activities/home/RecentBookProgress.h"
+#include "activities/reader/EpubReaderUtils.h"
 #include "fontIds.h"
+#include "net/NetFailure.h"
 
 namespace borges {
 namespace glue {
@@ -23,9 +27,24 @@ std::string bookTitleFor(const std::string& path) {
 }
 
 float localPercentFor(const std::string& path) {
-  RecentBook book;
-  book.path = path;
-  return RecentBookProgress::loadCachedEpubPercent(book);
+  // The same sum as the reader's own status bar: pages left behind, not the page on screen,
+  // or the prompt says 1% about a book the reader shows at 0%. The Home list's cached number
+  // counts the current page as read.
+  const std::string cachePath = Epub::resolveCachePathForFilePath(path, "/.crosspoint");
+  EpubReaderUtils::Progress progress;
+  if ((!EpubReaderUtils::readProgressFile("BORGES", cachePath + "/progress.bin", progress) &&
+       !EpubReaderUtils::readProgressFile("BORGES", cachePath + "/progress.bin.bak", progress)) ||
+      !progress.hasPageCount || progress.pageCount <= 0) {
+    return -1.0f;
+  }
+  BookMetadataCache metadata(cachePath);
+  if (!metadata.load() || progress.spineIndex < 0 || progress.spineIndex >= metadata.getSpineCount()) return -1.0f;
+  const size_t bookSize = metadata.getSpineCumulativeSize(metadata.getSpineCount() - 1);
+  if (bookSize == 0) return -1.0f;
+  const size_t before = progress.spineIndex >= 1 ? metadata.getSpineCumulativeSize(progress.spineIndex - 1) : 0;
+  const size_t chapter = metadata.getSpineCumulativeSize(progress.spineIndex) - before;
+  const float read = static_cast<float>(progress.pageNumber) / static_cast<float>(progress.pageCount);
+  return (static_cast<float>(before) + static_cast<float>(chapter) * read) / static_cast<float>(bookSize) * 100.0f;
 }
 
 int drawWrapped(const GfxRenderer& renderer, const int fontId, const int x, int y, const int width, const char* text,
@@ -188,7 +207,14 @@ StrId describeDiagnostics(const Diagnostics& diagnostics) {
     return StrId::STR_BORGES_ERR_RELINK;
   }
   if (diagnostics.httpStatus == 429 || strcmp(code, "rate_limited") == 0) return StrId::STR_BORGES_ERR_RATE;
-  if (strcmp(code, "transport") == 0 || strcmp(code, "low_memory") == 0) return StrId::STR_BORGES_ERR_TRANSPORT;
+  if (strcmp(code, "transport") == 0) {
+    const char* failure =
+        net::failureCode(diagnostics.transportStage, diagnostics.transportCode, TimePrecision::Unknown);
+    if (failure && strcmp(failure, "tls_clock") == 0) return StrId::STR_BORGES_ERR_CLOCK;
+    if (failure && strcmp(failure, "tls_timeout") == 0) return StrId::STR_BORGES_ERR_TIMEOUT;
+    return StrId::STR_BORGES_ERR_TRANSPORT;
+  }
+  if (strcmp(code, "low_memory") == 0) return StrId::STR_BORGES_ERR_TRANSPORT;
   if (strcmp(code, "no_wifi") == 0) return StrId::STR_BORGES_ERR_NO_WIFI;
   if (strcmp(code, "wifi_auth") == 0) return StrId::STR_BORGES_ERR_WIFI_AUTH;
   if (strcmp(code, "wifi_timeout") == 0) return StrId::STR_BORGES_ERR_TIMEOUT;

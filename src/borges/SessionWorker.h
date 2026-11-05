@@ -19,23 +19,29 @@ class SessionWorker {
  public:
   using Fn = void (*)(void*);
 
+  ~SessionWorker();
+
   // False when the task could not be created. Nothing ran.
   bool start(Fn fn, void* context);
-  bool running() const { return running_.load(std::memory_order_acquire); }
+  bool running() const { return state_ && state_->running.load(std::memory_order_acquire); }
   // The session ended by itself since the last start().
   bool finished() const { return started_ && !running(); }
   void reset() { started_ = false; }
   // Waits up to waitMs for a session already told to cancel. False: it is still inside
-  // one uninterruptible step. The caller then must not free what the session uses, and
-  // must leave through a reboot or sleep, which is how every network boot ends anyway.
+  // one uninterruptible step (a socket read blocks for up to 10 s). The caller then must not
+  // free the context, and leaks it: every network boot ends in a reboot or sleep.
   bool waitForExit(uint32_t waitMs) const;
 
  private:
-  static void trampoline(void* self);
-  Fn fn_ = nullptr;
-  void* context_ = nullptr;
+  // On the heap: a session that outlives its activity still writes here on its way out.
+  struct State {
+    Fn fn = nullptr;
+    void* context = nullptr;
+    std::atomic<bool> running{false};
+  };
+  static void trampoline(void* state);
+  State* state_ = nullptr;
   bool started_ = false;
-  std::atomic<bool> running_{false};
 };
 
 }  // namespace glue
