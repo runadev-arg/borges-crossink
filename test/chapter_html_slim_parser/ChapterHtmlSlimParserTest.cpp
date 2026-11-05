@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstring>
 #include <memory>
 #include <string>
 
@@ -52,6 +53,47 @@ class ChapterHtmlSlimParserTest : public ::testing::TestWithParam<const char*> {
     return style;
   }
 };
+
+// The KOReader position mapper recounts this coordinate from the XHTML, with no stylesheet: text
+// that never reaches a page has to count, and only the excluded elements may not.
+TEST_F(ChapterHtmlSlimParserTest, VisibleTextOffsetCountsWhatLayoutSkips) {
+  const auto element = [&](const char* name, const XML_Char** attributes, const char* text) {
+    ChapterHtmlSlimParser::startElement(&parser, name, attributes);
+    if (text) ChapterHtmlSlimParser::characterData(&parser, text, static_cast<int>(strlen(text)));
+    ChapterHtmlSlimParser::endElement(&parser, name);
+  };
+  cssParser.rulesBySelector_[".gone"] = CssParser::parseInlineStyle("display: none");
+  const XML_Char* gone[] = {"class", "gone", nullptr};
+  const XML_Char* hidden[] = {"hidden", "hidden", nullptr};
+  const XML_Char* pageBreak[] = {"epub:type", "pagebreak", nullptr};
+
+  element("p", nullptr, "ab");
+  EXPECT_EQ(parser.getVisibleTextLength(), 2u);
+  element("p", gone, "cd");
+  EXPECT_EQ(parser.getVisibleTextLength(), 4u);
+  element("p", hidden, "ef");
+  EXPECT_EQ(parser.getVisibleTextLength(), 6u);
+  element("span", pageBreak, "g\xC3\xB1");
+  EXPECT_EQ(parser.getVisibleTextLength(), 8u);
+
+  for (const char* excluded : {"head", "style", "script", "title", "rp", "rt"}) {
+    element(excluded, nullptr, "nope");
+    EXPECT_EQ(parser.getVisibleTextLength(), 8u) << excluded;
+  }
+  // Inside something skipped, an excluded element still does not count.
+  ChapterHtmlSlimParser::startElement(&parser, "div", gone);
+  element("style", nullptr, "nope");
+  element("p", nullptr, "hi");
+  ChapterHtmlSlimParser::endElement(&parser, "div");
+  EXPECT_EQ(parser.getVisibleTextLength(), 10u);
+  element("p", nullptr, "jk");
+  EXPECT_EQ(parser.getVisibleTextLength(), 12u);
+
+  // What stands in for an image that cannot be shown is not in the document's text.
+  const XML_Char* image[] = {"src", "missing.png", "alt", "a picture", nullptr};
+  element("img", image, nullptr);
+  EXPECT_EQ(parser.getVisibleTextLength(), 12u);
+}
 
 TEST_F(ChapterHtmlSlimParserTest, BlockquoteParagraphsInheritItalicAndRestoreFollowingText) {
   cssParser.rulesBySelector_["blockquote"] =

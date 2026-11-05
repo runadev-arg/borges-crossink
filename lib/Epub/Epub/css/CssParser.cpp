@@ -542,6 +542,12 @@ void CssParser::parseDeclarationIntoStyle(std::string_view decl, CssStyle& style
                     : iequalsAscii(displayValue, "inline") ? CssDisplay::Inline
                                                            : CssDisplay::Block;
     style.defined.display = 1;
+  } else if (iequalsAscii(name, "white-space")) {
+    const std::string_view whiteSpaceValue = stripTrailingImportant(value);
+    style.defined.whiteSpace = 1;
+    style.defined.whiteSpacePreserved =
+        iequalsAscii(whiteSpaceValue, "pre") || iequalsAscii(whiteSpaceValue, "pre-wrap") ||
+        iequalsAscii(whiteSpaceValue, "pre-line") || iequalsAscii(whiteSpaceValue, "break-spaces");
   } else if (iequalsAscii(name, "background") || iequalsAscii(name, "background-color")) {
     bool backgroundBlack = false;
     if (tryInterpretBackgroundBlack(value, backgroundBlack)) {
@@ -1057,6 +1063,8 @@ bool CssParser::writeCssStylePayload(FsFile& file, const CssStyle& style) {
   if (style.defined.imageHeight) definedBits |= 1 << 13;
   if (style.defined.imageWidth) definedBits |= 1 << 14;
   if (style.defined.display) definedBits |= 1 << 15;
+  if (style.defined.whiteSpace) definedBits |= 1 << 24;
+  if (style.defined.whiteSpacePreserved) definedBits |= 1 << 25;
   if (style.defined.backgroundBlack) definedBits |= 1 << 16;
   if (style.defined.verticalAlign) definedBits |= 1 << 17;
   if (style.defined.direction) definedBits |= 1 << 18;
@@ -1135,6 +1143,8 @@ bool CssParser::readCssStylePayload(FsFile& file, CssStyle& style) {
   style.defined.imageHeight = (definedBits & 1 << 13) != 0;
   style.defined.imageWidth = (definedBits & 1 << 14) != 0;
   style.defined.display = (definedBits & 1 << 15) != 0;
+  style.defined.whiteSpace = (definedBits & 1 << 24) != 0;
+  style.defined.whiteSpacePreserved = (definedBits & 1 << 25) != 0;
   style.defined.backgroundBlack = (definedBits & 1 << 16) != 0;
   style.defined.verticalAlign = (definedBits & 1 << 17) != 0;
   style.defined.direction = (definedBits & 1 << 18) != 0;

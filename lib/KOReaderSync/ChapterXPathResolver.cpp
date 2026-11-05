@@ -1,694 +1,1193 @@
 #include "ChapterXPathResolver.h"
 
+#include <Epub/htmlEntities.h>
+#include <Epub/parsers/VisibleOffsetRules.h>
 #include <Logging.h>
 #include <Print.h>
 #include <Utf8.h>
 #include <XmlParserUtils.h>
 #include <expat.h>
+#include <strings.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <new>
 #include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
 
 namespace {
-std::string stripPrefix(const XML_Char* name) {
-  if (!name) {
-    return "";
-  }
 
-  const char* local = std::strrchr(name, ':');
-  return local ? std::string(local + 1) : std::string(name);
+// ---------------------------------------------------------------------------------------------
+// crengine's element table (crengine/include/fb2def.h). An element it does not know is inline
+// and allows text. epub.css changes none of these for a document opened today.
+// ---------------------------------------------------------------------------------------------
+constexpr char kBlockText[] =
+    " address article aside blockquote body book-name book-title button canvas caption center city custom-info "
+    "datalist date dd details dialog dir div dl dt email fieldset figcaption figure footer form frame frameset h1 h2 "
+    "h3 h4 h5 h6 header hgroup history home-page hr id iframe isbn keywords lang legend li listing main map marquee "
+    "menu multicol nav nickname noembed noframes noscript ol optgroup output p plaintext pre program-used publisher "
+    "search section select sequence src-lang src-ocr src-url subtitle summary td template text-author textarea th "
+    "title ul v version video xmp year ";
+constexpr char kBlockNoText[] =
+    " annotation applet area audio author col colgroup coverpage document-info empty-line epigraph head html input "
+    "keygen param part poem publish-info source src-title-info stanza table tbody tfoot thead title-info tr track ";
+constexpr char kHiddenText[] = " binary genre script style stylesheet ";
+constexpr char kHiddenNoText[] = " base basefont bgsound description link meta ";
+constexpr char kInlineNoText[] = " embed image img object svg ";
+constexpr char kPre[] = " listing plaintext pre style textarea xmp ";
+// Text inside these is not stored as written, or only partly: no exact offset can be named.
+constexpr char kOpaque[] = " math svg ";
+constexpr char kSvgText[] = " desc metadata style text textPath title tspan ";
+
+constexpr size_t kMaxTagLen = 24;
+constexpr int kTextSplitSize = 8192;  // TEXT_SPLIT_SIZE in crengine/src/lvxml.cpp
+
+bool inWordList(const char* list, const char* name, const size_t len) {
+  for (const char* p = list; (p = strstr(p, name)) != nullptr; p += len) {
+    if (p[-1] == ' ' && p[len] == ' ') return true;
+  }
+  return false;
 }
 
-struct NameCounter {
-  std::string name;
-  int count;
+enum class Display : uint8_t { Inline, Block, None };
+
+// Reads one property out of a style="..." attribute. The value, lowercased, goes in `value`.
+bool inlineStyleValue(const char* style, const char* prop, char* value, const size_t valueSize) {
+  const size_t propLen = strlen(prop);
+  for (const char* p = style; *p;) {
+    while (*p == ' ' || *p == ';' || *p == '\t' || *p == '\n') p++;
+    const char* colon = strchr(p, ':');
+    if (!colon) return false;
+    const char* nameEnd = colon;
+    while (nameEnd > p && (nameEnd[-1] == ' ' || nameEnd[-1] == '\t')) nameEnd--;
+    const char* v = colon + 1;
+    while (*v == ' ' || *v == '\t') v++;
+    if (static_cast<size_t>(nameEnd - p) == propLen && strncasecmp(p, prop, propLen) == 0) {
+      size_t n = 0;
+      while (v[n] && v[n] != ';' && v[n] != ' ' && v[n] != '!' && n + 1 < valueSize) {
+        value[n] = (v[n] >= 'A' && v[n] <= 'Z') ? static_cast<char>(v[n] + 32) : v[n];
+        n++;
+      }
+      value[n] = '\0';
+      return true;
+    }
+    const char* semi = strchr(v, ';');
+    if (!semi) return false;
+    p = semi + 1;
+  }
+  return false;
+}
+
+// A lone DocFragment has no index, as ldomXPointer::toStringV2() writes it.
+std::string bodyPointer(const int spineIndex, const int spineCount) {
+  if (spineCount <= 1) return "/body/DocFragment/body";
+  return "/body/DocFragment[" + std::to_string(spineIndex + 1) + "]/body";
+}
+
+uint32_t hashName(const char* s, const size_t len) {
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < len; i++) h = (h ^ static_cast<uint8_t>(s[i])) * 16777619u;
+  return h;
+}
+
+// Expat reports namespaced names as written; crengine keeps only the local part, lowercased.
+size_t localName(const char* raw, char* out, const size_t outSize) {
+  const char* colon = strrchr(raw, ':');
+  const char* s = colon ? colon + 1 : raw;
+  size_t n = 0;
+  for (; s[n] && n + 1 < outSize; n++) {
+    out[n] = (s[n] >= 'A' && s[n] <= 'Z') ? static_cast<char>(s[n] + 32) : s[n];
+  }
+  out[n] = '\0';
+  return s[n] ? 0 : n;
+}
+
+// A parsed "/body/DocFragment[N]/body/a[2]/b/text()[3].45". Boxing elements only appear in
+// xpointers from DOM versions before 20200223, and are skipped: their children count in the
+// unboxed parent.
+struct ParsedPointer {
+  static constexpr int kMaxSteps = 32;
+  struct Step {
+    uint32_t hash;
+    uint16_t index;
+  };
+  Step steps[kMaxSteps];
+  int stepCount = 0;
+  int textIndex = 0;  // 0: names an element, not a text node
+  int offset = -1;    // -1: no ".N" suffix
+  bool targetIsListItem = false;
+
+  bool parse(const std::string& xpointer) {
+    static constexpr char kFragment[] = "/body/DocFragment";
+    if (xpointer.compare(0, sizeof(kFragment) - 1, kFragment) != 0) return false;
+    size_t pos = sizeof(kFragment) - 1;
+    if (pos < xpointer.size() && xpointer[pos] == '[') {
+      pos = xpointer.find(']', pos);
+      if (pos == std::string::npos) return false;
+      pos++;
+    }
+    if (pos == xpointer.size()) return true;
+    if (xpointer[pos] == '.') return parseOffset(xpointer, pos);
+    static constexpr char kBody[] = "/body";
+    if (xpointer.compare(pos, sizeof(kBody) - 1, kBody) != 0) return false;
+    pos += sizeof(kBody) - 1;
+    if (pos < xpointer.size() && xpointer[pos] == '[') {
+      const size_t close = xpointer.find(']', pos);
+      if (close == std::string::npos) return false;
+      pos = close + 1;
+    }
+    while (pos < xpointer.size()) {
+      if (xpointer[pos] == '.') return parseOffset(xpointer, pos);
+      if (xpointer[pos] != '/') return false;
+      pos++;
+      size_t end = pos;
+      while (end < xpointer.size() && xpointer[end] != '/' && xpointer[end] != '.' && xpointer[end] != '[') end++;
+      const size_t nameLen = end - pos;
+      if (nameLen == 0) return false;
+      int index = 1;
+      size_t after = end;
+      if (after < xpointer.size() && xpointer[after] == '[') {
+        index = 0;
+        after++;
+        while (after < xpointer.size() && xpointer[after] >= '0' && xpointer[after] <= '9') {
+          if (index > 100000) return false;
+          index = index * 10 + (xpointer[after++] - '0');
+        }
+        if (after >= xpointer.size() || xpointer[after] != ']' || index == 0) return false;
+        after++;
+      }
+      if (nameLen == 6 && xpointer.compare(pos, 6, "text()") == 0) {
+        textIndex = index;
+        pos = after;
+        if (pos < xpointer.size() && xpointer[pos] != '.') return false;
+        if (pos < xpointer.size()) return parseOffset(xpointer, pos);
+        return true;
+      }
+      const bool isBox =
+          xpointer.compare(pos, nameLen, "autoBoxing") == 0 || xpointer.compare(pos, nameLen, "tabularBox") == 0 ||
+          xpointer.compare(pos, nameLen, "rubyBox") == 0 || xpointer.compare(pos, nameLen, "mathBox") == 0 ||
+          xpointer.compare(pos, nameLen, "floatBox") == 0 || xpointer.compare(pos, nameLen, "inlineBox") == 0;
+      if (!isBox) {
+        if (stepCount >= kMaxSteps) return false;
+        steps[stepCount].hash = hashName(xpointer.data() + pos, nameLen);
+        steps[stepCount].index = static_cast<uint16_t>(index);
+        stepCount++;
+        targetIsListItem = nameLen == 2 && xpointer.compare(pos, 2, "li") == 0;
+      }
+      pos = after;
+    }
+    return true;
+  }
+
+ private:
+  bool parseOffset(const std::string& xpointer, size_t pos) {
+    pos++;
+    if (pos >= xpointer.size()) return false;
+    int value = 0;
+    for (; pos < xpointer.size(); pos++) {
+      if (xpointer[pos] < '0' || xpointer[pos] > '9' || value > 100000000) return false;
+      value = value * 10 + (xpointer[pos] - '0');
+    }
+    offset = value;
+    return true;
+  }
 };
 
-struct ParentState {
-  std::vector<NameCounter> children;
+// ---------------------------------------------------------------------------------------------
+// The walker: expat events in, crengine's view of the document out.
+// ---------------------------------------------------------------------------------------------
+class CreWalker final : public Print {
+ public:
+  enum class Mode : uint8_t {
+    Count,          // Totals only
+    EmitOffset,     // Offset to xpointer
+    EmitElement,    // Nth <p> or <li> to xpointer
+    ResolvePointer  // Xpointer to offset
+  };
 
-  int nextIndex(const std::string& name) {
-    for (auto& child : children) {
-      if (child.name == name) {
-        child.count++;
-        return child.count;
+  CreWalker(const Mode mode, const int spineIndex, const int spineCount)
+      : mode_(mode), spineIndex_(spineIndex), spineCount_(spineCount) {
+    parser_ = XML_ParserCreate(nullptr);
+    if (!parser_) {
+      LOG_ERR("KOX", "Failed to create XML parser");
+      return;
+    }
+    XML_SetUserData(parser_, this);
+    XML_SetElementHandler(parser_, &CreWalker::startThunk, &CreWalker::endThunk);
+    XML_SetCharacterDataHandler(parser_, &CreWalker::charsThunk);
+    XML_SetCommentHandler(parser_, &CreWalker::commentThunk);
+    XML_SetProcessingInstructionHandler(parser_, &CreWalker::piThunk);
+    XML_SetCdataSectionHandler(parser_, &CreWalker::cdataThunk, &CreWalker::cdataThunk);
+    // The same entity handling as ChapterHtmlSlimParser: the offset has to count alike.
+    XML_SetDefaultHandlerExpand(parser_, &CreWalker::defaultThunk);
+  }
+
+  ~CreWalker() override { destroyXmlParser(parser_); }
+
+  void setTargetOffset(const uint32_t target, const uint8_t minDepth) {
+    targetOffset_ = target;
+    minDepth_ = minDepth;
+  }
+  void setCssParser(CssParser* css) { css_ = (css && !css->empty()) ? css : nullptr; }
+  void setTargetElement(const char* tag, const int ordinal) {
+    targetTagHash_ = hashName(tag, strlen(tag));
+    targetOrdinal_ = ordinal;
+  }
+  void setPointer(const ParsedPointer* pointer) { pointer_ = pointer; }
+
+  bool ok() const { return parser_ != nullptr && parseOk_; }
+
+  size_t write(uint8_t c) override { return write(&c, 1); }
+
+  size_t write(const uint8_t* buffer, size_t size) override {
+    if (!parser_ || !parseOk_ || stopped_) return size;
+    if (XML_Parse(parser_, reinterpret_cast<const char*>(buffer), static_cast<int>(size), XML_FALSE) != XML_STATUS_OK) {
+      const enum XML_Error error = XML_GetErrorCode(parser_);
+      if (error != XML_ERROR_ABORTED) {
+        LOG_ERR("KOX", "XML parse error: %s", XML_ErrorString(error));
+        parseOk_ = false;
+      }
+    }
+    return size;
+  }
+
+  void finish() {
+    if (!parser_ || !parseOk_ || stopped_) return;
+    if (XML_Parse(parser_, "", 0, XML_TRUE) == XML_STATUS_ERROR) {
+      LOG_ERR("KOX", "Final XML parse error: %s", XML_ErrorString(XML_GetErrorCode(parser_)));
+      parseOk_ = false;
+    }
+  }
+
+  uint32_t visibleChars() const { return visible_; }
+  uint32_t lastEligibleOffset() const { return lastEligible_; }
+  bool hasEligible() const { return hasEligible_; }
+  bool sawBody() const { return bodySeen_; }
+  bool hasMatch() const { return found_; }
+  uint32_t matchOffset() const { return matchOffset_; }
+  bool matchExact() const { return exact_; }
+  uint16_t paragraphs() const { return paragraphAtMatch_; }
+  uint16_t listItems() const { return listItemAtMatch_; }
+
+  std::string xpointer() const {
+    if (!found_) return "";
+    std::string out = bodyPointer(spineIndex_, spineCount_);
+    const char* name = snapNames_;
+    for (int i = 0; i < snapCount_; i++) {
+      out += '/';
+      out.append(name, snap_[i].nameLen);
+      name += snap_[i].nameLen;
+      // Only a complete read proves there is no second one. crengine accepts "[1]" either way.
+      if (snap_[i].index > 1 || snap_[i].hasLater || !parseOk_) {
+        out += '[';
+        out += std::to_string(snap_[i].index);
+        out += ']';
+      }
+    }
+    if (snapTextIndex_ > 0) {
+      out += "/text()";
+      if (snapTextIndex_ > 1 || snapTextTotal_ > snapTextIndex_ || !parseOk_) {
+        out += '[';
+        out += std::to_string(snapTextIndex_);
+        out += ']';
+      }
+      out += '.';
+      out += std::to_string(snapTextOffset_);
+    }
+    return out;
+  }
+
+ private:
+  static constexpr int kMaxDepth = 40;
+  static constexpr int kMaxCounters = 64;
+  static constexpr int kNamePool = 280;
+
+  struct Frame {
+    uint16_t nameOffset;
+    uint16_t index;  // 1-based among same-named siblings
+    uint16_t texts;  // Text nodes of this element that survive so far
+    uint16_t kids;   // Children of any kind that survive so far
+    uint8_t nameLen;
+    uint8_t counterBase;  // First sibling counter that belongs to this element's children
+    bool block : 1;
+    bool allowText : 1;
+    bool pre : 1;
+    bool stripNewline : 1;
+    bool hasChild : 1;
+    bool runLeading : 1;  // Nothing but empty text since the last non-inline child
+    bool afterBlock : 1;  // That child was a real block
+    bool lastEmptyText : 1;
+    bool hasBlock : 1;
+    bool hidden : 1;
+    bool opaque : 1;
+    bool svg : 1;
+    bool countersFull : 1;
+  };
+
+  struct Counter {
+    uint32_t hash;
+    uint16_t count;
+  };
+
+  static constexpr int kCssMemoSize = 16;
+  static constexpr uint8_t kCssHasDisplay = 1, kCssHasWhiteSpace = 2, kCssPre = 4, kCssDisplayShift = 3;
+  struct CssMemo {
+    uint32_t key = 0;
+    uint8_t found = 0;
+  };
+
+  struct SnapStep {
+    uint32_t hash;
+    uint16_t index;
+    uint8_t nameLen;
+    bool hasLater;
+  };
+
+  // ---- expat thunks ------------------------------------------------------------------------
+  static void XMLCALL startThunk(void* d, const XML_Char* name, const XML_Char** atts) {
+    static_cast<CreWalker*>(d)->onStart(name, atts);
+  }
+  static void XMLCALL endThunk(void* d, const XML_Char* name) { static_cast<CreWalker*>(d)->onEnd(name); }
+  static void XMLCALL charsThunk(void* d, const XML_Char* s, int len) { static_cast<CreWalker*>(d)->onChars(s, len); }
+  static void XMLCALL commentThunk(void* d, const XML_Char*) { static_cast<CreWalker*>(d)->endChunk(); }
+  static void XMLCALL cdataThunk(void* d) { static_cast<CreWalker*>(d)->endChunk(); }
+  static void XMLCALL piThunk(void* d, const XML_Char*, const XML_Char*) { static_cast<CreWalker*>(d)->onPi(); }
+  static void XMLCALL defaultThunk(void* d, const XML_Char* s, int len) {
+    static_cast<CreWalker*>(d)->onDefault(s, len);
+  }
+
+  // ---- helpers ------------------------------------------------------------------------------
+  void stop() {
+    stopped_ = true;
+    XML_StopParser(parser_, XML_FALSE);
+  }
+
+  void styleOf(const char* name, const size_t nameLen, const XML_Char** atts, const bool inheritedPre, Display& display,
+               bool& pre) {
+    display = Display::Inline;
+    if (inWordList(kBlockText, name, nameLen) || inWordList(kBlockNoText, name, nameLen)) {
+      display = Display::Block;
+    } else if (inWordList(kHiddenText, name, nameLen) || inWordList(kHiddenNoText, name, nameLen)) {
+      display = Display::None;
+    }
+    pre = inheritedPre || inWordList(kPre, name, nameLen);
+
+    const char* style = nullptr;
+    const char* classes = nullptr;
+    for (int i = 0; atts && atts[i]; i += 2) {
+      if (strcmp(atts[i], "style") == 0) style = atts[i + 1];
+      if (strcmp(atts[i], "class") == 0) classes = atts[i + 1];
+    }
+    if (css_) {
+      const uint8_t found = styleFromCss(name, nameLen, classes);
+      if (found & kCssHasDisplay) {
+        display = static_cast<Display>((found >> kCssDisplayShift) & 3);
+      }
+      if (found & kCssHasWhiteSpace) pre = (found & kCssPre) != 0;
+    }
+    if (!style) return;
+    char value[16];
+    if (inlineStyleValue(style, "display", value, sizeof(value))) {
+      if (strcmp(value, "none") == 0) {
+        display = Display::None;
+      } else if (strcmp(value, "inline") == 0 || strcmp(value, "inline-block") == 0 ||
+                 strcmp(value, "inline-table") == 0) {
+        display = Display::Inline;
+      } else if (value[0] && strcmp(value, "inherit") != 0) {
+        display = Display::Block;
+      }
+    }
+    if (inlineStyleValue(style, "white-space", value, sizeof(value))) {
+      pre = strncmp(value, "pre", 3) == 0 || strcmp(value, "break-spaces") == 0;
+    }
+  }
+
+  // setNodeStyle() in lvrend.cpp: whatever a publisher sets, a <br> stays inline unless hidden.
+  static void applyForcedDisplay(const char* name, const size_t nameLen, Display& display) {
+    if (nameLen == 2 && name[0] == 'b' && name[1] == 'r' && display != Display::None) display = Display::Inline;
+  }
+
+  // Classes repeat all through a chapter, and a look-up may seek the SD card.
+  uint8_t styleFromCss(const char* name, const size_t nameLen, const char* classes) {
+    uint32_t key = hashName(name, nameLen);
+    if (classes) key = (key * 31) ^ hashName(classes, strlen(classes));
+    key |= 1;  // Zero marks a free slot
+    CssMemo& memo = cssMemo_[(key >> 1) % kCssMemoSize];
+    if (memo.key == key) return memo.found;
+    const CssStyle resolved = css_->resolveStyle(name, classes ? classes : "");
+    uint8_t found = 0;
+    if (resolved.hasDisplay()) {
+      const Display d = resolved.display == CssDisplay::None     ? Display::None
+                        : resolved.display == CssDisplay::Inline ? Display::Inline
+                                                                 : Display::Block;
+      found |= kCssHasDisplay | static_cast<uint8_t>(static_cast<uint8_t>(d) << kCssDisplayShift);
+    }
+    if (resolved.defined.whiteSpace) {
+      found |= kCssHasWhiteSpace;
+      if (resolved.defined.whiteSpacePreserved) found |= kCssPre;
+    }
+    memo.key = key;
+    memo.found = found;
+    return found;
+  }
+
+  // ---- element events ----------------------------------------------------------------------
+  void onStart(const XML_Char* rawName, const XML_Char** atts) {
+    if (excludedNesting_ > 0 || isVisibleOffsetExcludedTag(rawName)) excludedNesting_++;
+    if (!tracking_) return;
+
+    char name[kMaxTagLen];
+    const size_t nameLen = localName(rawName, name, sizeof(name));
+
+    if (!inBody_) {
+      if (!bodySeen_ && nameLen == 4 && strcmp(name, "body") == 0) {
+        inBody_ = true;
+        bodySeen_ = true;
+        pushBody(atts);
+      }
+      return;
+    }
+    endChunk();
+
+    if (overflowNesting_ > 0) {
+      overflowNesting_++;
+      return;
+    }
+    if (depth_ + 1 >= kMaxDepth || usedName_ + nameLen > kNamePool || nameLen == 0) {
+      // Too deep to follow (crengine has no limit, this has to). Nothing in here is eligible.
+      overflowNesting_ = 1;
+      return;
+    }
+
+    if (nameLen == 1 && name[0] == 'p') paragraphCount_++;
+    if (nameLen == 2 && name[0] == 'l' && name[1] == 'i') listItemCount_++;
+
+    Frame& parent = frames_[depth_];
+    Display display;
+    bool pre;
+    styleOf(name, nameLen, atts, parent.pre, display, pre);
+    applyForcedDisplay(name, nameLen, display);
+    if (!parent.hidden) applyChildToParent(parent, display);
+    parent.hasChild = true;
+    parent.kids++;
+    if (tentative_) confirmTentative();
+
+    const uint32_t hash = hashName(name, nameLen);
+    const uint16_t index = nextSiblingIndex(parent, hash);
+    const bool unknownIndex = parent.countersFull;
+
+    depth_++;
+    Frame& frame = frames_[depth_];
+    memset(&frame, 0, sizeof(frame));
+    frame.nameOffset = usedName_;
+    frame.nameLen = static_cast<uint8_t>(nameLen);
+    memcpy(names_ + usedName_, name, nameLen);
+    usedName_ = static_cast<uint16_t>(usedName_ + nameLen);
+    frame.index = index;
+    frame.counterBase = usedCounters_;
+    frame.block = display == Display::Block;
+    frame.hidden = parent.hidden || display == Display::None;
+    frame.svg = parent.svg || (nameLen == 3 && strcmp(name, "svg") == 0);
+    frame.opaque = parent.opaque || unknownIndex || inWordList(kOpaque, name, nameLen);
+    frame.allowText = !inWordList(kBlockNoText, name, nameLen) && !inWordList(kHiddenNoText, name, nameLen) &&
+                      !inWordList(kInlineNoText, name, nameLen);
+    frame.pre = pre;
+    if (frame.svg) {
+      frame.allowText = inWordList(kSvgText, rawName, strlen(rawName));
+      frame.pre = frame.allowText;
+    }
+    frame.stripNewline = (nameLen == 3 && strcmp(name, "pre") == 0) || (nameLen == 8 && strcmp(name, "textarea") == 0);
+    frame.runLeading = true;
+
+    noteLaterSibling(hash);
+    if (found_) return;
+
+    switch (mode_) {
+      case Mode::EmitElement:
+        if (hash == targetTagHash_ && ++elementCount_ == targetOrdinal_) {
+          snapshot(depth_);
+          found_ = true;
+          paragraphAtMatch_ = paragraphCount_;
+          listItemAtMatch_ = listItemCount_;
+          liveDepth_ = depth_;
+          armNeeds();
+        }
+        break;
+      case Mode::ResolvePointer:
+        if (matched_ == depth_ - 1 && depth_ <= pointer_->stepCount && pointer_->steps[depth_ - 1].hash == hash &&
+            pointer_->steps[depth_ - 1].index == index) {
+          matched_ = depth_;
+          armPointerIfComplete();
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  void pushBody(const XML_Char** atts) {
+    depth_ = 0;
+    Frame& frame = frames_[0];
+    memset(&frame, 0, sizeof(frame));
+    frame.index = 1;
+    frame.block = true;
+    frame.allowText = true;
+    frame.runLeading = true;
+    Display display;
+    bool pre;
+    styleOf("body", 4, atts, false, display, pre);
+    frame.pre = pre;
+    frame.hidden = display == Display::None;
+    if (mode_ == Mode::ResolvePointer) armPointerIfComplete();
+  }
+
+  // What a new child does to the text nodes its parent has so far (see autoboxChildren() and
+  // initNodeRendMethod() in lvtinydom.cpp): an element that is not inline ends a run of inlines,
+  // and the empty text at the edges of a run is removed.
+  void applyChildToParent(Frame& parent, const Display child) {
+    switch (child) {
+      case Display::Block:
+        if (parent.lastEmptyText && parent.texts > 0) {
+          parent.texts--;
+          parent.kids--;
+          dropTentative();
+        }
+        parent.hasBlock = true;
+        parent.afterBlock = true;
+        parent.runLeading = true;
+        break;
+      case Display::None:
+        if (parent.hasBlock) {
+          if (parent.lastEmptyText && parent.texts > 0) {
+            parent.texts--;
+            parent.kids--;
+          }
+          parent.afterBlock = true;
+        }
+        parent.runLeading = true;
+        break;
+      case Display::Inline:
+        parent.runLeading = false;
+        break;
+    }
+    parent.lastEmptyText = false;
+  }
+
+  uint16_t nextSiblingIndex(Frame& parent, const uint32_t hash) {
+    const uint8_t limit = usedCounters_;
+    for (uint8_t i = parent.counterBase; i < limit; i++) {
+      if (counters_[i].hash == hash) return ++counters_[i].count;
+    }
+    if (usedCounters_ >= kMaxCounters) {
+      parent.countersFull = true;
+      return 1;
+    }
+    counters_[usedCounters_] = {hash, 1};
+    usedCounters_++;
+    return 1;
+  }
+
+  void onEnd(const XML_Char*) {
+    if (excludedNesting_ > 0) excludedNesting_--;
+    if (!tracking_ || !inBody_) return;
+    endChunk();
+    if (overflowNesting_ > 0) {
+      overflowNesting_--;
+      return;
+    }
+
+    Frame& frame = frames_[depth_];
+    if (!frame.hidden && frame.hasBlock && frame.lastEmptyText && frame.texts > 0) {
+      frame.texts--;
+      dropTentative();
+    }
+    if (tentative_) confirmTentative();
+
+    if (found_) {
+      if (depth_ == snapCount_ && liveDepth_ == depth_ && snapTextIndex_ > 0) {
+        snapTextTotal_ = frame.texts;
+        if (needText_) {
+          needText_ = false;
+          settleNeeds();
+        }
+      }
+      if (depth_ <= liveDepth_) liveDepth_ = depth_ - 1;
+    } else if (mode_ == Mode::ResolvePointer && depth_ == matched_ && depth_ > 0) {
+      matched_ = depth_ - 1;
+      if (elementWaiting_) {
+        // Fewer children than the point names: what follows the element.
+        elementWaiting_ = false;
+        elementArmed_ = true;
+      } else if (pointerArmed_ && !elementArmed_) {
+        // The element closed without the text node the pointer names: crengine's DOM and this
+        // one disagree about it. The last text of that element is the nearest there is.
+        exact_ = false;
+        matchOffset_ = nearOffset_;
+        matchNow();
       }
     }
 
-    children.push_back({name, 1});
-    return 1;
+    if (depth_ == 0) {
+      inBody_ = false;
+      if (found_) {
+        if (mode_ != Mode::ResolvePointer) stop();
+      } else if (mode_ == Mode::ResolvePointer && pointerArmed_) {
+        // An element pointer with nothing but markup after it: the end of the spine item. A text
+        // pointer directly in <body> that was not there: the last text of the body.
+        const bool element = pointer_->textIndex == 0;
+        exact_ = element;
+        matchOffset_ = element ? visible_ : nearOffset_;
+        matchNow();
+      }
+      return;
+    }
+    usedCounters_ = frame.counterBase;
+    usedName_ = frame.nameOffset;
+    depth_--;
+    if (elementWaiting_ && depth_ == matched_) armWhenChildrenPassed();
   }
+
+  void onPi() {
+    if (!tracking_ || !inBody_ || overflowNesting_ > 0) return;
+    endChunk();
+    // crengine's parser makes an (empty, inline) element out of a processing instruction.
+    Frame& parent = frames_[depth_];
+    if (!parent.hidden) applyChildToParent(parent, Display::Inline);
+    parent.hasChild = true;
+  }
+
+  // ---- text ---------------------------------------------------------------------------------
+  void onDefault(const XML_Char* s, const int len) {
+    // Same as ChapterHtmlSlimParser::defaultHandlerExpand: an entity expat could not expand.
+    if (len < 3 || s[0] != '&' || s[len - 1] != ';') return;
+    const char* value = lookupHtmlEntity(s, static_cast<size_t>(len));
+    if (value) {
+      feed(value, static_cast<int>(strlen(value)), true, len);
+    } else {
+      // crengine knows far more names than this table. Counted as written, stored as one.
+      feedUnknownEntity(s, len);
+    }
+  }
+
+  void onChars(const XML_Char* s, const int len) {
+    if (len <= 0) return;
+    const int consumed = XML_GetCurrentByteCount(parser_);
+    const bool entity = consumed > len && consumed >= 4 && len <= 4;
+    if (entity) {
+      feed(s, len, true, consumed);
+    } else {
+      // A CRLF arrives as one "\n", and crengine's limit counts it as the two it was.
+      feed(s, len, false, consumed > len ? consumed - len : 0);
+    }
+  }
+
+  void feedUnknownEntity(const char* s, const int len) {
+    if (excludedNesting_ == 0) visible_ += static_cast<uint32_t>(len);
+    if (!tracking_ || !inBody_ || overflowNesting_ > 0) return;
+    const uint32_t at = excludedNesting_ == 0 ? visible_ - static_cast<uint32_t>(len) : visible_;
+    storeChar('?', at, false, len);
+  }
+
+  void feed(const char* s, const int len, const bool entity, const int rawExtra) {
+    const auto* ptr = reinterpret_cast<const unsigned char*>(s);
+    const auto* const end = ptr + len;
+    bool first = true;
+    while (ptr < end) {
+      const uint32_t cp = utf8NextCodepoint(&ptr);
+      const uint32_t at = visible_;
+      if (excludedNesting_ == 0) visible_++;
+      if (!tracking_ || !inBody_ || overflowNesting_ > 0) continue;
+      const int raw = entity ? (first ? rawExtra : 0) : 1 + (first ? rawExtra : 0);
+      first = false;
+      storeChar(cp, at, !entity && isSpaceCp(cp), raw);
+    }
+  }
+
+  static bool isSpaceCp(const uint32_t cp) { return cp == ' ' || cp == '\n' || cp == '\t' || cp == '\r'; }
+
+  // One decoded character, as lvxml.cpp PreProcessXmlString() and ExpandTabs() treat it.
+  void storeChar(const uint32_t cp, const uint32_t at, const bool literalSpace, const int raw) {
+    Frame& frame = frames_[depth_];
+    if (!frame.allowText) return;
+    if (!chunkOpen_) openChunk();
+
+    int stored = 1;
+    if (frame.stripNewline) {
+      frame.stripNewline = false;
+      if (cp == '\n' && !frame.hasChild) stored = 0;
+    }
+    if (stored == 1) {
+      if (frame.pre) {
+        if (cp == '\t') {
+          stored = 8 - (chunkColumn_ & 7);
+          chunkColumn_ += stored;
+        } else if (cp == '\n' || cp == '\r') {
+          chunkColumn_ = 1;  // ExpandTabs() zeroes it, then counts the newline itself
+        } else {
+          chunkColumn_++;
+        }
+      } else if (literalSpace) {
+        if (chunkSpaces_ > 0) stored = 0;
+        chunkSpaces_++;
+      } else {
+        chunkSpaces_ = 0;
+      }
+    }
+
+    if (!isSpaceCp(cp)) chunkHasContent_ = true;
+    onStoredChar(cp, at, stored);
+    chunkStored_ += stored;
+    chunkRaw_ += raw;
+    if (raw > 0 && literalSpace && (cp == ' ' || cp == '\n' || cp == '\r')) {
+      chunkSplitRaw_ = chunkRaw_;
+      chunkSplitStored_ = chunkStored_;
+      chunkSplitVisible_ = visible_;
+    }
+    if (chunkRaw_ >= kTextSplitSize) splitChunk();
+  }
+
+  void openChunk() {
+    chunkOpen_ = true;
+    chunkHasContent_ = false;
+    chunkStored_ = 0;
+    chunkRaw_ = 0;
+    chunkSpaces_ = 0;
+    chunkColumn_ = 0;
+    chunkSplitRaw_ = 0;
+    chunkSplitStored_ = 0;
+    chunkExtraNodes_ = 0;
+  }
+
+  // TEXT_SPLIT_SIZE source characters without a '<': crengine gives what it has up to the last
+  // space to a text node, and the rest starts the next one.
+  void splitChunk() {
+    Frame& frame = frames_[depth_];
+    const int keepStored = chunkSplitRaw_ > 0 ? chunkSplitStored_ : chunkStored_;
+    const int keepRaw = chunkSplitRaw_ > 0 ? chunkSplitRaw_ : chunkRaw_;
+    const uint32_t restVisible = chunkSplitRaw_ > 0 ? chunkSplitVisible_ : visible_;
+
+    if (emitRecordOpen_) {
+      if (emitOffset_ < keepStored) {
+        commitEmit(frame);
+        emitRecordOpen_ = false;
+      } else {
+        emitOffset_ -= keepStored;
+      }
+    }
+    if (mode_ == Mode::ResolvePointer && !found_ && chunkOwnsPointer()) {
+      const int wanted = pointer_->offset < 0 ? 0 : pointer_->offset;
+      const int node = frame.texts + 1;
+      if (node == pointer_->textIndex && wanted < keepStored) {
+        matchOffset_ = recordVisible_;
+        matchNow();
+      } else if (node == pointer_->textIndex && wanted == keepStored) {
+        matchOffset_ = restVisible;
+        matchNow();
+      } else if (node + 1 == pointer_->textIndex && wanted < chunkStored_ - keepStored) {
+        // Already read, and the rest of a split has no spaces to collapse.
+        matchOffset_ = restVisible + static_cast<uint32_t>(wanted);
+        matchNow();
+      }
+      recordOpen_ = false;
+      nearOffset_ = restVisible;
+    }
+
+    frame.texts++;
+    frame.kids++;
+    frame.hasChild = true;
+    frame.runLeading = false;
+    frame.lastEmptyText = false;
+    chunkStored_ -= keepStored;
+    chunkRaw_ -= keepRaw;
+    chunkSplitRaw_ = 0;
+    chunkSplitStored_ = 0;
+    chunkSpaces_ = 0;
+    chunkColumn_ = 0;
+    chunkHasContent_ = chunkStored_ > 0;
+    chunkExtraNodes_++;
+  }
+
+  // A text node ends at any markup. It may be dropped: see ldomElementWriter::onText() and the
+  // removal of empty text in autoboxChildren().
+  void endChunk() {
+    if (!chunkOpen_) return;
+    chunkOpen_ = false;
+    Frame& frame = frames_[depth_];
+    const bool empty = !chunkHasContent_ && chunkExtraNodes_ == 0;
+
+    bool survives = true;
+    if (empty && !frame.pre) {
+      if (frame.block && !frame.hasChild) {
+        survives = false;
+      } else if (!frame.hidden && frame.runLeading && frame.afterBlock) {
+        survives = false;
+      }
+    }
+
+    if (mode_ == Mode::ResolvePointer && !found_) {
+      if (tentative_) confirmTentative();
+      if (!found_ && chunkOwnsPointer() && survives) {
+        if (frame.texts + 1 == pointer_->textIndex) {
+          const int wanted = pointer_->offset < 0 ? 0 : pointer_->offset;
+          const bool hit = recordOpen_ || wanted == chunkStored_;
+          // Past the end of the node crengine refuses the pointer. The end of it is the nearest.
+          const uint32_t where = recordOpen_ ? recordVisible_ : visible_;
+          if (!hit) exact_ = false;
+          if (empty && !frame.pre) {
+            // Empty text may still go, if a block comes next: only then is this settled.
+            tentative_ = true;
+            tentativeOffset_ = where;
+          } else {
+            matchOffset_ = where;
+            matchNow();
+          }
+        } else {
+          nearOffset_ = visible_;
+        }
+      }
+    }
+    recordOpen_ = false;
+
+    if (survives) {
+      if (emitRecordOpen_) commitEmit(frame);
+      frame.texts++;
+      frame.kids++;
+      frame.hasChild = true;
+      if (elementWaiting_ && depth_ == matched_) armWhenChildrenPassed();
+      if (empty && !frame.pre) {
+        frame.lastEmptyText = true;
+      } else {
+        frame.runLeading = false;
+        frame.lastEmptyText = false;
+      }
+    }
+    emitRecordOpen_ = false;
+  }
+
+  bool chunkOwnsPointer() const {
+    return pointerArmed_ && !elementArmed_ && matched_ == depth_ && depth_ == pointer_->stepCount;
+  }
+
+  void onStoredChar(const uint32_t cp, const uint32_t at, const int stored) {
+    const bool excluded = excludedNesting_ > 0;
+    const Frame& frame = frames_[depth_];
+    const bool content = stored > 0 && !isSpaceCp(cp);
+
+    if (!excluded && content && !frame.opaque && depth_ >= minDepth_) {
+      lastEligible_ = at;
+      hasEligible_ = true;
+      if (mode_ == Mode::EmitOffset && !found_ && !emitRecordOpen_ && at >= targetOffset_) {
+        emitRecordOpen_ = true;
+        emitOffset_ = chunkStored_;
+      }
+    }
+
+    if (mode_ != Mode::ResolvePointer || found_) return;
+    if (elementArmed_ && !excluded && content) {
+      matchOffset_ = at;
+      matchNow();
+      return;
+    }
+    if (chunkOwnsPointer() && !recordOpen_ && stored > 0 && frame.texts + 1 == pointer_->textIndex) {
+      const int wanted = pointer_->offset < 0 ? 0 : pointer_->offset;
+      if (wanted >= chunkStored_ && wanted < chunkStored_ + stored) {
+        recordOpen_ = true;
+        recordVisible_ = at;
+      }
+    }
+  }
+
+  void commitEmit(const Frame& frame) {
+    snapshot(depth_);
+    snapTextIndex_ = frame.texts + 1;
+    snapTextOffset_ = emitOffset_;
+    snapTextTotal_ = snapTextIndex_;
+    found_ = true;
+    matchOffset_ = targetOffset_;
+    liveDepth_ = depth_;
+    armNeeds();
+  }
+
+  // ---- matching ------------------------------------------------------------------------------
+  void armPointerIfComplete() {
+    if (matched_ != pointer_->stepCount || pointerArmed_) return;
+    pointerArmed_ = true;
+    nearOffset_ = visible_;
+    paragraphAtMatch_ = paragraphCount_;
+    listItemAtMatch_ = listItemCount_;
+    // An element xpointer lands on the first text at or after that element's start, or, with a
+    // point (".4"), after that many of its children.
+    if (pointer_->textIndex == 0) {
+      elementWaiting_ = pointer_->offset > 0;
+      elementArmed_ = !elementWaiting_;
+    }
+  }
+
+  void matchNow() {
+    found_ = true;
+    tracking_ = false;
+  }
+
+  void armWhenChildrenPassed() {
+    if (frames_[matched_].kids >= pointer_->offset) {
+      elementWaiting_ = false;
+      elementArmed_ = true;
+    }
+  }
+
+  void dropTentative() {
+    if (tentative_) exact_ = true;
+    tentative_ = false;
+  }
+
+  void confirmTentative() {
+    tentative_ = false;
+    matchOffset_ = tentativeOffset_;
+    matchNow();
+  }
+
+  void snapshot(const int depth) {
+    snapCount_ = 0;
+    uint16_t used = 0;
+    for (int d = 1; d <= depth; d++) {
+      const Frame& frame = frames_[d];
+      SnapStep& step = snap_[snapCount_++];
+      step.hash = hashName(names_ + frame.nameOffset, frame.nameLen);
+      step.index = frame.index;
+      step.nameLen = frame.nameLen;
+      step.hasLater = false;
+      memcpy(snapNames_ + used, names_ + frame.nameOffset, frame.nameLen);
+      used = static_cast<uint16_t>(used + frame.nameLen);
+    }
+  }
+
+  // What is still unknown about the found path: the "[1]" forms depend on what follows.
+  void armNeeds() {
+    needSteps_ = 0;
+    for (int i = 0; i < snapCount_; i++) {
+      if (snap_[i].index == 1) needSteps_++;
+    }
+    needText_ = snapTextIndex_ == 1;
+    settleNeeds();
+  }
+
+  void settleNeeds() {
+    if (found_ && needSteps_ == 0 && !needText_) stop();
+  }
+
+  void noteLaterSibling(const uint32_t hash) {
+    if (!found_) return;
+    const int level = depth_;
+    if (level > snapCount_ || level - 1 > liveDepth_) return;
+    SnapStep& step = snap_[level - 1];
+    if (step.hash == hash && !step.hasLater) {
+      step.hasLater = true;
+      if (step.index == 1 && needSteps_ > 0) {
+        needSteps_--;
+        settleNeeds();
+      }
+    }
+  }
+
+  // ---- state ---------------------------------------------------------------------------------
+  XML_Parser parser_ = nullptr;
+  const Mode mode_;
+  const int spineIndex_;
+  const int spineCount_;
+  CssParser* css_ = nullptr;
+  const ParsedPointer* pointer_ = nullptr;
+  uint32_t targetOffset_ = 0;
+  uint32_t targetTagHash_ = 0;
+  int targetOrdinal_ = 0;
+  int elementCount_ = 0;
+  uint8_t minDepth_ = 0;
+
+  bool parseOk_ = true;
+  bool stopped_ = false;
+  bool tracking_ = true;
+  bool inBody_ = false;
+  bool bodySeen_ = false;
+  bool found_ = false;
+  bool pointerArmed_ = false;
+  bool elementArmed_ = false;
+  bool elementWaiting_ = false;
+  bool hasEligible_ = false;
+  bool chunkOpen_ = false;
+  bool chunkHasContent_ = false;
+  bool recordOpen_ = false;
+  bool emitRecordOpen_ = false;
+  bool needText_ = false;
+  bool tentative_ = false;
+  bool exact_ = true;
+
+  int depth_ = -1;
+  int matched_ = 0;
+  int liveDepth_ = 0;
+  int needSteps_ = 0;
+  uint16_t excludedNesting_ = 0;
+  uint16_t overflowNesting_ = 0;
+  uint16_t usedName_ = 0;
+  uint8_t usedCounters_ = 0;
+  uint16_t paragraphCount_ = 0;
+  uint16_t listItemCount_ = 0;
+  uint16_t paragraphAtMatch_ = 0;
+  uint16_t listItemAtMatch_ = 0;
+
+  uint32_t visible_ = 0;
+  uint32_t lastEligible_ = 0;
+  uint32_t matchOffset_ = 0;
+  uint32_t recordVisible_ = 0;
+  uint32_t tentativeOffset_ = 0;
+  uint32_t nearOffset_ = 0;
+  int emitOffset_ = 0;
+
+  int chunkStored_ = 0;
+  int chunkRaw_ = 0;
+  int chunkSpaces_ = 0;
+  int chunkColumn_ = 0;
+  int chunkSplitRaw_ = 0;
+  int chunkSplitStored_ = 0;
+  uint32_t chunkSplitVisible_ = 0;
+  int chunkExtraNodes_ = 0;
+
+  int snapCount_ = 0;
+  int snapTextIndex_ = 0;
+  int snapTextOffset_ = 0;
+  int snapTextTotal_ = 0;
+
+  CssMemo cssMemo_[kCssMemoSize];
+  Frame frames_[kMaxDepth];
+  Counter counters_[kMaxCounters];
+  SnapStep snap_[kMaxDepth];
+  char names_[kNamePool];
+  char snapNames_[kNamePool];
 };
 
-struct PathSegment {
-  std::string name;
-  int index;
+// Walker state is about 2.5 KB: never on the stack of a task that is already deep.
+std::unique_ptr<CreWalker> makeWalker(const CreWalker::Mode mode, const std::shared_ptr<Epub>& epub,
+                                      const int spineIndex) {
+  std::unique_ptr<CreWalker> walker(new (std::nothrow) CreWalker(mode, spineIndex, epub->getSpineItemsCount()));
+  if (!walker || !walker->ok()) return nullptr;
+  return walker;
+}
+
+// The stylesheet says what is a block and what keeps its spaces. A book opened only to sync has
+// its parser empty: use the cache if there is one and the heap allows it (the parser guards that),
+// and leave it as it was. A book with no cache yet goes by the element table alone.
+class ScopedCss {
+ public:
+  explicit ScopedCss(const std::shared_ptr<Epub>& epub) : css_(epub->getCssParser()) {
+    if (css_ && css_->empty() && css_->hasCache()) loaded_ = css_->loadFromCache();
+  }
+  ~ScopedCss() {
+    if (loaded_) css_->clear();
+  }
+  CssParser* get() const { return css_; }
+
+ private:
+  CssParser* css_;
+  bool loaded_ = false;
 };
 
-std::string buildParagraphXPath(const int spineIndex, const std::vector<PathSegment>& path, const int textNodeIndex,
-                                const size_t charOffset) {
-  std::string xpath = "/body/DocFragment[" + std::to_string(spineIndex + 1) + "]/body";
-  for (const auto& segment : path) {
-    xpath += "/" + segment.name + "[" + std::to_string(segment.index) + "]";
-  }
-  if (textNodeIndex > 0) {
-    xpath += "/text()[" + std::to_string(textNodeIndex) + "]." + std::to_string(charOffset);
-  }
-  return xpath;
-}
-
-size_t countUtf8Codepoints(const XML_Char* data, const int len) {
-  if (!data || len <= 0) {
-    return 0;
-  }
-
-  size_t count = 0;
-  const unsigned char* ptr = reinterpret_cast<const unsigned char*>(data);
-  const unsigned char* end = ptr + len;
-  while (ptr < end) {
-    utf8NextCodepoint(&ptr);
-    count++;
-  }
-
-  return count;
-}
-
-bool equalsTag(const std::string_view name, const std::string_view tag) {
-  if (name.size() != tag.size()) return false;
-  for (size_t i = 0; i < name.size(); i++) {
-    const char c = name[i] >= 'A' && name[i] <= 'Z' ? static_cast<char>(name[i] + ('a' - 'A')) : name[i];
-    if (c != tag[i]) return false;
-  }
+bool stream(const std::shared_ptr<Epub>& epub, const int spineIndex, CreWalker& walker) {
+  const auto href = epub->getSpineItem(spineIndex).href;
+  if (href.empty() || !epub->readItemContentsToStream(href, walker, 1024)) return false;
+  walker.finish();
   return true;
 }
 
-bool isNonVisibleTextTag(const std::string_view name) {
-  return equalsTag(name, "head") || equalsTag(name, "style") || equalsTag(name, "script") || equalsTag(name, "title") ||
-         equalsTag(name, "rp") || equalsTag(name, "rt");
+bool validSpine(const std::shared_ptr<Epub>& epub, const int spineIndex) {
+  return epub && spineIndex >= 0 && spineIndex < epub->getSpineItemsCount();
 }
 
-class ParagraphTextCounter final : public Print {
- public:
-  ParagraphTextCounter() {
-    parser = XML_ParserCreate(nullptr);
-    if (!parser) {
-      LOG_ERR("KOX", "Failed to create XML parser");
-      return;
-    }
-
-    XML_SetUserData(parser, this);
-    XML_SetElementHandler(parser, &ParagraphTextCounter::startElement, &ParagraphTextCounter::endElement);
-    XML_SetCharacterDataHandler(parser, &ParagraphTextCounter::characterData);
+std::string emitAtOffset(const std::shared_ptr<Epub>& epub, const int spineIndex, const uint32_t target,
+                         const uint8_t minDepth) {
+  auto walker = makeWalker(CreWalker::Mode::EmitOffset, epub, spineIndex);
+  if (!walker) return "";
+  walker->setTargetOffset(target, minDepth);
+  ScopedCss css(epub);
+  walker->setCssParser(css.get());
+  if (!stream(epub, spineIndex, *walker)) return "";
+  if (walker->hasMatch()) return walker->xpointer();
+  if (!walker->ok()) return "";  // Could not read that far
+  const uint32_t total = walker->visibleChars();
+  if (target > total) return "";
+  if (walker->hasEligible()) {
+    // Only space, or nothing, from there to the end: the last character there is.
+    return emitAtOffset(epub, spineIndex, walker->lastEligibleOffset(), minDepth);
   }
-
-  ~ParagraphTextCounter() override { destroyXmlParser(parser); }
-
-  bool ok() const { return parser != nullptr && parseOk; }
-
-  bool finish() {
-    if (!parser || !parseOk || stopped) {
-      return parseOk;
-    }
-
-    if (XML_Parse(parser, "", 0, XML_TRUE) == XML_STATUS_ERROR) {
-      LOG_ERR("KOX", "Final XML parse error: %s", XML_ErrorString(XML_GetErrorCode(parser)));
-      parseOk = false;
-    }
-    return parseOk;
-  }
-
-  size_t write(uint8_t c) override { return write(&c, 1); }
-
-  size_t write(const uint8_t* buffer, size_t size) override {
-    if (!parser || !parseOk || stopped) {
-      return size;
-    }
-
-    if (XML_Parse(parser, reinterpret_cast<const char*>(buffer), static_cast<int>(size), XML_FALSE) != XML_STATUS_OK) {
-      const enum XML_Error error = XML_GetErrorCode(parser);
-      if (error != XML_ERROR_ABORTED) {
-        LOG_ERR("KOX", "XML parse error: %s", XML_ErrorString(error));
-        parseOk = false;
-      }
-    }
-
-    return size;
-  }
-
-  size_t totalVisibleChars() const { return visibleChars; }
-
- private:
-  static void XMLCALL startElement(void* userData, const XML_Char* name, const XML_Char**) {
-    auto* self = static_cast<ParagraphTextCounter*>(userData);
-    self->onStartElement(name);
-  }
-
-  static void XMLCALL endElement(void* userData, const XML_Char* name) {
-    auto* self = static_cast<ParagraphTextCounter*>(userData);
-    self->onEndElement(name);
-  }
-
-  static void XMLCALL characterData(void* userData, const XML_Char* data, const int len) {
-    auto* self = static_cast<ParagraphTextCounter*>(userData);
-    self->onCharacterData(data, len);
-  }
-
-  void onStartElement(const XML_Char* rawName) {
-    const std::string name = stripPrefix(rawName);
-
-    if (!insideBody) {
-      if (name == "body") {
-        insideBody = true;
-        bodyDepth = depth;
-      }
-      depth++;
-      return;
-    }
-
-    if (nonVisibleDepth > 0 || isNonVisibleTextTag(name)) nonVisibleDepth++;
-    depth++;
-  }
-
-  void onEndElement(const XML_Char* rawName) {
-    const std::string name = stripPrefix(rawName);
-
-    depth--;
-    if (!insideBody) {
-      return;
-    }
-
-    if (depth == bodyDepth && name == "body") {
-      insideBody = false;
-      nonVisibleDepth = 0;
-      return;
-    }
-
-    if (nonVisibleDepth > 0) nonVisibleDepth--;
-  }
-
-  void onCharacterData(const XML_Char* data, const int len) {
-    if (!insideBody || nonVisibleDepth > 0 || len <= 0) {
-      return;
-    }
-
-    visibleChars += countUtf8Codepoints(data, len);
-  }
-
- private:
-  XML_Parser parser = nullptr;
-  bool parseOk = true;
-  bool insideBody = false;
-  bool stopped = false;
-  int depth = 0;
-  int bodyDepth = -1;
-  int nonVisibleDepth = 0;
-  size_t visibleChars = 0;
-};
-
-class XPathElementResolver final : public Print {
- public:
-  XPathElementResolver(const int targetElement, const char* targetTag)
-      : targetElement(targetElement), targetTag(targetTag) {
-    parser = XML_ParserCreate(nullptr);
-    if (!parser) {
-      LOG_ERR("KOX", "Failed to create XML parser");
-      return;
-    }
-
-    XML_SetUserData(parser, this);
-    XML_SetElementHandler(parser, &XPathElementResolver::startElement, &XPathElementResolver::endElement);
-  }
-
-  ~XPathElementResolver() override { destroyXmlParser(parser); }
-
-  bool ok() const { return parser != nullptr && parseOk; }
-
-  bool finish() {
-    if (!parser || !parseOk || stopped) {
-      return parseOk;
-    }
-
-    if (XML_Parse(parser, "", 0, XML_TRUE) == XML_STATUS_ERROR) {
-      LOG_ERR("KOX", "Final XML parse error: %s", XML_ErrorString(XML_GetErrorCode(parser)));
-      parseOk = false;
-    }
-    return parseOk;
-  }
-
-  bool hasMatch() const { return !xpath.empty(); }
-  const std::string& getXPath() const { return xpath; }
-
-  size_t write(uint8_t c) override { return write(&c, 1); }
-
-  size_t write(const uint8_t* buffer, size_t size) override {
-    if (!parser || !parseOk || stopped) {
-      return size;
-    }
-
-    if (XML_Parse(parser, reinterpret_cast<const char*>(buffer), static_cast<int>(size), XML_FALSE) != XML_STATUS_OK) {
-      const enum XML_Error error = XML_GetErrorCode(parser);
-      if (error != XML_ERROR_ABORTED) {
-        LOG_ERR("KOX", "XML parse error: %s", XML_ErrorString(error));
-        parseOk = false;
-      }
-    }
-
-    return size;
-  }
-
-  int spineIndex = 0;
-
- private:
-  static void XMLCALL startElement(void* userData, const XML_Char* name, const XML_Char**) {
-    auto* self = static_cast<XPathElementResolver*>(userData);
-    self->onStartElement(name);
-  }
-
-  static void XMLCALL endElement(void* userData, const XML_Char* name) {
-    auto* self = static_cast<XPathElementResolver*>(userData);
-    self->onEndElement(name);
-  }
-
-  void onStartElement(const XML_Char* rawName) {
-    const std::string name = stripPrefix(rawName);
-
-    if (!insideBody) {
-      if (name == "body") {
-        insideBody = true;
-        bodyDepth = depth;
-        parentStates.emplace_back();
-      }
-      depth++;
-      return;
-    }
-
-    const int siblingIndex = parentStates.back().nextIndex(name);
-    path.push_back({name, siblingIndex});
-    parentStates.emplace_back();
-
-    if (name == targetTag) {
-      elementCount++;
-      if (elementCount == targetElement) {
-        xpath = buildParagraphXPath(spineIndex, path, 0, 0);
-        stopped = true;
-        XML_StopParser(parser, XML_FALSE);
-      }
-    }
-
-    depth++;
-  }
-
-  void onEndElement(const XML_Char* rawName) {
-    const std::string name = stripPrefix(rawName);
-
-    depth--;
-    if (!insideBody) {
-      return;
-    }
-
-    if (depth == bodyDepth && name == "body") {
-      insideBody = false;
-      parentStates.clear();
-      path.clear();
-      return;
-    }
-
-    if (!path.empty()) {
-      path.pop_back();
-    }
-    if (!parentStates.empty()) {
-      parentStates.pop_back();
-    }
-  }
-
-  XML_Parser parser = nullptr;
-  const int targetElement;
-  const char* targetTag;
-  bool parseOk = true;
-  bool insideBody = false;
-  bool stopped = false;
-  int depth = 0;
-  int bodyDepth = -1;
-  int elementCount = 0;
-  std::vector<ParentState> parentStates;
-  std::vector<PathSegment> path;
-  std::string xpath;
-};
-
-class XPathProgressResolver final : public Print {
- public:
-  enum class BoundaryMode { Exclusive, Inclusive };
-
-  explicit XPathProgressResolver(const size_t targetVisibleChar,
-                                 const BoundaryMode boundaryMode = BoundaryMode::Exclusive,
-                                 const uint8_t minimumPathDepth = 0)
-      : targetVisibleChar(targetVisibleChar), boundaryMode(boundaryMode), minimumPathDepth(minimumPathDepth) {
-    parser = XML_ParserCreate(nullptr);
-    if (!parser) {
-      LOG_ERR("KOX", "Failed to create XML parser");
-      return;
-    }
-
-    XML_SetUserData(parser, this);
-    XML_SetElementHandler(parser, &XPathProgressResolver::startElement, &XPathProgressResolver::endElement);
-    XML_SetCharacterDataHandler(parser, &XPathProgressResolver::characterData);
-    XML_SetCommentHandler(parser, &XPathProgressResolver::comment);
-    XML_SetProcessingInstructionHandler(parser, &XPathProgressResolver::processingInstruction);
-    XML_SetCdataSectionHandler(parser, &XPathProgressResolver::startCdataSection,
-                               &XPathProgressResolver::endCdataSection);
-  }
-
-  ~XPathProgressResolver() override { destroyXmlParser(parser); }
-
-  bool ok() const { return parser != nullptr && parseOk; }
-
-  bool finish() {
-    if (!parser || !parseOk || stopped) {
-      return parseOk;
-    }
-
-    if (XML_Parse(parser, "", 0, XML_TRUE) == XML_STATUS_ERROR) {
-      LOG_ERR("KOX", "Final XML parse error: %s", XML_ErrorString(XML_GetErrorCode(parser)));
-      parseOk = false;
-    }
-    return parseOk;
-  }
-
-  size_t getLastEligibleEnd() const { return lastEligibleEnd; }
-  size_t getVisibleChars() const { return visibleChars; }
-
-  bool hasMatch() const { return !xpath.empty(); }
-  const std::string& getXPath() const { return xpath; }
-
-  size_t write(uint8_t c) override { return write(&c, 1); }
-
-  size_t write(const uint8_t* buffer, size_t size) override {
-    if (!parser || !parseOk || stopped) {
-      return size;
-    }
-
-    if (XML_Parse(parser, reinterpret_cast<const char*>(buffer), static_cast<int>(size), XML_FALSE) != XML_STATUS_OK) {
-      const enum XML_Error error = XML_GetErrorCode(parser);
-      if (error != XML_ERROR_ABORTED) {
-        LOG_ERR("KOX", "XML parse error: %s", XML_ErrorString(error));
-        parseOk = false;
-      }
-    }
-
-    return size;
-  }
-
-  int spineIndex = 0;
-
- private:
-  static void XMLCALL startElement(void* userData, const XML_Char* name, const XML_Char**) {
-    auto* self = static_cast<XPathProgressResolver*>(userData);
-    self->onStartElement(name);
-  }
-
-  static void XMLCALL endElement(void* userData, const XML_Char* name) {
-    auto* self = static_cast<XPathProgressResolver*>(userData);
-    self->onEndElement(name);
-  }
-
-  static void XMLCALL characterData(void* userData, const XML_Char* data, const int len) {
-    auto* self = static_cast<XPathProgressResolver*>(userData);
-    self->onCharacterData(data, len);
-  }
-
-  static void XMLCALL comment(void* userData, const XML_Char*) {
-    static_cast<XPathProgressResolver*>(userData)->onMarkupBoundary();
-  }
-
-  static void XMLCALL processingInstruction(void* userData, const XML_Char*, const XML_Char*) {
-    static_cast<XPathProgressResolver*>(userData)->onMarkupBoundary();
-  }
-
-  static void XMLCALL startCdataSection(void* userData) {
-    static_cast<XPathProgressResolver*>(userData)->onMarkupBoundary();
-  }
-
-  static void XMLCALL endCdataSection(void* userData) {
-    static_cast<XPathProgressResolver*>(userData)->onMarkupBoundary();
-  }
-
-  void onStartElement(const XML_Char* rawName) {
-    const std::string name = stripPrefix(rawName);
-
-    if (!insideBody) {
-      if (name == "body") {
-        insideBody = true;
-        bodyDepth = depth;
-        parentStates.emplace_back();
-      }
-      depth++;
-      return;
-    }
-
-    const int siblingIndex = parentStates.back().nextIndex(name);
-    path.push_back({name, siblingIndex});
-    parentStates.emplace_back();
-    textNodeIndexStack.push_back(0);
-    pendingTextNode = true;
-
-    if (name == "p") {
-      paragraphDepth++;
-    }
-    if (name == "li") {
-      liDepth++;
-    }
-    if (nonVisibleDepth > 0 || isNonVisibleTextTag(name)) nonVisibleDepth++;
-
-    depth++;
-  }
-
-  void onEndElement(const XML_Char* rawName) {
-    const std::string name = stripPrefix(rawName);
-
-    depth--;
-    if (!insideBody) {
-      return;
-    }
-
-    if (depth == bodyDepth && name == "body") {
-      insideBody = false;
-      parentStates.clear();
-      path.clear();
-      textNodeIndexStack.clear();
-      nonVisibleDepth = 0;
-      return;
-    }
-
-    if (name == "p" && paragraphDepth > 0) {
-      paragraphDepth--;
-    }
-    if (name == "li" && liDepth > 0) {
-      liDepth--;
-    }
-    if (nonVisibleDepth > 0) nonVisibleDepth--;
-
-    if (!textNodeIndexStack.empty()) {
-      textNodeIndexStack.pop_back();
-    }
-    if (paragraphDepth > 0 || liDepth > 0) {
-      pendingTextNode = true;
-    }
-    if (!path.empty()) {
-      path.pop_back();
-    }
-    if (!parentStates.empty()) {
-      parentStates.pop_back();
-    }
-  }
-
-  void onCharacterData(const XML_Char* data, const int len) {
-    if (!insideBody || nonVisibleDepth > 0 || len <= 0 || stopped) {
-      return;
-    }
-
-    const size_t codepointCount = countUtf8Codepoints(data, len);
-    if (codepointCount == 0) {
-      return;
-    }
-
-    // Start a new text node on first non-empty content after any structural boundary.
-    // Only counting non-empty nodes matches KOReader's text()[N] indexing behavior,
-    // which skips empty text nodes created by bare <a id="anchor"/> anchors.
-    if (pendingTextNode) {
-      if (!textNodeIndexStack.empty()) {
-        textNodeIndexStack.back()++;
-      }
-      textNodeStartChars = visibleChars;
-      pendingTextNode = false;
-    }
-
-    const size_t nextVisibleChars = visibleChars + codepointCount;
-    const bool targetInCurrentChunk = boundaryMode == BoundaryMode::Inclusive ? targetVisibleChar <= nextVisibleChars
-                                                                              : targetVisibleChar < nextVisibleChars;
-    const bool eligiblePath = path.size() >= minimumPathDepth;
-    if (eligiblePath) lastEligibleEnd = nextVisibleChars;
-    if (targetInCurrentChunk && eligiblePath) {
-      // A target in a split container's whitespace advances to its next child.
-      const size_t delta = targetVisibleChar > visibleChars ? targetVisibleChar - visibleChars : 0;
-      const int texNode = textNodeIndexStack.empty() ? 0 : textNodeIndexStack.back();
-      const size_t charOff = visibleChars - textNodeStartChars + delta;
-      xpath = buildParagraphXPath(spineIndex, path, texNode, charOff);
-      stopped = true;
-      XML_StopParser(parser, XML_FALSE);
-      return;
-    }
-
-    visibleChars = nextVisibleChars;
-  }
-
-  void onMarkupBoundary() {
-    if (!insideBody || nonVisibleDepth > 0 || stopped || pendingTextNode) return;
-    pendingTextNode = true;
-  }
-
-  XML_Parser parser = nullptr;
-  const size_t targetVisibleChar;
-  const BoundaryMode boundaryMode;
-  const uint8_t minimumPathDepth;
-  size_t lastEligibleEnd = 0;
-  bool parseOk = true;
-  bool insideBody = false;
-  bool stopped = false;
-  bool pendingTextNode = true;
-  int depth = 0;
-  int bodyDepth = -1;
-  int paragraphDepth = 0;
-  int liDepth = 0;
-  int nonVisibleDepth = 0;
-  size_t visibleChars = 0;
-  size_t textNodeStartChars = 0;
-  std::vector<int> textNodeIndexStack;
-  std::vector<ParentState> parentStates;
-  std::vector<PathSegment> path;
-  std::string xpath;
-};
-
-std::string resolveVisibleOffset(const std::shared_ptr<Epub>& epub, const int spineIndex, const std::string& href,
-                                 size_t target, XPathProgressResolver::BoundaryMode boundaryMode,
-                                 const uint8_t minimumPathDepth) {
-  for (int attempt = 0; attempt < 2; ++attempt) {
-    XPathProgressResolver resolver(target, boundaryMode, minimumPathDepth);
-    if (!resolver.ok()) return "";
-    resolver.spineIndex = spineIndex;
-    if (!epub->readItemContentsToStream(href, resolver, 1024) || !resolver.finish()) return "";
-    if (resolver.hasMatch()) return resolver.getXPath();
-    if (minimumPathDepth == 0 || resolver.getLastEligibleEnd() == 0 || target > resolver.getVisibleChars()) return "";
-    // Trailing container whitespace has no next child. Re-read at the last
-    // eligible character, without retaining a path for every parsed text chunk.
-    target = resolver.getLastEligibleEnd() - 1;
-    boundaryMode = XPathProgressResolver::BoundaryMode::Exclusive;
-  }
-  return "";
+  if (minDepth > 0 || !walker->sawBody()) return "";
+  // No text at all, say a chapter that is a single image.
+  return bodyPointer(spineIndex, epub->getSpineItemsCount());
 }
 
-std::string findXPathForElement(const std::shared_ptr<Epub>& epub, const int spineIndex, const uint16_t elementIndex,
-                                const char* tagName) {
-  if (!epub || elementIndex == 0 || spineIndex < 0 || spineIndex >= epub->getSpineItemsCount()) {
-    return "";
-  }
-
-  const auto href = epub->getSpineItem(spineIndex).href;
-  if (href.empty()) {
-    return "";
-  }
-
-  XPathElementResolver resolver(elementIndex, tagName);
-  if (!resolver.ok()) {
-    return "";
-  }
-
-  resolver.spineIndex = spineIndex;
-  if (!epub->readItemContentsToStream(href, resolver, 1024) || !resolver.finish()) {
-    return "";
-  }
-
-  if (resolver.hasMatch()) {
-    LOG_DBG("KOX", "Resolved %s %u in spine %d -> %s", tagName, elementIndex, spineIndex, resolver.getXPath().c_str());
-    return resolver.getXPath();
-  }
-
-  LOG_DBG("KOX", "%s %u not found in spine %d", tagName, elementIndex, spineIndex);
-  return "";
+std::string emitElement(const std::shared_ptr<Epub>& epub, const int spineIndex, const uint16_t ordinal,
+                        const char* tag) {
+  if (!validSpine(epub, spineIndex) || ordinal == 0) return "";
+  auto walker = makeWalker(CreWalker::Mode::EmitElement, epub, spineIndex);
+  if (!walker) return "";
+  walker->setTargetElement(tag, ordinal);
+  ScopedCss css(epub);
+  walker->setCssParser(css.get());
+  if (!stream(epub, spineIndex, *walker)) return "";
+  return walker->xpointer();
 }
 }  // namespace
 
+bool ChapterXPathResolver::resolve(const std::shared_ptr<Epub>& epub, const int spineIndex, const std::string& xpointer,
+                                   Resolved& out) {
+  if (!validSpine(epub, spineIndex)) return false;
+  std::unique_ptr<ParsedPointer> pointer(new (std::nothrow) ParsedPointer());
+  if (!pointer || !pointer->parse(xpointer)) return false;
+  auto walker = makeWalker(CreWalker::Mode::ResolvePointer, epub, spineIndex);
+  if (!walker) return false;
+  walker->setPointer(pointer.get());
+  ScopedCss css(epub);
+  walker->setCssParser(css.get());
+  if (!stream(epub, spineIndex, *walker) || !walker->hasMatch()) return false;
+  out.visibleOffset = walker->matchOffset();
+  out.exact = walker->matchExact();
+  out.totalVisible = walker->visibleChars();
+  out.paragraphIndex = walker->paragraphs();
+  out.listItemIndex = walker->listItems();
+  out.targetIsListItem = pointer->targetIsListItem;
+  return true;
+}
+
+std::string ChapterXPathResolver::bodyXPath(const std::shared_ptr<Epub>& epub, const int spineIndex) {
+  return bodyPointer(spineIndex, epub->getSpineItemsCount());
+}
+
 std::string ChapterXPathResolver::findXPathForParagraph(const std::shared_ptr<Epub>& epub, const int spineIndex,
                                                         const uint16_t paragraphIndex) {
-  return findXPathForElement(epub, spineIndex, paragraphIndex, "p");
+  return emitElement(epub, spineIndex, paragraphIndex, "p");
 }
 
 std::string ChapterXPathResolver::findXPathForListItem(const std::shared_ptr<Epub>& epub, const int spineIndex,
                                                        const uint16_t listItemIndex) {
-  return findXPathForElement(epub, spineIndex, listItemIndex, "li");
+  return emitElement(epub, spineIndex, listItemIndex, "li");
 }
 
 std::string ChapterXPathResolver::findXPathForProgress(const std::shared_ptr<Epub>& epub, const int spineIndex,
                                                        const float intraSpineProgress, const uint8_t minimumPathDepth) {
-  if (!epub || spineIndex < 0 || spineIndex >= epub->getSpineItemsCount()) {
-    return "";
-  }
-
-  const auto href = epub->getSpineItem(spineIndex).href;
-  if (href.empty()) {
-    return "";
-  }
-
+  if (!validSpine(epub, spineIndex)) return "";
   if (!(intraSpineProgress > 0.0f)) {
-    if (minimumPathDepth > 0) return findXPathForVisibleTextOffset(epub, spineIndex, 0, minimumPathDepth);
-    return "/body/DocFragment[" + std::to_string(spineIndex + 1) + "]/body";
+    if (minimumPathDepth > 0) return emitAtOffset(epub, spineIndex, 0, minimumPathDepth);
+    return bodyPointer(spineIndex, epub->getSpineItemsCount());
   }
-
-  ParagraphTextCounter counter;
-  if (!counter.ok() || !epub->readItemContentsToStream(href, counter, 1024) || !counter.finish()) {
-    return "";
-  }
-
-  const size_t totalVisibleChars = counter.totalVisibleChars();
-  if (totalVisibleChars == 0) {
-    return "";
-  }
-
-  const float clamped = std::max(0.0f, std::min(1.0f, intraSpineProgress));
-  const size_t targetVisibleChar =
-      std::max<size_t>(1, std::min(totalVisibleChars, static_cast<size_t>(std::ceil(clamped * totalVisibleChars))));
-
-  const auto xpath = resolveVisibleOffset(epub, spineIndex, href, targetVisibleChar,
-                                          XPathProgressResolver::BoundaryMode::Inclusive, minimumPathDepth);
-  if (xpath.empty()) {
-    LOG_DBG("KOX", "Could not resolve progress %.3f in spine %d", intraSpineProgress, spineIndex);
-  } else {
-    LOG_DBG("KOX", "Resolved progress %.3f in spine %d -> %s", intraSpineProgress, spineIndex, xpath.c_str());
-  }
-  return xpath;
+  auto counter = makeWalker(CreWalker::Mode::Count, epub, spineIndex);
+  if (!counter || !stream(epub, spineIndex, *counter) || !counter->ok()) return "";
+  const uint32_t total = counter->visibleChars();
+  if (total == 0) return "";
+  counter.reset();
+  const float clamped = std::min(1.0f, intraSpineProgress);
+  const uint32_t target = std::min(total - 1, static_cast<uint32_t>(clamped * static_cast<float>(total)));
+  return emitAtOffset(epub, spineIndex, target, minimumPathDepth);
 }
 
 std::string ChapterXPathResolver::findXPathForVisibleTextOffset(const std::shared_ptr<Epub>& epub, const int spineIndex,
                                                                 const uint32_t visibleTextOffset,
                                                                 const uint8_t minimumPathDepth) {
-  if (!epub || spineIndex < 0 || spineIndex >= epub->getSpineItemsCount()) {
-    return "";
-  }
-
-  const auto href = epub->getSpineItem(spineIndex).href;
-  if (href.empty()) {
-    return "";
-  }
-
-  const auto xpath = resolveVisibleOffset(epub, spineIndex, href, visibleTextOffset,
-                                          XPathProgressResolver::BoundaryMode::Exclusive, minimumPathDepth);
-  if (xpath.empty()) {
-    LOG_DBG("KOX", "Could not resolve visible offset %lu in spine %d", static_cast<unsigned long>(visibleTextOffset),
-            spineIndex);
-  }
-  return xpath;
+  if (!validSpine(epub, spineIndex)) return "";
+  return emitAtOffset(epub, spineIndex, visibleTextOffset, minimumPathDepth);
 }

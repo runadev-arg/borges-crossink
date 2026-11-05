@@ -104,6 +104,9 @@ struct CssPropertyFlags {
   uint32_t fontVariantCaps : 1;
   uint32_t listStyleType : 1;
   uint32_t fontSize : 1;
+  // white-space, which only the KOReader position mapper reads. Its one bit of value lives here.
+  uint32_t whiteSpace : 1;
+  uint32_t whiteSpacePreserved : 1;
 
   CssPropertyFlags()
       : textAlign(0),
@@ -129,13 +132,15 @@ struct CssPropertyFlags {
         pageBreakAfter(0),
         fontVariantCaps(0),
         listStyleType(0),
-        fontSize(0) {}
+        fontSize(0),
+        whiteSpace(0),
+        whiteSpacePreserved(0) {}
 
   [[nodiscard]] bool anySet() const {
     return fontSize || textAlign || fontStyle || fontWeight || textDecoration || textIndent || marginTop ||
            marginBottom || marginLeft || marginRight || paddingTop || paddingBottom || paddingLeft || paddingRight ||
            imageHeight || imageWidth || display || backgroundBlack || verticalAlign || direction || pageBreakBefore ||
-           pageBreakAfter || fontVariantCaps || listStyleType;
+           pageBreakAfter || fontVariantCaps || listStyleType || whiteSpace;
   }
 
   void clearAll() {
@@ -144,6 +149,7 @@ struct CssPropertyFlags {
     paddingTop = paddingBottom = paddingLeft = paddingRight = 0;
     imageHeight = imageWidth = display = backgroundBlack = verticalAlign = direction = 0;
     pageBreakBefore = pageBreakAfter = fontVariantCaps = listStyleType = fontSize = 0;
+    whiteSpace = whiteSpacePreserved = 0;
   }
 };
 
@@ -252,6 +258,10 @@ struct CssStyle {
     if (base.hasDisplay()) {
       display = base.display;
       defined.display = 1;
+    }
+    if (base.defined.whiteSpace) {
+      defined.whiteSpace = 1;
+      defined.whiteSpacePreserved = base.defined.whiteSpacePreserved;
     }
     if (base.hasBackgroundBlack()) {
       backgroundBlack = base.backgroundBlack;
