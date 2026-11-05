@@ -17,6 +17,13 @@ no always-on Wi-Fi budget). It must feel like the KOReader plugin. Server contra
 
 Never: Wi-Fi on while reading, an error dialog interrupting reading, a jump without consent.
 
+**When the radio comes on.** Only in a session: on opening a book, on waking into one, before
+sleep, and when the person asks (Borges screen, reader drawer, shortcut). Nothing runs while a page
+is being read, so connecting to Wi-Fi after a book is open cannot trigger the offer: the next
+session is the next open, wake, sleep or manual sync. The open session is capped at 12 s from the
+press to the book (7 s of that for the link). A longer link budget was not measured on a panel,
+so it stays.
+
 ## 2. Why a network session is bracketed by reboots
 
 A loaded reader leaves ~45-50 KB free. TLS needs ≥35 KB and ~17 KB contiguous per record, on top of
@@ -103,9 +110,9 @@ unresolved, that book's `progress.changed` is held back from upload.
 - Otherwise ask, even at the same spot. Fingerprint: `event:<id>`, else `seq:<n>`, else position.
   Keep the last 40 choices per book. A new event at the same spot asks again.
 - Invalid event (wrong book, missing `event_id`, missing `reading_head`) is a reported error, no prompt.
-- **Ir a esa posición**: save an undo point (single use), resolve the position locally (xpointer, else
+- **Ir al 62%** (**Ir a esa posición** with no percent): save an undo point (single use), resolve the position locally (xpointer, else
   percentage), navigate, enqueue own progress with `explicit_jump:true`.
-- **Seguir aquí**: stay, stamp local reading activity now, enqueue own progress: this device becomes
+- **Seguir en el 10%** (**Seguir acá** with no percent): stay, stamp local reading activity now, enqueue own progress: this device becomes
   the head.
 - Both remember the choice, release the hold and drain. Pending `suggestion_id` is resolved.
 - Warnings: backwards (Δ < -0.5%), close (|Δ| ≤ 2%), approximate (no xpointer usable).
@@ -114,8 +121,13 @@ unresolved, that book's `progress.changed` is held back from upload.
 - Replayed `progress.changed` in pulls never prompts. It only updates the per-book remote head cache.
 - `Volver a donde estaba` in the reader drawer while an undo point exists.
 
-Copy (es): `¿Dónde querés seguir leyendo?` · `En este lector: …` · `En <lector>: …` · `Ir a esa
-posición` · `Seguir aquí` · `Ir ahí te lleva hacia atrás en el libro.` · `La diferencia entre las dos
+The prompt opens with the focus on the stay action when going there would move backwards, so the
+easy press keeps what was read. Back says `Después`: it answers nothing and asks again next time.
+`Sin abrir` stands for a book this reader has no place in, `En otro lector` for a device with no name.
+After a jump the screen says where the way back is: `Volver a donde estaba` in the book menu.
+
+Copy (es): `¿Dónde querés seguir leyendo?` · `En este lector: …` · `En <lector>: …` · `Ir al 62%` /
+`Seguir en el 10%` · `Ir ahí te lleva hacia atrás en el libro.` · `La diferencia entre las dos
 posiciones es chica.` · `La ubicación es aproximada: puede caer unos renglones antes o después.`
 
 ## 6. Wire facts
@@ -147,7 +159,7 @@ posiciones es chica.` · `La ubicación es aproximada: puede caer unos renglones
   `X-Content-SHA256`, `X-KOReader-Partial-MD5`. Verify partial MD5 before accepting a file.
 - Health: `POST /api/devices/self/health` with `outcome`, `queue_depth`, `error_code`.
 - Rotate after `renew_after` when known. Pairing credentials may have no expiry.
-- 401/`device_revoked`: stop automatic sessions, keep the queue, and show "Volvé a conectar".
+- 401/`device_revoked`: stop automatic sessions, keep the queue, and show "Volvé a vincular este lector".
 - Disconnect: no route lets a device revoke itself, so online it rotates with
   `expires_in_seconds:60` and `grace_seconds:0` and discards the result. Offline, the screen says the
   server still has the credential. Another account on re-pair resets queue, cursor and ledgers; the

@@ -4223,6 +4223,8 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuAction action, const 
       break;
     }
     case EpubReaderMenuAction::BORGES_SYNC: {
+      // Closing the book (and mapping where the page is) takes seconds with nothing on the glass to say so.
+      drawToast(renderer, tr(STR_BORGES_ONE_MOMENT));
       saveProgressBeforeRestart();
       pauseReadingPaceTimer("borges_sync");
       activityManager.replaceActivity(
@@ -4233,6 +4235,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuAction action, const 
       undoBorgesJump();
       break;
     case EpubReaderMenuAction::BORGES_OTHER_DEVICE: {
+      drawToast(renderer, tr(STR_BORGES_ONE_MOMENT));
       saveProgressBeforeRestart();
       pauseReadingPaceTimer("borges_other_device");
       activityManager.replaceActivity(
@@ -8406,7 +8409,7 @@ void EpubReaderActivity::finalizeForBorges() {
 void EpubReaderActivity::undoBorgesJump() {
   auto target = makeUniqueNoThrow<borges::Position>();  // Too large for the stack.
   if (!target || !epub || !borges::glue::takeUndo(epub->getPath(), *target)) {
-    drawToast(renderer, tr(STR_BORGES_CANT_LOCATE));
+    drawToast(renderer, tr(STR_BORGES_UNDO_FAILED));
     delay(1000);
     requestUpdate();
     return;
@@ -8420,7 +8423,7 @@ void EpubReaderActivity::undoBorgesJump() {
       mapped.hasVisibleTextOffset ? std::optional<uint32_t>(mapped.visibleTextOffset) : std::nullopt;
   if (!mapped.valid || !EpubReaderUtils::saveProgress(*epub, mapped.spineIndex, mapped.pageNumber,
                                                       std::max(mapped.totalPages, mapped.pageNumber + 1), offset)) {
-    drawToast(renderer, tr(STR_BORGES_CANT_LOCATE));
+    drawToast(renderer, tr(STR_BORGES_UNDO_FAILED));
     delay(1000);
     requestUpdate();
     return;
@@ -8430,5 +8433,7 @@ void EpubReaderActivity::undoBorgesJump() {
   skipBorgesExitSave = true;
   borgesTracker.paged = false;
   borges::glue::publishRestoredPosition(epub, *target);
+  // The page is rebuilt from nothing after this: say it worked while that takes its time.
+  drawToast(renderer, tr(STR_BORGES_UNDONE));
   activityManager.goToReader(epub->getPath(), false, false, true);
 }

@@ -140,7 +140,11 @@ void formatAge(char* out, const size_t cap, const Age& age) {
       snprintf(out, cap, tr(STR_BORGES_HOURS_AGO), static_cast<int>(age.value));
       return;
     case AgeBucket::Days:
-      snprintf(out, cap, tr(STR_BORGES_DAYS_AGO), static_cast<int>(age.value));
+      if (age.value == 1) {
+        snprintf(out, cap, "%s", tr(STR_BORGES_YESTERDAY));
+      } else {
+        snprintf(out, cap, tr(STR_BORGES_DAYS_AGO), static_cast<int>(age.value));
+      }
       return;
     case AgeBucket::Unknown:
       break;
@@ -153,7 +157,8 @@ void formatSize(char* out, const size_t cap, const uint64_t bytes) {
   if (kib < 1024) {
     snprintf(out, cap, "%u KB", kib);
   } else {
-    snprintf(out, cap, "%u.%u MB", kib / 1024, (kib % 1024) * 10 / 1024);
+    const char separator = I18N.getLanguage() == Language::ES ? ',' : '.';
+    snprintf(out, cap, "%u%c%u MB", kib / 1024, separator, (kib % 1024) * 10 / 1024);
   }
 }
 

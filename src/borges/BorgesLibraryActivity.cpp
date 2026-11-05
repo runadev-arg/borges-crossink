@@ -12,6 +12,7 @@
 #include "LibraryBuilder.h"
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
+#include "activities/network/WifiSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -36,6 +37,10 @@ constexpr uint32_t kLeaveWaitMs = 1500;
 int rowHeightFor(const GfxRenderer& renderer) {
   return renderer.getLineHeight(UI_10_FONT_ID) + renderer.getLineHeight(SMALL_FONT_ID) + 14;
 }
+
+// The foot of the list belongs to the note ("offline, showing the last list"). A full page used to
+// cover it, so the one thing that explained a stale list was the one thing not shown.
+int noteHeightFor(const GfxRenderer& renderer) { return renderer.getLineHeight(SMALL_FONT_ID) + kLineGap; }
 
 Rect listArea(const GfxRenderer& renderer) {
   const auto& metrics = UITheme::getInstance().getMetrics();
@@ -75,6 +80,7 @@ struct BorgesLibraryActivity::Shared {
   std::atomic<StrId> note_{StrId::STR_NONE_OPT};
   std::atomic<bool> hasNote_{false};
   std::atomic<uint32_t> downloadPercent_{0};
+  std::atomic<bool> linked_{false};  // The radio is up: what the screen says moves on from "connecting".
 };
 
 struct BorgesLibraryActivity::Visitor final : ICatalogVisitor {
@@ -94,7 +100,7 @@ BorgesLibraryActivity::BorgesLibraryActivity(GfxRenderer& renderer, MappedInputM
 BorgesLibraryActivity::~BorgesLibraryActivity() = default;
 
 int BorgesLibraryActivity::pageSize() const {
-  const int rows = listArea(renderer).height / rowHeightFor(renderer);
+  const int rows = (listArea(renderer).height - noteHeightFor(renderer)) / rowHeightFor(renderer);
   return std::max(1, std::min(rows, static_cast<int>(Catalog::kMaxPageSize)));
 }
 
@@ -120,6 +126,18 @@ void BorgesLibraryActivity::onEnter() {
   // One screen of entries: under 400 bytes each, kept for this activity's lifetime.
   s_->entries_.reserve(pageSize());
   s_->onSd_.reserve(pageSize());
+  if (!hasSavedWifi() && !s_->stack_->link.connected()) {
+    // First network ever: the picker owns the connection and the password, as it does for a sync.
+    startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, true, true),
+                           [this](const ActivityResult& result) {
+                             if (result.isCancelled) {
+                               leave();
+                             } else {
+                               startLoad(1);
+                             }
+                           });
+    return;
+  }
   startLoad(1);
 }
 
@@ -135,15 +153,33 @@ void BorgesLibraryActivity::onExit() {
 }
 
 void BorgesLibraryActivity::setView(const View view) {
+  const View previous = view_;
   view_ = view;
-  fullPaint_ = true;
+  // A slow refresh clears a dense list and is the one a new list needs. The first list over a
+  // sparse screen, and text over text, repaint fast: a page change is one slow refresh, not two.
+  // A pending first paint (over what the boot left) stays pending.
+  if ((view == View::List && listPainted_) || (previous == View::List && view != View::Loading)) fullPaint_ = true;
   linkDownAt_ = millis() + kIdleLinkMs;
   requestUpdate();
+}
+
+// The wait for a session to stop is a second or two: say so first.
+void BorgesLibraryActivity::cancelAndLeave() {
+  cancelling_ = true;
+  (void)requestUpdateAndWait();
+  leave();
+}
+
+// What the radio is doing, for the two screens that wait on it.
+void BorgesLibraryActivity::noteLink(const bool up) {
+  linkShown_ = up;
+  s_->linked_.store(up);
 }
 
 void BorgesLibraryActivity::startLoad(const uint16_t page) {
   s_->requestedPage_ = page;
   s_->hasNote_.store(false);
+  noteLink(s_->stack_->link.connected());
   s_->stack_->cancel.arm(kLoadLinkBudgetMs + kFetchBudgetMs);
   hardDeadlineAt_ = millis() + kLoadLinkBudgetMs + kFetchBudgetMs + kHangMarginMs;
   setView(View::Loading);
@@ -162,6 +198,7 @@ void BorgesLibraryActivity::loadMain(void* shared) {
   CatalogResult result = CatalogResult::Offline;
   const net::LinkResult link = stack.bringUp(kLoadLinkBudgetMs);
   if (link == net::LinkResult::Connected) {
+    s->linked_.store(true);
     result = s->catalog_->fetchPage(s->requestedPage_, s->entries_.capacity(), info, kFetchBudgetMs);
   }
 
@@ -205,6 +242,7 @@ void BorgesLibraryActivity::startDownload() {
   hardDeadlineAt_ = 0;
   lastProgressAt_ = millis();
   lastProgressPercent_ = 0;
+  noteLink(s_->stack_->link.connected());
   setView(View::Downloading);
   if (!worker_.start(&BorgesLibraryActivity::downloadMain, s_.get())) {
     s_->note_.store(StrId::STR_BORGES_ERR_LOCAL);
@@ -233,6 +271,7 @@ void BorgesLibraryActivity::downloadMain(void* shared) {
     fail(describeLink(link));
     return;
   }
+  s->linked_.store(true);
   switch (s->catalog_->download(s->downloading_, kBorgesBooksDir, s->progress_.get(), kDownloadBudgetMs)) {
     case DownloadResult::Done:
     case DownloadResult::AlreadyPresent:
@@ -305,9 +344,15 @@ void BorgesLibraryActivity::loop() {
       focus_ = std::max(0, static_cast<int>(s_->entries_.size()) - 1);
     }
     wantLastRow_ = false;
+    cancelling_ = false;
     worker_.reset();
     setView(next);
     return;
+  }
+
+  if ((view_ == View::Loading || view_ == View::Downloading) && !linkShown_ && s_->linked_.load()) {
+    linkShown_ = true;  // The radio came up: the screen moves on to what it is doing now.
+    requestUpdate();
   }
 
   if (linkDownAt_ != 0 && millis() >= linkDownAt_ && !worker_.running()) {
@@ -322,12 +367,14 @@ void BorgesLibraryActivity::loop() {
         silentRestart();
         return;
       }
-      if (mappedInput.wasReleased(MappedInputManager::Button::Back)) leave();
+      if (mappedInput.wasReleased(MappedInputManager::Button::Back)) cancelAndLeave();
       return;
     case View::Downloading: {
       if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
         s_->stack_->cancel.request();
         hardDeadlineAt_ = millis() + kCancelWaitMs;
+        cancelling_ = true;
+        requestUpdate();
         return;
       }
       const uint32_t received = s_->downloadPercent_.load(std::memory_order_relaxed);
@@ -375,7 +422,11 @@ void BorgesLibraryActivity::loop() {
       if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
         setView(View::List);
       } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-        startDownload();  // Picks up the .part where it stopped.
+        if (s_->note_.load() == StrId::STR_BORGES_ERR_RELINK) {
+          setView(View::List);  // Trying again cannot help: the reader has to be linked again.
+        } else {
+          startDownload();  // Picks up the .part where it stopped.
+        }
       }
       return;
     case View::List:
@@ -393,9 +444,9 @@ void BorgesLibraryActivity::loop() {
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     if (s_->onSd_[focus_]) {
+      // Already here: the button says "Open", so it opens.
       s_->downloading_ = s_->entries_[focus_];
-      downloadFocus_ = 0;
-      setView(View::Downloaded);
+      openDownloaded();
     } else {
       startDownload();
     }
@@ -460,8 +511,9 @@ void BorgesLibraryActivity::renderList() {
     y += rowHeight;
   }
   if (s_->hasNote_.load()) {
-    const int noteY = area.y + area.height - renderer.getLineHeight(SMALL_FONT_ID);
-    if (noteY >= y) renderer.drawText(SMALL_FONT_ID, area.x + padding, noteY, I18N.get(s_->note_.load()));
+    const int noteY = area.y + area.height - noteHeightFor(renderer) + kLineGap;
+    const std::string note = renderer.truncatedText(SMALL_FONT_ID, I18N.get(s_->note_.load()), area.width - padding * 2);
+    renderer.drawText(SMALL_FONT_ID, area.x + padding, noteY, note.c_str());
   }
 }
 
@@ -477,7 +529,10 @@ void BorgesLibraryActivity::renderDownload() {
   y += kBlockGap * 2;
 
   if (view_ == View::Downloading) {
-    y = drawWrapped(renderer, UI_10_FONT_ID, area.x, y, area.width, tr(STR_BORGES_LIB_DOWNLOADING), 1);
+    const char* what = cancelling_ ? tr(STR_BORGES_CANCELLING)
+                       : linkShown_ ? tr(STR_BORGES_LIB_DOWNLOADING)
+                                    : tr(STR_BORGES_CONNECTING_WIFI);
+    y = drawWrapped(renderer, UI_10_FONT_ID, area.x, y, area.width, what, 1);
     y += kLineGap;
     const uint32_t percent = shownPercent_;
     drawProgressBar(renderer, area.x, y, area.width, 12, percent);
@@ -496,9 +551,8 @@ void BorgesLibraryActivity::renderDownload() {
     drawActionRow(renderer, area.x, y + rowHeight + 8, area.width, rowHeight, tr(STR_BORGES_LIB_KEEP_BROWSING),
                   downloadFocus_ == 1);
   } else {
-    y = drawWrapped(renderer, UI_10_FONT_ID, area.x, y, area.width, I18N.get(s_->note_.load()), 3);
-    y += kLineGap;
-    drawWrapped(renderer, SMALL_FONT_ID, area.x, y, area.width, tr(STR_BORGES_LIB_RETRY_HINT), 2);
+    // The button's own label says what it does now: there is no sentence to explain it.
+    drawWrapped(renderer, UI_10_FONT_ID, area.x, y, area.width, I18N.get(s_->note_.load()), 4);
   }
 }
 
@@ -521,15 +575,20 @@ void BorgesLibraryActivity::render(RenderLock&&) {
       Rect area = listArea(renderer);
       area.x += kSideMargin;
       area.width -= kSideMargin * 2;
-      drawWrappedCentered(renderer, area, UI_10_FONT_ID, area.y + area.height / 3, tr(STR_BORGES_LIB_LOADING), 1);
+      const char* what = cancelling_ ? tr(STR_BORGES_CANCELLING)
+                         : linkShown_ ? tr(STR_BORGES_LIB_LOADING)
+                                      : tr(STR_BORGES_CONNECTING_WIFI);
+      drawWrappedCentered(renderer, area, UI_10_FONT_ID, area.y + area.height / 3, what, 2);
       break;
     }
     case View::List:
       renderList();
+      listPainted_ = true;
       if (s_->entries_.empty()) {
-        confirm = tr(STR_SELECT);
+        confirm = tr(STR_BORGES_TRY);
       } else {
-        confirm = tr(STR_SELECT);
+        // The button names what it does to the book under the focus.
+        confirm = s_->onSd_[focus_] ? tr(STR_OPEN) : tr(STR_BORGES_GET);
         up = tr(STR_DIR_UP);
         down = tr(STR_DIR_DOWN);
       }
@@ -546,7 +605,7 @@ void BorgesLibraryActivity::render(RenderLock&&) {
       break;
     case View::DownloadFailed:
       renderDownload();
-      confirm = tr(STR_SELECT);
+      confirm = s_->note_.load() == StrId::STR_BORGES_ERR_RELINK ? tr(STR_BORGES_CONTINUE) : tr(STR_BORGES_TRY);
       break;
   }
   const auto labels = mappedInput.mapLabels(

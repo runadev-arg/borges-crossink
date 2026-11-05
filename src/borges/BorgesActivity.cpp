@@ -35,8 +35,9 @@ constexpr uint32_t kDisconnectBudgetMs = 30000;
 constexpr unsigned long kHangMarginMs = 15000;
 constexpr uint32_t kPairHungMs = 60000;  // Pairing has no budget, so its loop reports it is alive.
 constexpr uint32_t kCancelWaitMs = 1500;
-constexpr unsigned long kResultOkMs = 1500;
-constexpr unsigned long kResultErrorMs = 3000;
+// A good result is read in passing and leaves by itself. A bad one stays until a button says it was read.
+constexpr unsigned long kSyncOkMs = 1500;
+constexpr unsigned long kPairOkMs = 3000;
 constexpr int kMaxCodeRenewals = 3;
 
 Rect contentArea(const GfxRenderer& renderer, const int top) {
@@ -143,8 +144,33 @@ void BorgesActivity::savePrefs() {
 
 void BorgesActivity::setView(const View view) {
   view_ = view;
-  fullPaint_ = true;
+  // One slow, clean refresh where it earns its time: the list, and a code that is scanned. Text
+  // over text repaints fast. A pending first paint (over whatever the boot left) stays pending.
+  if (view == View::Status || view == View::PairCode) fullPaint_ = true;
   requestUpdate();
+}
+
+// Back to the status list. A reader that has just been linked lands on the library: it is the next thing.
+void BorgesActivity::showStatus() {
+  {
+    RenderLock lock(*this);
+    s_->pairing_.reset();
+  }
+  buildRows();
+  if (pairedNow_) {
+    for (size_t i = 0; i < rows_.size(); ++i) {
+      if (rows_[i] == Row::Library) focus_ = static_cast<int>(i);
+    }
+    pairedNow_ = false;
+  }
+  setView(View::Status);
+}
+
+// Asks the session to stop and says so at once: the wait for it can take a second or two.
+void BorgesActivity::cancelWork() {
+  s_->stack_->cancel.request();
+  cancelling_ = true;
+  (void)requestUpdateAndWait();
 }
 
 void BorgesActivity::activate(const Row row) {
@@ -193,7 +219,8 @@ void BorgesActivity::activate(const Row row) {
       return;
     case Row::Disconnect:
       startActivityForResult(
-          std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_BORGES_DISCONNECT),
+          // The dialog runs the two together as one sentence, so the first ends in its own question mark.
+          std::make_unique<ConfirmationActivity>(renderer, mappedInput, tr(STR_BORGES_DISCONNECT_ASK),
                                                  tr(STR_BORGES_DISCONNECT_CONFIRM)),
           [this](const ActivityResult& result) {
             fullPaint_ = true;
@@ -236,12 +263,13 @@ void BorgesActivity::startSync() {
     s_->local_ = makeUniqueNoThrow<Position>();
     s_->decision_ = makeUniqueNoThrow<ResumeDecision>();
   }
-  setView(View::Syncing);
+  // With the picker's connection already up there is nothing to connect to.
+  setView(s_->stack_->link.connected() ? View::Syncing : View::Connecting);
   if (!worker_.start(&BorgesActivity::syncMain, s_.get())) {
     s_->resultText_.store(StrId::STR_BORGES_ERR_LOCAL);
     s_->resultOk_.store(false);
+    autoLeaveAt_ = 0;
     setView(View::SyncResult);
-    autoLeaveAt_ = millis() + kResultErrorMs;
   }
 }
 
@@ -262,6 +290,8 @@ void BorgesActivity::syncMain(void* shared) {
     finish(describeLink(link), false);
     return;
   }
+  s->requestedView_.store(View::Syncing);
+  s->viewChanged_.store(true, std::memory_order_release);
 
   const bool withBook =
       s->bookRef_ && s->local_ && s->decision_ && partialMd5(stack.fs, s->bookPath_.c_str(), s->bookRef_->id);
@@ -299,13 +329,13 @@ void BorgesActivity::startDisconnect() {
   s_->stack_->cancel.arm(kDisconnectBudgetMs);
   hardDeadlineAt_ = millis() + kDisconnectBudgetMs + kHangMarginMs;
   focus_ = 0;
-  setView(View::Syncing);
+  setView(View::Unlinking);
   if (!worker_.start(&BorgesActivity::disconnectMain, s_.get())) {
     s_->stack_->engine.disconnect(false);
     s_->resultText_.store(StrId::STR_BORGES_DISCONNECT_PENDING);
     s_->resultOk_.store(false);
+    autoLeaveAt_ = 0;
     setView(View::SyncResult);
-    autoLeaveAt_ = millis() + kResultErrorMs;
   }
 }
 
@@ -363,7 +393,7 @@ void BorgesActivity::beginPairSession() {
   s_->stack_->cancel.arm(0);
   hardDeadlineAt_ = 0;
   s_->pairAliveAt_.store(millis());
-  setView(View::PairConnecting);
+  setView(View::Connecting);
   if (!worker_.start(&BorgesActivity::pairMain, s_.get())) {
     s_->resultText_.store(StrId::STR_BORGES_ERR_LOCAL);
     s_->resultOk_.store(false);
@@ -410,6 +440,12 @@ void BorgesActivity::pairMain(void* shared) {
     }
     switch (flow.step()) {
       case PairingState::Done:
+        // The reader is linked and the radio is up: the first sync (and the library behind it) costs
+        // nothing more now than later. Its own failure is not the link's: the status screen says it.
+        stack.cancel.arm(kManualBudgetMs);
+        stack.clock.allowLongGap();
+        show(View::Syncing);
+        (void)stack.engine.runManualSession(nullptr, nullptr, nullptr);
         finish(StrId::STR_BORGES_PAIR_DONE, true);
         return;
       case PairingState::Rejected:
@@ -471,59 +507,59 @@ void BorgesActivity::loop() {
       return;
     }
     const View next = s_->requestedView_.load();
+    if (next == View::Syncing && view_ == View::Syncing) return;  // Already says so.
+    if (next == View::Syncing && hardDeadlineAt_ == 0) {
+      // The first sync after pairing: a session like any other from here.
+      hardDeadlineAt_ = millis() + kManualBudgetMs + kHangMarginMs;
+    }
     if (next == View::SyncResult || next == View::PairResult) {
-      autoLeaveAt_ = millis() + (s_->resultOk_.load() ? kResultOkMs : kResultErrorMs);
+      const bool ok = s_->resultOk_.load();
+      autoLeaveAt_ = ok ? millis() + (next == View::PairResult ? kPairOkMs : kSyncOkMs) : 0;
+      if (next == View::PairResult && ok) pairedNow_ = true;
       const Diagnostics& diagnostics = s_->stack_->store.state().diag;
-      snprintf(requestId_, sizeof(requestId_), "%s", s_->resultOk_.load() ? "" : diagnostics.requestId);
+      snprintf(requestId_, sizeof(requestId_), "%s", ok ? "" : diagnostics.requestId);
     }
     setView(next);
     return;
   }
 
   switch (view_) {
+    case View::Connecting:
     case View::Syncing:
-    case View::PairConnecting:
+    case View::Unlinking:
     case View::PairCode: {
-      const bool syncHung = view_ == View::Syncing && hardDeadlineAt_ != 0 && millis() >= hardDeadlineAt_;
-      const bool pairHung = view_ != View::Syncing && millis() - s_->pairAliveAt_.load() >= kPairHungMs;
-      if (syncHung || pairHung) {
+      // A session with a budget has a deadline. Pairing has none, so its loop reports it is alive.
+      const bool deadlineHung = hardDeadlineAt_ != 0 && millis() >= hardDeadlineAt_;
+      const bool pairHung = hardDeadlineAt_ == 0 && millis() - s_->pairAliveAt_.load() >= kPairHungMs;
+      if (deadlineHung || pairHung) {
         LOG_ERR("BORGES", "Session hung: leaving without it");
         leave();
         return;
       }
       if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-        s_->stack_->cancel.request();
+        cancelWork();
         if (!worker_.waitForExit(kCancelWaitMs)) {
           leave();
           return;
         }
+        cancelling_ = false;
         s_->stack_->bringDown();
-        {
-          RenderLock lock(*this);
-          s_->pairing_.reset();
-        }
         if (readerSession()) {
           leave();
         } else {
-          buildRows();
-          setView(View::Status);
+          showStatus();
         }
       }
       return;
     }
     case View::SyncResult:
     case View::PairResult:
-      if (mappedInput.wasAnyPressed() || millis() >= autoLeaveAt_) {
+      if (mappedInput.wasAnyPressed() || (autoLeaveAt_ != 0 && millis() >= autoLeaveAt_)) {
         if (readerSession()) {
           leave();
           return;
         }
-        {
-          RenderLock lock(*this);
-          s_->pairing_.reset();
-        }
-        buildRows();
-        setView(View::Status);
+        showStatus();
       }
       return;
     case View::Status:
@@ -568,35 +604,81 @@ void BorgesActivity::renderCentered(const char* primary, const char* secondary) 
   }
 }
 
+// What a session said. A failure carries the reference a report quotes, and where to make one.
+void BorgesActivity::renderResult() {
+  const Rect screen = UITheme::getInstance().getScreenSafeArea(renderer, true, false);
+  Rect area = screen;
+  area.x += kSideMargin;
+  area.width -= kSideMargin * 2;
+  int y = area.y + area.height / 3;
+  y = drawWrappedCentered(renderer, area, UI_12_FONT_ID, y, I18N.get(s_->resultText_.load()), 5, EpdFontFamily::BOLD);
+  if (requestId_[0]) {
+    char id[64];
+    snprintf(id, sizeof(id), tr(STR_BORGES_REQUEST_ID_FMT), requestId_);
+    y += kBlockGap;
+    y = drawWrappedCentered(renderer, area, SMALL_FONT_ID, y, id, 2);
+    drawWrappedCentered(renderer, area, SMALL_FONT_ID, y + kLineGap, tr(STR_BORGES_REPORT), 2);
+  }
+}
+
 void BorgesActivity::renderPairCode() {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const int headerBottom = metrics.topPadding + metrics.headerHeight;
   GUI.drawHeader(renderer, Rect{0, metrics.topPadding, renderer.getScreenWidth(), metrics.headerHeight},
                  tr(STR_BORGES_CONNECT));
 
-  Rect area = contentArea(renderer, headerBottom + kBlockGap);
+  Rect area = contentArea(renderer, headerBottom);
   area.x += kSideMargin;
   area.width -= kSideMargin * 2;
 
-  // Step one is the phone. The URL is what a person types when a QR will not scan.
+  // The URL is what a person types when a QR will not scan.
   std::string url = s_->pairing_->qrUrl();
   const size_t scheme = url.find("://");
-  if (scheme != std::string::npos) url.erase(0, scheme + 3);
-  const size_t query = url.find('?');
-  if (query != std::string::npos) url.resize(query);
-  char line[160];
-  snprintf(line, sizeof(line), tr(STR_BORGES_PAIR_OPEN_FMT), url.c_str());
-  int y = drawWrappedCentered(renderer, area, UI_10_FONT_ID, area.y, line, 3);
-  y += kBlockGap;
+  std::string shown = url;
+  if (scheme != std::string::npos) shown.erase(0, scheme + 3);
+  const size_t query = shown.find('?');
+  if (query != std::string::npos) shown.resize(query);
+  char line[200];
+  snprintf(line, sizeof(line), tr(STR_BORGES_PAIR_OPEN_FMT), shown.c_str());
 
 #if CROSSINK_SCALABLE_FONTS
   constexpr int kCodeFont = UI_12_FONT_ID;
 #else
   constexpr int kCodeFont = LEXENDDECA_16_FONT_ID;
 #endif
+  constexpr int kCodeGap = 6;
+
+  // What goes under the code, measured first so the QR takes what is left and not a pixel more.
+  const int instructionHeight =
+      static_cast<int>(renderer.wrappedText(SMALL_FONT_ID, line, area.width, 3, EpdFontFamily::REGULAR).size()) *
+      renderer.getLineHeight(SMALL_FONT_ID);
+  const int footerHeight =
+      static_cast<int>(
+          renderer.wrappedText(SMALL_FONT_ID, tr(STR_BORGES_PAIR_WAITING), area.width, 2, EpdFontFamily::REGULAR)
+              .size()) *
+      renderer.getLineHeight(SMALL_FONT_ID);
+  const int codeHeight = renderer.getLineHeight(kCodeFont);
+  const int below = codeHeight + kLineGap + instructionHeight + kBlockGap + footerHeight;
+
+  // A scanner wants four modules of white all round. A version 4 symbol is 33 modules; 11 px each reads
+  // from arm's length on this panel, and a smaller module only when the screen has no room for it.
+  constexpr int kModules = 33;
+  constexpr int kQuietModules = 4;
+  const bool fitsVersion4 = url.size() <= 114;
+  int module = 11;
+  const int room = area.height - below;
+  while (module > 4 && (kModules + 2 * kQuietModules) * module > room) --module;
+  const int quiet = kQuietModules * module;
+  const int qr = fitsVersion4 ? kModules * module : std::min(area.width, room - 2 * quiet);
+
+  int y = area.y + quiet;
+  if (qr > 96) {
+    QrUtils::drawQrCode(renderer, Rect{area.x + (area.width - qr) / 2, y, qr, qr}, url);
+  }
+  y += qr + quiet;
+
   // Wide-set: read aloud or typed, a character at a time.
   const char* code = s_->pairing_->userCode();
-  constexpr int kCodeGap = 6;
   int codeWidth = 0;
   char glyph[2] = {0, 0};
   for (const char* p = code; *p; ++p) {
@@ -609,16 +691,10 @@ void BorgesActivity::renderPairCode() {
     renderer.drawText(kCodeFont, codeX, y, glyph, true, EpdFontFamily::BOLD);
     codeX += renderer.getTextWidth(kCodeFont, glyph, EpdFontFamily::BOLD) + kCodeGap;
   }
-  y += renderer.getLineHeight(kCodeFont) + kBlockGap;
+  y += codeHeight + kLineGap;
 
-  const int footer = renderer.getLineHeight(SMALL_FONT_ID) + kBlockGap;
-  const int available = area.y + area.height - y - footer;
-  const int qr = std::min(area.width, available);
-  if (qr > 96) {
-    const Rect bounds{area.x + (area.width - qr) / 2, y, qr, qr};
-    QrUtils::drawQrCode(renderer, bounds, s_->pairing_->qrUrl());
-  }
-  drawWrappedCentered(renderer, area, SMALL_FONT_ID, area.y + area.height - footer, tr(STR_BORGES_PAIR_WAITING), 1);
+  y = drawWrappedCentered(renderer, area, SMALL_FONT_ID, y, line, 3);
+  drawWrappedCentered(renderer, area, SMALL_FONT_ID, y + kBlockGap, tr(STR_BORGES_PAIR_WAITING), 2);
 }
 
 void BorgesActivity::renderStatus() {
@@ -640,8 +716,11 @@ void BorgesActivity::renderStatus() {
     const Credentials& creds = s_->stack_->store.creds();
     char value[48];
 
-    snprintf(value, sizeof(value), "%.8s", creds.accountId[0] ? creds.accountId : creds.deviceId);
-    y = drawLabelValue(renderer, x, y, width, tr(STR_BORGES_ACCOUNT), value) + kLineGap;
+    // Who it is linked to, in the words the person knows: never an id.
+    if (creds.accountName[0]) {
+      snprintf(value, sizeof(value), tr(STR_BORGES_CONNECTED_AS), creds.accountName);
+      y = drawWrapped(renderer, UI_10_FONT_ID, x, y, width, value, 1, EpdFontFamily::BOLD) + kLineGap;
+    }
 
     if (status.lastSuccessEpoch <= 0) {
       snprintf(value, sizeof(value), "%s", tr(STR_BORGES_NEVER));
@@ -674,6 +753,7 @@ void BorgesActivity::renderStatus() {
       if (status.diag.requestId[0]) {
         snprintf(value, sizeof(value), tr(STR_BORGES_REQUEST_ID_FMT), status.diag.requestId);
         y = drawWrapped(renderer, SMALL_FONT_ID, x, y, width, value, 2);
+        y = drawWrapped(renderer, SMALL_FONT_ID, x, y, width, tr(STR_BORGES_REPORT), 2);
       }
       y += kBlockGap;
     }
@@ -688,7 +768,7 @@ void BorgesActivity::renderStatus() {
       case Row::SyncNow:
         return tr(STR_BORGES_SYNC_NOW);
       case Row::Library:
-        return tr(STR_BORGES_LIBRARY);
+        return tr(STR_BORGES_DOWNLOAD_BOOKS);
       case Row::OnOpen:
         return tr(STR_BORGES_ON_OPEN);
       case Row::OnSleep:
@@ -715,29 +795,38 @@ void BorgesActivity::renderStatus() {
 void BorgesActivity::render(RenderLock&&) {
   if (!s_ || (view_ == View::Status && !stackOk_ && !s_->stack_)) return;  // On the way out, or handed over.
   renderer.clearScreen();
+  if (cancelling_) {
+    renderCentered(tr(STR_BORGES_CANCELLING), nullptr);
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    return;
+  }
   switch (view_) {
     case View::Status:
       renderStatus();
       break;
+    case View::Connecting:
+      renderCentered(tr(STR_BORGES_CONNECTING_WIFI), nullptr);
+      break;
     case View::Syncing:
       renderCentered(tr(STR_BORGES_SYNCING), nullptr);
       break;
-    case View::PairConnecting:
-      renderCentered(tr(STR_BORGES_PAIR_CONNECTING), nullptr);
+    case View::Unlinking:
+      renderCentered(tr(STR_BORGES_UNLINKING), nullptr);
       break;
     case View::PairCode:
       renderPairCode();
       break;
     case View::SyncResult:
-    case View::PairResult: {
-      char id[64] = {0};
-      if (requestId_[0]) snprintf(id, sizeof(id), tr(STR_BORGES_REQUEST_ID_FMT), requestId_);
-      renderCentered(I18N.get(s_->resultText_.load()), id);
+    case View::PairResult:
+      renderResult();
       break;
-    }
   }
-  if (view_ == View::Syncing || view_ == View::PairCode || view_ == View::PairConnecting) {
+  if (view_ == View::Connecting || view_ == View::Syncing || view_ == View::Unlinking || view_ == View::PairCode) {
     const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), "", "", "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+  } else if ((view_ == View::SyncResult || view_ == View::PairResult) && !s_->resultOk_.load()) {
+    // A failure waits to be read. The hint says what the button does.
+    const auto labels = mappedInput.mapLabels("", tr(STR_BORGES_CONTINUE), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }
   renderer.displayBuffer(fullPaint_ ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);

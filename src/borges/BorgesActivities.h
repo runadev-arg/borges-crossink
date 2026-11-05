@@ -100,8 +100,8 @@ class BorgesResumeActivity final : public Activity {
   Return back_;
   State state_ = State::Choosing;
   int focus_ = 0;
-  bool firstPaint_ = true;
   bool choiceStored_ = false;
+  bool jumped_ = false;  // The place was moved: the way back is worth saying.
   unsigned long linkDownAt_ = 0;
   unsigned long noticeUntil_ = 0;
   unsigned long workDeadlineAt_ = 0;
@@ -123,6 +123,7 @@ class BorgesSleepFlushActivity final : public Activity {
  private:
   static void sessionMain(void* stack);
   void sleepNow();
+  void wakeNow();
 
   std::unique_ptr<BorgesStack> stack_;
   SessionWorker worker_;
@@ -143,11 +144,12 @@ class BorgesActivity final : public Activity {
   // Sleeping out of a manual sync started in a book wakes back into that book.
   bool isReaderActivity() const override { return readerSession(); }
   bool preventAutoSleep() override {
-    return view_ == View::Syncing || view_ == View::PairConnecting || view_ == View::PairCode;
+    return view_ == View::Connecting || view_ == View::Syncing || view_ == View::Unlinking || view_ == View::PairCode;
   }
 
  private:
-  enum class View : uint8_t { Status, Syncing, SyncResult, PairConnecting, PairCode, PairResult };
+  // Connecting is the radio coming up, Syncing is the conversation with the server.
+  enum class View : uint8_t { Status, Connecting, Syncing, Unlinking, SyncResult, PairCode, PairResult };
   enum class Row : uint8_t { Connect, SyncNow, Library, OnOpen, OnSleep, Disconnect };
 
   struct Shared;
@@ -161,11 +163,14 @@ class BorgesActivity final : public Activity {
   void startPair();
   void startDisconnect();
   void beginPairSession();
+  void showStatus();
+  void cancelWork();
   void leave();
   void setView(View view);
   void renderStatus();
   void renderPairCode();
   void renderCentered(const char* primary, const char* secondary);
+  void renderResult();
   void savePrefs();
 
   bool networkBoot_;
@@ -176,9 +181,11 @@ class BorgesActivity final : public Activity {
   int focus_ = 0;
   bool stackOk_ = false;
   bool fullPaint_ = true;
+  bool cancelling_ = false;  // Painted at once: the wait for a session to stop is not a frozen screen.
+  bool pairedNow_ = false;   // The next Status screen puts the focus on the library.
   SessionWorker worker_;
   ButtonNavigator navigator_;
-  unsigned long autoLeaveAt_ = 0;
+  unsigned long autoLeaveAt_ = 0;  // 0: stays until a button is pressed.
   unsigned long hardDeadlineAt_ = 0;
   char requestId_[40] = {0};
 };
@@ -202,6 +209,8 @@ class BorgesLibraryActivity final : public Activity {
   static void downloadMain(void* shared);
   void startLoad(uint16_t page);
   void startDownload();
+  void cancelAndLeave();
+  void noteLink(bool up);
   void openDownloaded();
   void leave();
   void setView(View view);
@@ -215,6 +224,9 @@ class BorgesLibraryActivity final : public Activity {
   bool wantLastRow_ = false;
   View view_ = View::Loading;
   bool fullPaint_ = true;
+  bool listPainted_ = false;  // A list was already on the glass: the next one is a page change.
+  bool cancelling_ = false;
+  bool linkShown_ = false;    // What the screen says about the radio: coming up, or up.
   SessionWorker worker_;
   ButtonNavigator navigator_;
   uint32_t shownPercent_ = 0;

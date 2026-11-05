@@ -45,7 +45,8 @@ constexpr uint32_t kSleepBudgetMs = 15000;
 constexpr uint32_t kSleepLinkBudgetMs = 6000;
 // One uninterruptible TCP connect, about 3.5 s, on top of the budget.
 constexpr uint32_t kSleepHardDeadlineMs = kSleepBudgetMs + 4000;
-constexpr uint32_t kNoticeMs = 1500;
+constexpr uint32_t kNoticeMs = 3000;
+constexpr uint32_t kWakeWaitMs = 600;
 constexpr int kActionGap = 8;
 
 // A session came back: the guard's count starts over. Takes its own file handles, since
@@ -266,6 +267,8 @@ void BorgesResumeActivity::onEnter() {
   Activity::onEnter();
   ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
   linkDownAt_ = millis() + kPromptLinkMs;
+  // Going there would move backwards: the one that keeps what was read is under the thumb, not the other.
+  focus_ = (decision_->warnings & resume::kWarnBackwards) ? 1 : 0;
   requestUpdate();
 }
 
@@ -486,6 +489,8 @@ void BorgesResumeActivity::goThere() {
     // The place is on disk and the choice stored. A short try at sending it now, as the
     // plugin does; any button goes on, and the next session sends it otherwise.
     choiceStored_ = true;
+    jumped_ = true;
+    requestUpdate();  // Now it is true that the place moved: say how to undo it.
     work_ = makeUniqueNoThrow<Work>();
     if (!work_) {
       leave(true);
@@ -532,8 +537,11 @@ void BorgesResumeActivity::render(RenderLock&&) {
     y = area.y + area.height / 3;
     y = drawWrappedCentered(renderer, area, UI_12_FONT_ID, y, title_.c_str(), 3, EpdFontFamily::BOLD);
     y += kBlockGap;
-    drawWrappedCentered(renderer, area, UI_10_FONT_ID, y,
-                        state_ == State::Working ? tr(STR_BORGES_OPENING) : tr(STR_BORGES_CANT_LOCATE), 3);
+    y = drawWrappedCentered(renderer, area, UI_10_FONT_ID, y,
+                            state_ == State::Working ? tr(STR_BORGES_OPENING) : tr(STR_BORGES_CANT_LOCATE), 3);
+    if (state_ == State::Working && jumped_) {
+      drawWrappedCentered(renderer, area, SMALL_FONT_ID, y + kBlockGap, tr(STR_BORGES_JUMP_TIP), 4);
+    }
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     return;
   }
@@ -553,7 +561,7 @@ void BorgesResumeActivity::render(RenderLock&&) {
   if (d.local.hasPct) {
     formatPercent(here, sizeof(here), d.local.pctMicro, sameWhole);
   } else {
-    snprintf(here, sizeof(here), "%s", "-");
+    snprintf(here, sizeof(here), "%s", tr(STR_BORGES_UNOPENED));
   }
   if (d.hasRemotePct) {
     formatPercent(there, sizeof(there), d.remotePct, sameWhole);
@@ -566,7 +574,11 @@ void BorgesResumeActivity::render(RenderLock&&) {
   y += kLineGap + 2;
 
   char label[80];
-  snprintf(label, sizeof(label), tr(STR_BORGES_THERE_FMT), d.remoteDeviceName[0] ? d.remoteDeviceName : "?");
+  if (d.remoteDeviceName[0]) {
+    snprintf(label, sizeof(label), tr(STR_BORGES_THERE_FMT), d.remoteDeviceName);
+  } else {
+    snprintf(label, sizeof(label), "%s", tr(STR_BORGES_OTHER_READER));
+  }
   y = drawLabelValue(renderer, area.x, y, area.width, label, there);
   if (d.showDate && d.occurredAt[0]) {
     int64_t epoch = 0;
@@ -590,15 +602,28 @@ void BorgesResumeActivity::render(RenderLock&&) {
 
   const int rowHeight = actionRowHeight(renderer);
   const int rowsTop = area.y + area.height - rowHeight * 2 - kActionGap - kBlockGap;
-  drawActionRow(renderer, area.x, rowsTop, area.width, rowHeight, tr(STR_BORGES_GO), focus_ == 0);
-  drawActionRow(renderer, area.x, rowsTop + rowHeight + kActionGap, area.width, rowHeight, tr(STR_BORGES_STAY),
-                focus_ == 1);
+  // The action says where it goes, so nobody has to remember which number was which.
+  char go[48];
+  char stay[48];
+  if (d.hasRemotePct) {
+    snprintf(go, sizeof(go), tr(STR_BORGES_GO_FMT), there);
+  } else {
+    snprintf(go, sizeof(go), "%s", tr(STR_BORGES_GO));
+  }
+  if (d.local.hasPct) {
+    snprintf(stay, sizeof(stay), tr(STR_BORGES_STAY_FMT), here);
+  } else {
+    snprintf(stay, sizeof(stay), "%s", tr(STR_BORGES_STAY));
+  }
+  drawActionRow(renderer, area.x, rowsTop, area.width, rowHeight, go, focus_ == 0);
+  drawActionRow(renderer, area.x, rowsTop + rowHeight + kActionGap, area.width, rowHeight, stay, focus_ == 1);
 
-  const auto labels =
-      mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  // Back answers nothing: the book opens where it was and this asks again. It says so.
+  const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BORGES_LATER)), tr(STR_SELECT),
+                                            tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
-  renderer.displayBuffer(firstPaint_ ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
-  firstPaint_ = false;
+  // The screen before it is a line of text on white, so fast is clean enough. A panel will tell.
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 }
 
 // ---------------------------------------------------------------------------------
@@ -631,7 +656,38 @@ void BorgesSleepFlushActivity::sessionMain(void* context) {
 
 void BorgesSleepFlushActivity::loop() {
   if (sleeping_) return;
-  if (worker_.finished() || mappedInput.wasAnyPressed() || millis() >= deadlineAt_) sleepNow();
+  if (mappedInput.wasAnyPressed()) {
+    wakeNow();
+    return;
+  }
+  if (worker_.finished() || millis() >= deadlineAt_) sleepNow();
+}
+
+// A press says the person is back: stop the flush and go where a wake would, not to sleep and
+// make them press again.
+void BorgesSleepFlushActivity::wakeNow() {
+  if (sleeping_) return;
+  sleeping_ = true;
+  if (stack_) stack_->cancel.request();
+  const bool back = worker_.waitForExit(kWakeWaitMs);
+  if (back) {
+    completeSession(false, {}, nullptr);
+    if (stack_) stack_->bringDown();
+    stack_.reset();  // The check below builds its own, and this boot's heap is tight.
+  }
+  const std::string path = APP_STATE.openEpubPath;
+  if (!path.empty() && APP_STATE.lastSleepFromReader) {
+    if (back && wakeWantsNetworkBoot(path)) {
+      // The guard a wake into a book takes: the reader's clean exit clears it.
+      APP_STATE.readerActivityLoadCount++;
+      APP_STATE.saveToFile();
+      silentRestartToNetwork(NetworkBootTarget::BORGES, static_cast<uint32_t>(NetPayload::OpenBook));
+    } else {
+      silentRestartToReader(true);
+    }
+    return;
+  }
+  silentRestart();
 }
 
 void BorgesSleepFlushActivity::sleepNow() {
