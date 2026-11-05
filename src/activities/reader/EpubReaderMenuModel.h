@@ -37,6 +37,7 @@ enum class EpubReaderMenuAction : uint8_t {
   RESET_BOOK_READER_SETTINGS,
   BORGES_SYNC,
   BORGES_UNDO,
+  BORGES_OTHER_DEVICE,
 };
 
 enum class ReaderDrawerTab : uint8_t { Font = 0, Layout = 1, More = 2, Location = 3, Settings = 4, Count };
@@ -154,6 +155,7 @@ enum class ReaderDrawerCatalogItem : uint8_t {
   SendNearbyBook,
   BorgesSync,
   BorgesUndo,
+  BorgesOtherDevice,
 };
 
 struct ReaderDrawerAvailability {
@@ -171,7 +173,7 @@ struct ReaderDrawerAvailability {
 };
 
 struct ReaderDrawerTabCatalog {
-  std::array<ReaderDrawerCatalogItem, 13> items{};
+  std::array<ReaderDrawerCatalogItem, 14> items{};
   uint8_t count = 0;
 
   constexpr void add(const ReaderDrawerCatalogItem item) { items[count++] = item; }
@@ -222,6 +224,7 @@ constexpr ReaderDrawerCatalog makeReaderDrawerCatalog(const ReaderDrawerAvailabi
   location.add(ReaderDrawerCatalogItem::SaveClipping);
   if (available.hasClippings) location.add(ReaderDrawerCatalogItem::ViewClippings);
   if (available.borgesPaired) location.add(ReaderDrawerCatalogItem::BorgesSync);
+  if (available.borgesPaired) location.add(ReaderDrawerCatalogItem::BorgesOtherDevice);
   if (available.borgesHasUndo) location.add(ReaderDrawerCatalogItem::BorgesUndo);
   if (available.buttonDevice) {
     // Two rows that both say "sync" would ask the reader to know the difference.

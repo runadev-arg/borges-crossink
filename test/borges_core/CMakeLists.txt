@@ -11,6 +11,7 @@ add_library(borges_core_lib STATIC
   ${BORGES_CORE_DIR}/Api.cpp
   ${BORGES_CORE_DIR}/AtomicFile.cpp
   ${BORGES_CORE_DIR}/Catalog.cpp
+  ${BORGES_CORE_DIR}/Positions.cpp
   ${BORGES_CORE_DIR}/Codec.cpp
   ${BORGES_CORE_DIR}/Events.cpp
   ${BORGES_CORE_DIR}/JsonStream.cpp

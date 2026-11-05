@@ -1,10 +1,12 @@
 #include "SyncEngine.h"
 
+#include <cstdio>
 #include <cstring>
 #include <new>
 
 #include "Backoff.h"
 #include "JsonStream.h"
+#include "Positions.h"
 #include "net/HttpDate.h"
 
 namespace borges {
@@ -366,6 +368,56 @@ SessionReport SyncEngine::runManualSession(const BookRef* book, const Position* 
   }
   if (checkHeldBooks(book ? &book->id : nullptr, report)) pullAndDrain(report);
   return finish(report, SessionKind::Manual);
+}
+
+SessionReport SyncEngine::runPositionsSession(const BookRef& book, const Position& local, ResumeDecision& out) {
+  SessionReport report;
+  out = ResumeDecision{};
+  pendingChoice_ = false;
+  if (!startSession(SessionKind::Manual, report)) return report;
+
+  char path[160];
+  snprintf(path, sizeof(path), "/api/sync/v2/progress/positions?book_identifier_kind=koreader_partial_md5&book_identifier_value=%s",
+           book.id.hex);
+  const ApiResult r = api_.call("GET", path, nullptr, 0);
+  if (r.kind != ApiKind::Ok) {
+    recordFailure(SyncStage::Focus, r, report);
+    return finish(report, SessionKind::Manual);
+  }
+  File f(fs_, kSpoolPath, IFs::Mode::Read);
+  if (!f) {
+    recordLocalError(SyncStage::Focus, "spool_read", report);
+    return finish(report, SessionKind::Manual);
+  }
+  FileByteSource source(f);
+  JsonScanner scan(source);
+  RemoteEvent& event = scratch_->event;
+  if (!parseOtherPosition(scan, event)) {
+    report.focusChecked = true;
+    return finish(report, SessionKind::Manual);
+  }
+
+  out.ask = true;
+  out.verdict = resume::Verdict::Ask;
+  out.book = book.id;
+  out.local = local;
+  out.hasRemotePct = event.hasPct;
+  out.remotePct = event.pctMicro;
+  out.xpointerUsable = event.xpointerUsable;
+  copyText(out.remoteXpointer, sizeof(out.remoteXpointer), event.xpointer);
+  copyText(out.remoteDeviceName, sizeof(out.remoteDeviceName), event.originName);
+  out.showDate = resume::showsDate(event.precision) && event.occurredAt[0];
+  if (out.showDate) copyText(out.occurredAt, sizeof(out.occurredAt), event.occurredAt);
+  out.warnings = resume::warningsFor(event.hasPct, event.pctMicro, local.hasPct, local.pctMicro, event.xpointerUsable);
+  out.fingerprint = fnv1a64(event.eventId, strlen(event.eventId), fnv1a64("recovery:", 9));
+  pendingChoice_ = true;
+  pendingFingerprint_ = out.fingerprint;
+  pendingBook_ = book.id;
+  report.outcome = SessionOutcome::AwaitingChoice;
+  report.focusChecked = true;
+  report.depth = outbox_.depth();
+  report.held = report.depth - outbox_.sendableDepth(&store_.state().holds);
+  return report;
 }
 
 SessionReport SyncEngine::abandonChoice() {

@@ -203,6 +203,9 @@ class SyncEngine {
   // Session entry points. Each owns the budget for its kind.
   SessionReport runOpenSession(const BookRef& book, const Position& local, ResumeDecision& out);
   SessionReport runSleepSession();
+  // Asked for from the drawer. An offer of another device's place, answered like any prompt:
+  // AwaitingChoice with out filled, or Ok with out.ask false when no other device has one.
+  SessionReport runPositionsSession(const BookRef& book, const Position& local, ResumeDecision& out);
   // book, local and out may all be null: then no prompt can come out of it.
   SessionReport runManualSession(const BookRef* book, const Position* local, ResumeDecision* out);
 

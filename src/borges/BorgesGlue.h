@@ -32,6 +32,8 @@ enum class NetPayload : uint32_t {
   ManualFromReader = 6,  // A sync of the open book, then back to it.
   Library = 7,
 };
+  Disconnect = 8,   // The Borges screen, invalidating the credential on the server.
+  OtherDevice = 9,  // APP_STATE.openEpubPath: the place another device left it at, then back.
 
 // --- The previous firmware's data ------------------------------------------------------
 

@@ -4232,6 +4232,13 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuAction action, const 
       undoBorgesJump();
       break;
     case EpubReaderMenuAction::NEARBY_POSITION_SYNC: {
+    case EpubReaderMenuAction::BORGES_OTHER_DEVICE: {
+      saveProgressBeforeRestart();
+      pauseReadingPaceTimer("borges_other_device");
+      activityManager.replaceActivity(
+          borges::glue::makeHandoff(renderer, mappedInput, borges::glue::NetPayload::OtherDevice));
+      break;
+    }
       const int currentPage = section ? section->currentPage : nextPageNumber;
       const int totalPages = section ? section->estimatedTotalPages() : std::max(1, cachedChapterTotalPageCount);
       std::optional<uint16_t> paragraphIndex;

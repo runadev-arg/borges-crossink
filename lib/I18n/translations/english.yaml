@@ -965,6 +965,8 @@ STR_BORGES_WARN_APPROXIMATE: "The location is approximate: it may land a few lin
 STR_BORGES_OPENING: "Opening..."
 STR_BORGES_CANT_LOCATE: "Could not find that position. Opening where you were."
 STR_BORGES_SYNC_NOW: "Sync now"
+STR_BORGES_OTHER_DEVICE: "Go to where another reader left off"
+STR_BORGES_NO_OTHER_DEVICE: "No other reader has a place in this book yet."
 STR_BORGES_UNDO: "Back to where I was"
 STR_BORGES_LIBRARY: "Library"
 STR_BORGES_ON_OPEN: "When opening a book"

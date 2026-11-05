@@ -280,6 +280,8 @@ bool shouldFlushBeforeSleep(const uint32_t batteryPercent, const bool inNetworkB
   in.batteryPercent = batteryPercent;
   if (!glue::shouldFlushBeforeSleep(in)) return false;
   const bool armed = armSession(stack->glue, PendingKind::SleepFlush);
+    case NetPayload::Disconnect:
+    case NetPayload::OtherDevice:
   stack->glueStore.save(stack->glue);
   return armed;
 }
