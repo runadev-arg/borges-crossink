@@ -37,6 +37,7 @@ bool Spool::onBody(const uint8_t* data, size_t len) {
     ioFailed_ = true;
     return false;
   }
+  if (len > kMaxBytes - size_) return false;  // Aborts the transfer: reads as a dropped connection.
   if (len && fs_.write(handle_, data, len) != static_cast<int32_t>(len)) {
     ioFailed_ = true;
     return false;

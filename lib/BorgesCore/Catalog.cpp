@@ -71,30 +71,57 @@ void decodeEntry(const uint8_t* in, CatalogEntry& e) {
 class FileSink : public IHttpSink {
  public:
   FileSink(IFs& fs, IFs::Handle handle, IDownloadProgress* progress, uint64_t base, uint64_t total)
-      : fs_(fs), handle_(handle), progress_(progress), received_(base), total_(total) {}
-  void onStatus(int status) override { accept_ = base() == 0 ? (status == 200) : (status == 206); }
+      : fs_(fs), handle_(handle), progress_(progress), received_(base), synced_(base), total_(total) {}
+  void onStatus(int status) override { accept_ = received_ == 0 ? status == 200 : status == 206; }
   bool onBody(const uint8_t* data, size_t len) override {
     if (!accept_) return true;
+    if (len > total_ - received_) {
+      oversize_ = true;  // More than the manifest promised: the card is not the server's to fill.
+      return false;
+    }
     if (fs_.write(handle_, data, len) != static_cast<int32_t>(len)) {
       failed_ = true;
       return false;
     }
     received_ += len;
+    // FAT records a file's length at sync: what a power cut can lose stays bounded, and a
+    // resume finds the rest.
+    if (received_ - synced_ >= kSyncEveryBytes) {
+      if (!fs_.flush(handle_)) {
+        failed_ = true;
+        return false;
+      }
+      synced_ = received_;
+    }
     if (progress_) progress_->onProgress(received_, total_);
     return true;
   }
   bool failed() const { return failed_; }
+  bool oversize() const { return oversize_; }
 
  private:
-  uint64_t base() const { return received_; }
+  static constexpr uint64_t kSyncEveryBytes = 1024 * 1024;
   IFs& fs_;
   IFs::Handle handle_;
   IDownloadProgress* progress_;
   uint64_t received_;
+  uint64_t synced_;
   uint64_t total_;
   bool accept_ = false;
   bool failed_ = false;
+  bool oversize_ = false;
 };
+
+// CON.epub is a device on Windows, and a card's files are meant to be read there too.
+bool isReservedStem(const char* name, size_t len) {
+  size_t stem = 0;
+  while (stem < len && name[stem] != '.') ++stem;
+  if (stem != 3 && stem != 4) return false;
+  char upper[5] = {0};
+  for (size_t i = 0; i < stem; ++i) upper[i] = name[i] >= 'a' && name[i] <= 'z' ? static_cast<char>(name[i] - 'a' + 'A') : name[i];
+  if (stem == 4) return (memcmp(upper, "COM", 3) == 0 || memcmp(upper, "LPT", 3) == 0) && upper[3] >= '1' && upper[3] <= '9';
+  return memcmp(upper, "CON", 3) == 0 || memcmp(upper, "PRN", 3) == 0 || memcmp(upper, "AUX", 3) == 0 || memcmp(upper, "NUL", 3) == 0;
+}
 
 }  // namespace
 
@@ -144,6 +171,15 @@ void safeFileName(const char* suggested, const char* fallback, char* out, size_t
     }
   }
   if (n == 0) out[n++] = '_';
+  if (isReservedStem(out, n)) {
+    if (n == room) {
+      --n;
+      while (n > 0 && (static_cast<uint8_t>(out[n]) & 0xC0) == 0x80) --n;
+    }
+    memmove(out + 1, out, n);
+    out[0] = '_';
+    ++n;
+  }
   memcpy(out + n, kSuffix, kSuffixLen + 1);
 }
 
@@ -175,8 +211,25 @@ bool partialMd5(IFs& fs, const char* path, BookId& out) {
   return true;
 }
 
-Catalog::Catalog(Store& store, IFs& fs, IHttp& http, IClock& clock, ICancel& cancel)
-    : store_(store), fs_(fs), clock_(clock), api_(fs, http, clock, cancel) {}
+Catalog::Catalog(Store& store, IFs& fs, IHttp& http, IClock& clock, ICancel& cancel, ISha256& sha)
+    : store_(store), fs_(fs), clock_(clock), sha_(sha), api_(fs, http, clock, cancel) {}
+
+Catalog::Hash Catalog::sha256Matches(const char* path, const uint8_t expected[32]) {
+  File f(fs_, path, IFs::Mode::Read);
+  if (!f) return Hash::Unreadable;
+  sha_.begin();
+  uint8_t chunk[512];
+  for (;;) {
+    if (!api_.canContinue()) return Hash::Stopped;
+    const int32_t got = f.read(chunk, sizeof(chunk));
+    if (got < 0) return Hash::Unreadable;
+    if (got == 0) break;
+    sha_.update(chunk, static_cast<size_t>(got));
+  }
+  uint8_t digest[32];
+  sha_.finish(digest);
+  return memcmp(digest, expected, 32) == 0 ? Hash::Match : Hash::Mismatch;
+}
 
 void Catalog::note(const ApiResult& r, const char* code) {
   error_.stage = SyncStage::Catalog;
@@ -550,6 +603,12 @@ DownloadResult Catalog::download(CatalogEntry& entry, const char* dir, IDownload
     out.flush();
     out.close();
     if (sink.failed()) return DownloadResult::LocalError;
+    if (sink.oversize()) {
+      fs_.remove(partPath);
+      fs_.remove(metaPath);
+      note(r, "integrity_oversize");
+      return DownloadResult::IntegrityFailed;
+    }
     if (r.status == 200 && have > 0) {
       // The server ignored the Range (the file changed, or If-Range failed).
       fs_.remove(partPath);
@@ -592,9 +651,39 @@ DownloadResult Catalog::download(CatalogEntry& entry, const char* dir, IDownload
       return DownloadResult::IntegrityFailed;
     }
   }
+  // Manifest and header must agree on the content hash; whichever is there is the claim.
+  uint8_t manifestHash[32];
+  uint8_t headerHash[32];
+  const bool hasManifest = entry.sha256[0] && hexDecode(entry.sha256, manifestHash, 32);
+  const bool hasHeader = r.contentSha256[0] && hexDecode(r.contentSha256, headerHash, 32);
+  bool agreed = !(r.contentSha256[0] && !hasHeader) && !(hasManifest && hasHeader && memcmp(manifestHash, headerHash, 32) != 0);
+  int64_t actualSize = -1;
+  {
+    File part(fs_, partPath, IFs::Mode::Read);
+    if (part) actualSize = part.size();
+  }
+  if (actualSize < 0) return DownloadResult::LocalError;
   BookId actual;
   if (!partialMd5(fs_, partPath, actual)) return DownloadResult::LocalError;
-  if (memcmp(actual.md5, entry.book.md5, 16) != 0) {
+  if (agreed) agreed = static_cast<uint64_t>(actualSize) == entry.fileSize && memcmp(actual.md5, entry.book.md5, 16) == 0;
+  if (agreed && (hasManifest || hasHeader)) {
+    // The partial MD5 samples a few KiB. This is what catches a byte outside them.
+    switch (sha256Matches(partPath, hasManifest ? manifestHash : headerHash)) {
+      case Hash::Match:
+        break;
+      case Hash::Mismatch:
+        agreed = false;
+        break;
+      case Hash::Stopped:
+        // Every byte is kept: the next call goes straight back to this check.
+        if (api_.cancelled()) return DownloadResult::Cancelled;
+        note(r, "transport");
+        return DownloadResult::Interrupted;
+      case Hash::Unreadable:
+        return DownloadResult::LocalError;
+    }
+  }
+  if (!agreed) {
     fs_.remove(partPath);
     fs_.remove(metaPath);
     note(r, "integrity_failed");

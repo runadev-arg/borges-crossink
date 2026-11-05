@@ -1,8 +1,9 @@
 #pragma once
 
-// Responses go to SD first (design rule 1). There is deliberately no size cap to
-// wedge on: the session's wall-clock budget is what bounds a response. A spool does
-// not need to survive a crash, so it is never flushed before parsing beyond close.
+// Responses go to SD first (design rule 1). The cap is not a parsing limit, it is what
+// keeps a broken or hostile server from filling the card: far above anything a server
+// page can be (48 KiB of events). A spool does not need to survive a crash, so it is never
+// flushed before parsing beyond close.
 
 #include <cstddef>
 #include <cstdint>
@@ -19,6 +20,8 @@ class Spool : public IHttpSink {
  public:
   Spool(IFs& fs, const char* path) : fs_(fs), path_(path) {}
   ~Spool() override { close(); }
+
+  static constexpr uint32_t kMaxBytes = 4 * 1024 * 1024;
 
   bool begin();  // Truncates. False on IO error.
   bool onBody(const uint8_t* data, size_t len) override;

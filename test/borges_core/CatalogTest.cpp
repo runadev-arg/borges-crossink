@@ -36,7 +36,7 @@ class CatalogTest : public testing::Test {
   void SetUp() override {
     d.boot();
     d.http.handler = nullptr;
-    catalog = std::make_unique<Catalog>(*d.store, d.fs, d.http, d.clock, d.cancel);
+    catalog = std::make_unique<Catalog>(*d.store, d.fs, d.http, d.clock, d.cancel, sha);
     d.fs.mkdir("/Books");
   }
   std::vector<CatalogEntry> cached(uint16_t number = 1) {
@@ -46,6 +46,7 @@ class CatalogTest : public testing::Test {
     return c.entries;
   }
   Device d;
+  SoftSha256 sha;
   std::unique_ptr<Catalog> catalog;
 };
 
@@ -291,7 +292,7 @@ class DownloadTest : public testing::Test {
   void SetUp() override {
     d.boot();
     d.http.handler = nullptr;
-    catalog = std::make_unique<Catalog>(*d.store, d.fs, d.http, d.clock, d.cancel);
+    catalog = std::make_unique<Catalog>(*d.store, d.fs, d.http, d.clock, d.cancel, sha);
     content.resize(5000);
     for (size_t i = 0; i < content.size(); ++i) content[i] = static_cast<char>(i % 251);
     entry = CatalogEntry{};
@@ -306,7 +307,17 @@ class DownloadTest : public testing::Test {
     r.koreaderMd5 = entry.book.hex;
     return r;
   }
+  std::string hashOf(const std::string& bytes) {
+    uint8_t digest[32];
+    sha.begin();
+    sha.update(bytes.data(), bytes.size());
+    sha.finish(digest);
+    char hex[65];
+    hexEncode(digest, 32, hex);
+    return hex;
+  }
   Device d;
+  SoftSha256 sha;
   std::unique_ptr<Catalog> catalog;
   std::string content;
   CatalogEntry entry;
@@ -446,6 +457,129 @@ TEST_F(DownloadTest, RevokedDeviceAndCancelAreReported) {
   EXPECT_EQ(catalog->download(entry, "/Books", nullptr, 60000), DownloadResult::NeedsRelink);
   d.cancel.flag = true;
   EXPECT_EQ(catalog->download(entry, "/Books", nullptr, 60000), DownloadResult::Cancelled);
+}
+
+TEST(SoftSha256, MatchesTheKnownVectors) {
+  const auto hash = [](const std::string& text) {
+    SoftSha256 sha;
+    sha.begin();
+    sha.update(text.data(), text.size());
+    uint8_t digest[32];
+    sha.finish(digest);
+    char hex[65];
+    hexEncode(digest, 32, hex);
+    return std::string(hex);
+  };
+  EXPECT_EQ(hash(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  EXPECT_EQ(hash("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  EXPECT_EQ(hash(std::string(1000000, 'a')), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+}
+
+TEST_F(DownloadTest, AByteOutsideThePartialMd5SamplesIsCaughtBySha256) {
+  entry.sha256[0] = '\0';
+  copyText(entry.sha256, sizeof(entry.sha256), hashOf(content).c_str());
+  std::string corrupted = content;
+  corrupted[2500] = static_cast<char>(corrupted[2500] ^ 1);  // 1 KiB at 0, 1024 and 4096: 2500 is in no sample.
+  ASSERT_EQ(md5Of(corrupted), md5Of(content));
+  Reply reply = jsonReply(200, corrupted);
+  reply.etag = "\"e\"";
+  d.http.script.push_back(reply);
+  EXPECT_EQ(catalog->download(entry, "/Books", nullptr, 60000), DownloadResult::IntegrityFailed);
+  EXPECT_FALSE(d.fs.has("/Books/libro.epub"));
+  EXPECT_FALSE(d.fs.has("/Books/libro.epub.part")) << "a bad file is not resumed either";
+  EXPECT_STREQ(catalog->lastError().code, "integrity_failed");
+}
+
+TEST_F(DownloadTest, TheContentHeaderAlsoHasToMatch) {
+  Reply reply = full();
+  reply.sha256 = std::string(64, 'b');
+  d.http.script.push_back(reply);
+  EXPECT_EQ(catalog->download(entry, "/Books", nullptr, 60000), DownloadResult::IntegrityFailed);
+  reply.sha256 = hashOf(content);
+  d.http.script.push_back(reply);
+  EXPECT_EQ(catalog->download(entry, "/Books", nullptr, 60000), DownloadResult::Done);
+}
+
+TEST_F(DownloadTest, ManifestAndHeaderDisagreeingIsRejected) {
+  copyText(entry.sha256, sizeof(entry.sha256), hashOf(content).c_str());
+  Reply reply = full();
+  reply.sha256 = std::string(64, 'b');
+  d.http.script.push_back(reply);
+  EXPECT_EQ(catalog->download(entry, "/Books", nullptr, 60000), DownloadResult::IntegrityFailed);
+}
+
+TEST_F(DownloadTest, ABodyLongerThanTheManifestSaysIsCutOff) {
+  Reply reply = full();
+  reply.body += std::string(100000, 'x');
+  d.http.script.push_back(reply);
+  EXPECT_EQ(catalog->download(entry, "/Books", nullptr, 60000), DownloadResult::IntegrityFailed);
+  EXPECT_FALSE(d.fs.has("/Books/libro.epub.part"));
+}
+
+TEST_F(DownloadTest, ABodyShorterThanTheManifestSaysIsNotAccepted) {
+  entry.fileSize += 10;
+  d.http.script.push_back(full());
+  EXPECT_EQ(catalog->download(entry, "/Books", nullptr, 60000), DownloadResult::IntegrityFailed);
+}
+
+TEST_F(DownloadTest, ALongDownloadIsSyncedAsItGoes) {
+  content.assign(3 * 1024 * 1024 + 100, 'z');
+  ASSERT_TRUE(entry.book.setHex(md5Of(content).c_str()));
+  entry.fileSize = static_cast<uint32_t>(content.size());
+  d.http.chunk = 64 * 1024;
+  class Meter : public IDownloadProgress {
+   public:
+    explicit Meter(MemFs& fs) : fs_(fs) {}
+    void onProgress(uint64_t received, uint64_t) override {
+      if (received >= 2500000) durableAt2500000 = fs_.durableSize("/Books/libro.epub.part");
+    }
+    size_t durableAt2500000 = 0;
+
+   private:
+    MemFs& fs_;
+  } meter(d.fs);
+  d.http.script.push_back(full());
+  EXPECT_EQ(catalog->download(entry, "/Books", &meter, 60000), DownloadResult::Done);
+  EXPECT_GE(meter.durableAt2500000, 2u * 1024 * 1024) << "a power cut there loses at most the last MiB";
+}
+
+TEST_F(DownloadTest, CancelDuringTheHashKeepsTheBytesAndResumesTheCheck) {
+  copyText(entry.sha256, sizeof(entry.sha256), hashOf(content).c_str());
+  d.http.script.push_back(full());
+  class CancelOnHash : public SoftSha256 {
+   public:
+    explicit CancelOnHash(FakeCancel& cancel) : cancel_(cancel) {}
+    void begin() override {
+      cancel_.flag = armed;
+      SoftSha256::begin();
+    }
+    bool armed = true;
+
+   private:
+    FakeCancel& cancel_;
+  } hasher(d.cancel);
+  Catalog withHash(*d.store, d.fs, d.http, d.clock, d.cancel, hasher);
+  EXPECT_EQ(withHash.download(entry, "/Books", nullptr, 60000), DownloadResult::Cancelled);
+  EXPECT_TRUE(d.fs.has("/Books/libro.epub.part"));
+  d.cancel.flag = false;
+  hasher.armed = false;
+  EXPECT_EQ(withHash.download(entry, "/Books", nullptr, 60000), DownloadResult::Done);
+  EXPECT_EQ(d.fs.content("/Books/libro.epub"), content);
+}
+
+TEST(SafeFileName, WindowsDeviceNamesGetAPrefix) {
+  char out[64];
+  for (const char* name : {"CON.epub", "con", "Nul.txt.epub", "COM1.epub", "lpt9.epub", "AUX", "PRN.epub"}) {
+    safeFileName(name, "id", out, sizeof(out));
+    EXPECT_EQ(out[0], '_') << name;
+  }
+  safeFileName("console.epub", "id", out, sizeof(out));
+  EXPECT_STREQ(out, "console.epub");
+  safeFileName("COM0.epub", "id", out, sizeof(out));
+  EXPECT_STREQ(out, "COM0.epub");
+  char tight[9];  // Room for "CON" and ".epub" only: the prefix must not overflow.
+  safeFileName("CON", "id", tight, sizeof(tight));
+  EXPECT_STREQ(tight, "_CO.epub");
 }
 
 TEST_F(DownloadTest, ProgressIsReported) {

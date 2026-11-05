@@ -111,6 +111,10 @@ class MemFs : public IFs {
   // As on SdFat: opening for write in a directory that does not exist fails.
   void requireDirs() { strictDirs_ = true; }
   uint64_t lookups() const { return lookups_; }
+  size_t durableSize(const std::string& path) const {
+    auto it = files_.find(path);
+    return it == files_.end() ? 0 : it->second.durable.size();
+  }
   std::vector<std::string> paths() const {
     std::vector<std::string> out;
     for (const auto& kv : files_) out.push_back(kv.first);

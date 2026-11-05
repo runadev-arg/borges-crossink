@@ -1199,7 +1199,7 @@ class Device {
   Catalog& catalogObject() {
     if (!catalog_) {
       heap::Scope scope;
-      catalog_ = std::unique_ptr<Catalog>(new Catalog(store_, fs_, http_, clock_, cancel_));
+      catalog_ = std::unique_ptr<Catalog>(new Catalog(store_, fs_, http_, clock_, cancel_, sha_));
     }
     return *catalog_;
   }
@@ -1357,6 +1357,7 @@ class Device {
   NeverCancel cancel_;
   HostHttp http_;
   SoftSecretBox box_;
+  SoftSha256 sha_;
   Store store_;
   Outbox outbox_;
   EngineConfig config_;

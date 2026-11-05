@@ -49,9 +49,9 @@ Everything that can be decided without hardware lives in `lib/BorgesCore`.
 These are requirements. Each has a regression test named after it.
 
 1. **Spool, never buffer.** Sync responses stream to `/.crosspoint/borges/spool/` and are parsed one
-   array element at a time with a filter. No response size cap exists to wedge on. A single event
-   larger than the parse budget is skipped with its cursor still advancing, and is logged. Never a
-   poison page.
+   array element at a time with a filter. The only cap (4 MiB, far above any server page) protects
+   the card. A single event larger than the parse budget is skipped with its cursor still advancing,
+   and is logged. Never a poison page.
 2. **One TLS connection per session**, keep-alive, reconnect once on a dropped socket.
 3. **Request bodies are bounded** (default 8 KiB per exchange, always at least one event), max 20
    events per batch. A single oversized event is sent alone. Server cap is 256 KiB.

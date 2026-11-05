@@ -269,6 +269,17 @@ TEST_F(DesignRule, Rule06_HonestClock_ServerTimeFixesAWorseClockOnly) {
   EXPECT_EQ(d.clock.setCalls, 1);
 }
 
+TEST_F(DesignRule, Rule01_AResponseCannotFillTheCard) {
+  Reply reply = jsonReply(200, std::string(Spool::kMaxBytes + 1024, ' '));
+  reply.dropAfterBytes = -1;
+  d.http.chunk = 256 * 1024;
+  d.http.script.push_back(reply);
+  d.http.script.push_back(reply);  // The one reconnect.
+  const SessionReport report = d.engine->runManualSession(nullptr, nullptr, nullptr);
+  EXPECT_EQ(report.outcome, SessionOutcome::Transport);
+  EXPECT_LE(d.fs.content(kSpoolPath).size(), Spool::kMaxBytes);
+}
+
 TEST_F(DesignRule, Rule06_HonestClock_AnchorSurvivesDeepSleep) {
   manual();
   const int64_t anchor = d.store->state().anchorEpoch;

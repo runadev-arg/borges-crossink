@@ -49,7 +49,7 @@ enum class DownloadResult : uint8_t {
   Cancelled,
   NeedsRelink,
   ServerError,
-  IntegrityFailed,  // Partial MD5 does not match. Nothing is accepted.
+  IntegrityFailed,  // Size, partial MD5 or SHA-256 does not match. Nothing is accepted.
   LocalError,
 };
 
@@ -63,7 +63,7 @@ class Catalog {
  public:
   static constexpr uint16_t kMaxPageSize = 50;
 
-  Catalog(Store& store, IFs& fs, IHttp& http, IClock& clock, ICancel& cancel);
+  Catalog(Store& store, IFs& fs, IHttp& http, IClock& clock, ICancel& cancel, ISha256& sha);
 
   // Downloads a page, validates it and replaces the cached copy. page is 1-based.
   CatalogResult fetchPage(uint16_t page, uint16_t limit, CatalogPage& out, uint32_t budgetMs = 30000);
@@ -71,8 +71,10 @@ class Catalog {
   bool loadPage(uint16_t page, CatalogPage& out, ICatalogVisitor& visitor);
 
   // dir must exist. Resumes from <dir>/<fileName>.part with Range + If-Range, and only
-  // renames onto the final name after the partial MD5 of the whole file matches both
-  // the header and the manifest. If another book already has that file name, this one
+  // renames onto the final name after the file on the card has the manifest's size, its
+  // partial MD5 matches both the header and the manifest, and its SHA-256 matches both.
+  // The hash reads the file back, so it also covers what the card stored and what a resume
+  // kept. A body longer than the manifest says is cut off. If another book already has that file name, this one
   // lands as <stem>-<hash>.epub, and the overload taking a mutable entry updates fileName
   // to where the book really is, whatever the result.
   DownloadResult download(CatalogEntry& entry, const char* dir, IDownloadProgress* progress, uint32_t budgetMs);
@@ -88,17 +90,20 @@ class Catalog {
   Local locate(const CatalogEntry& entry, const char* dir, char* name, size_t nameCap);
   void cachePath(uint16_t page, char* out) const;
   void note(const ApiResult& result, const char* code);
+  enum class Hash : uint8_t { Match, Mismatch, Unreadable, Stopped };
+  Hash sha256Matches(const char* path, const uint8_t expected[32]);
 
   Store& store_;
   IFs& fs_;
   IClock& clock_;
+  ISha256& sha_;
   Api api_;
   Diagnostics error_;
 };
 
 // Reduces a server-supplied name to one safe on FAT: no separators, no control bytes,
-// no reserved characters, no leading dots, bounded, ending in .epub. Falls back to the
-// book's id if nothing usable remains.
+// no reserved characters or device names (CON, NUL...), no leading dots, bounded, ending
+// in .epub. Falls back to the book's id if nothing usable remains.
 void safeFileName(const char* suggested, const char* fallback, char* out, size_t cap);
 
 // KOReader's partial MD5 of a file: 1 KiB at 0 and at 1024 << 2i for i in 0..10. A read
