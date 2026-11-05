@@ -10,6 +10,7 @@ Scenarios:
   prompt      The focus event is ahead of this reader, on another device.
   backwards   The focus event is behind this reader, with no usable xpointer.
   quiet       Nobody else read this book.
+  own         The focus event is this device's own (--device-id): a card moved to new firmware.
   fail        Every sync request answers 500, with a request id.
 """
 import argparse
@@ -101,14 +102,15 @@ class Handler(BaseHTTPRequestHandler):
             "server_time": "2026-11-05T15:00:00Z",
             "focus_event": None,
         }
-        if ARGS.scenario in ("prompt", "backwards"):
-            ahead = ARGS.scenario == "prompt"
+        if ARGS.scenario in ("prompt", "backwards", "own"):
+            ahead = ARGS.scenario != "backwards"
             body["focus_event"] = {
                 "event_id": f"progress:{ARGS.scenario}:{int(time.time())}",
                 "server_sequence": "9",
                 "event_type": "progress.changed",
                 "book_identifier": {"kind": "koreader_partial_md5", "value": BOOK_MD5},
-                "origin_device": {"id": "other-device", "name": "Kobo Libra de Toto"},
+                "origin_device": {"id": ARGS.device_id, "name": "X4"} if ARGS.scenario == "own"
+                else {"id": "other-device", "name": "Kobo Libra de Toto"},
                 "occurred_at": "2026-11-05T13:00:00Z",
                 "time_precision": "exact",
                 "payload": {
@@ -148,6 +150,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, self.pull_body())
         elif path == "/api/sync/v2/exchange":
             events = json.loads(raw or b"{}").get("events", [])
+            for e in events:
+                print("fake: event", json.dumps(e, ensure_ascii=False), flush=True)
             acks = [{"client_event_id": e.get("client_event_id"), "client_sequence": e.get("client_sequence"),
                      "status": "accepted"} for e in events]
             self.reply(200, {"acknowledgements": acks, "pull": {**self.pull_body(), "focus_event": None}})
@@ -194,6 +198,7 @@ def main():
     parser.add_argument("--scenario", default="quiet")
     parser.add_argument("--approve-after", type=int, default=10 ** 6)
     parser.add_argument("--empty-library", action="store_true")
+    parser.add_argument("--device-id", default="dev1")
     parser.add_argument("--delay", type=float, default=0, help="Seconds a pull takes, to photograph the wait.")
     ARGS = parser.parse_args()
     ARGS.base = f"http://127.0.0.1:{ARGS.port}"
