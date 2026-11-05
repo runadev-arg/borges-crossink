@@ -59,6 +59,15 @@ std::vector<uint8_t> cnameRecord() { return {0xC0, 12, 0, 5, 0, 1, 0, 0, 1, 44, 
 
 // --- DNS codec ---------------------------------------------------------------------
 
+TEST(NetFailure, AVerificationFailureOnALowHeapIsLowMemory) {
+  using namespace borges::net;
+  const auto tls = borges::TransportStage::Tls;
+  EXPECT_EQ(heapAwareCode(tls, wolfcode::kSigConfirm, 40000), kCodeLowMemory);
+  EXPECT_EQ(heapAwareCode(tls, wolfcode::kSigConfirm, kTlsFailureLowHeap), wolfcode::kSigConfirm);
+  EXPECT_EQ(heapAwareCode(tls, wolfcode::kNameMismatch, 40000), wolfcode::kNameMismatch);
+  EXPECT_EQ(heapAwareCode(borges::TransportStage::Connect, wolfcode::kSigConfirm, 40000), wolfcode::kSigConfirm);
+}
+
 TEST(DnsCodec, QueryIsLengthPrefixedAndWellFormed) {
   uint8_t out[kDnsMaxQuery];
   const size_t n = buildDnsQuery("a.bc", 0x1234, out, sizeof(out));

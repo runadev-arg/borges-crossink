@@ -3,6 +3,13 @@
 namespace borges {
 namespace net {
 
+int32_t heapAwareCode(const TransportStage stage, const int32_t code, const uint32_t freeHeap) {
+  if (stage != TransportStage::Tls || freeHeap >= kTlsFailureLowHeap) return code;
+  const bool verification =
+      code == wolfcode::kSigConfirm || code == wolfcode::kNoSigner || code == wolfcode::kVerifyCert;
+  return verification ? kCodeLowMemory : code;
+}
+
 const char* failureCode(const TransportStage stage, const int32_t code, const TimePrecision clock) {
   if (stage == TransportStage::None && code == 0) return nullptr;
   if (stage == TransportStage::Aborted) return "aborted";

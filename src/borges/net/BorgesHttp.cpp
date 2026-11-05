@@ -74,7 +74,11 @@ void BorgesHttp::disconnect() {
 void BorgesHttp::perform(const HttpRequest& request, IHttpSink& sink, ICancel& abort, HttpResponse& out) {
   out = HttpResponse{};
 
-  const auto finish = [&](const TransportStage stage, const int32_t code) {
+  // The handshake's own buffers are gone by the time it reports, so the heap it started on counts.
+  const uint32_t heapAtStart = ESP.getFreeHeap();
+  const auto finish = [&](const TransportStage stage, const int32_t rawCode) {
+    const uint32_t heapNow = ESP.getFreeHeap();
+    const int32_t code = heapAwareCode(stage, rawCode, heapNow < heapAtStart ? heapNow : heapAtStart);
     out.stage = stage;
     out.transportCode = code;
     if (stage == TransportStage::None || stage == TransportStage::Aborted) return;

@@ -39,6 +39,12 @@ constexpr int32_t kCodeLost = -9007;        // The connection died mid-exchange.
 // certificate really is out of date and it means tls_untrusted. Null for no failure.
 const char* failureCode(TransportStage stage, int32_t code, TimePrecision clock);
 
+// Below the handshake's real floor (measured on RISC-V: 41.9 KB) wolfSSL often fails a signature
+// check instead of an allocation, and says -155. So a verification failure on a heap that low is
+// reported as what it is: telling the reader a certificate is untrusted would be false.
+constexpr uint32_t kTlsFailureLowHeap = 45 * 1024;
+int32_t heapAwareCode(TransportStage stage, int32_t code, uint32_t freeHeap);
+
 // True for the failures a better clock could fix.
 bool isClockFailure(TransportStage stage, int32_t code);
 
