@@ -89,6 +89,7 @@ class ActivityManager {
   // reader's menu. It must wait until the reader is current again.
   int16_t pendingReaderMenuAction = -1;
   bool enteringSleep = false;
+  bool sleepActivityQueued = false;
   // Target reader retained underneath nested screens while Home/Reader cancels
   // each child through the ordinary activity-result path.
   Activity* pendingHomeReaderTarget = nullptr;

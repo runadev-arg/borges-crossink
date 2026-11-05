@@ -21,9 +21,9 @@
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "SilentRestart.h"
-#include "borges/BorgesGlue.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
+#include "borges/BorgesGlue.h"
 #include "browser/OpdsBookBrowserActivity.h"
 #include "components/TouchRegistry.h"
 #include "home/AlertActivity.h"
@@ -836,6 +836,14 @@ void ActivityManager::exitActivity(const RenderLock& lock) {
 }
 
 void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
+  // A failed allocation at a call site: staying put beats a loop that waits on nothing.
+  if (!newActivity) {
+    LOG_ERR("ACT", "No activity to replace the current one with (free=%u)", ESP.getFreeHeap());
+    return;
+  }
+  // The last loop() before deep sleep runs the outgoing activity once more. Whatever it asks
+  // for must not take the place of the sleep screen.
+  if (sleepActivityQueued) return;
   // Note: no lock here, this is usually called by loop() and we may run into deadlock
   if (currentActivity) {
     TouchRegistry::getInstance().clear();
@@ -1053,6 +1061,7 @@ void ActivityManager::goToSleep(bool fromTimeout) {
     return;
   }
   replaceActivity(std::move(sleepActivity));
+  sleepActivityQueued = true;
   loop();  // Important: sleep screen must be rendered immediately, the caller will go to sleep right after this returns
 }
 
@@ -1103,6 +1112,7 @@ void ActivityManager::pushActivity(std::unique_ptr<Activity>&& activity) {
 }
 
 void ActivityManager::popActivity() {
+  if (sleepActivityQueued) return;
   if (pendingActivity) {
     // Should never happen in practice
     LOG_ERR("ACT", "pendingActivity while popActivity is not expected");
