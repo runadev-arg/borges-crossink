@@ -22,7 +22,17 @@ sleep, and when the person asks (Borges screen, reader drawer, shortcut). Nothin
 is being read, so connecting to Wi-Fi after a book is open cannot trigger the offer: the next
 session is the next open, wake, sleep or manual sync. The open session is capped at 12 s from the
 press to the book (7 s of that for the link). A longer link budget was not measured on a panel,
-so it stays.
+so it stays. The one exception is the first open with no clock anchor or no link hint, which is to
+say the first after flashing: 20 s from the boot (14 s for the link), since a scan, a join, finding
+the time, DNS and TLS are all still ahead of it and missing the offer there costs the most. With
+nothing to send, an open ends after the check: history waits for a session nobody is waiting on.
+
+**When the check could not happen.** No network, a server that did not answer, a low battery, the
+crash guard: the book opens anyway, which looks exactly like nobody having read it. So the page says
+once `No pude buscar tu posición. Menú > Sincronizar ahora`, until it turns. Not when a person
+pressed a button to skip it, not with the search off, and not at every wake away from any network:
+after saying it, the next 8 misses on that book go by quietly. No clock is involved in that, since a
+wake from deep sleep often has none. A check that gets an answer starts it over.
 
 ## 2. Why a network session is bracketed by reboots
 
@@ -114,7 +124,16 @@ unresolved, that book's `progress.changed` is held back from upload.
   percentage), navigate, enqueue own progress with `explicit_jump:true`.
 - **Seguir en el 10%** (**Seguir acá** with no percent): stay, stamp local reading activity now, enqueue own progress: this device becomes
   the head.
-- Both remember the choice, release the hold and drain. Pending `suggestion_id` is resolved.
+- Both remember the choice, release the hold and drain. Pending `suggestion_id` is resolved, in that
+  same session or, when the radio was off for it, in the next one that opens that book.
+- **`Buscar posición al abrir` off** means this reader says where it is without asking. A hold waits
+  for an answer, and with the search off nothing would ever give one: the position would stay
+  unsent for good behind a newer head. So there are no holds with it off, and switching it off
+  releases the ones there are. A newer head elsewhere gets overwritten by what is read here, which
+  is what someone who turned the question off asked for. Manual sync from the drawer still offers.
+- A hold with no position queued behind it is given back at the next session that looks at holds, so
+  books opened once do not fill the 32 places. Held events are counted on the Borges screen with
+  their reason: `Esperan que abras su libro: N`.
 - Warnings: backwards (Δ < -0.5%), close (|Δ| ≤ 2%), approximate (no xpointer usable).
 - Dates shown only for `exact`/`anchored` events. The remote page number is never shown: convert
   through percentage.
@@ -123,7 +142,8 @@ unresolved, that book's `progress.changed` is held back from upload.
 
 The prompt opens with the focus on the stay action when going there would move backwards, so the
 easy press keeps what was read. Back says `Después`: it answers nothing and asks again next time.
-`Sin abrir` stands for a book this reader has no place in, `En otro lector` for a device with no name.
+`Sin dato` stands for a place this reader cannot state, because it never opened the book or because
+its metadata could not be built, and `En otro lector` for a device with no name.
 After a jump the screen says where the way back is: `Volver a donde estaba` in the book menu.
 
 Copy (es): `¿Dónde querés seguir leyendo?` · `En este lector: …` · `En <lector>: …` · `Ir al 62%` /
@@ -158,12 +178,20 @@ posiciones es chica.` · `La ubicación es aproximada: puede caer unos renglones
 - Library: `GET /api/library/plugin/books?page=&limit=`; `GET …/:id/download` with Range, `ETag`,
   `X-Content-SHA256`, `X-KOReader-Partial-MD5`. Verify partial MD5 before accepting a file.
 - Health: `POST /api/devices/self/health` with `outcome`, `queue_depth`, `error_code`.
-- Rotate after `renew_after` when known. Pairing credentials may have no expiry.
+- Rotate after `renew_after` when known, and keep the one a rotation answers with. Pairing credentials
+  may have no expiry; with no `renew_after`, the last 14 days before `expires_at` are the rule. A
+  claim or a rotation is never repeated on a dropped socket: the server does each once and cannot
+  answer again. `credential_already_rotated` means the new token was lost on its way here: this one
+  still works for its grace, nothing recovers it after that, and so the screen asks to pair again now.
+- An imported or XOR-era credential sat readable on the card, so it is rotated at the first session
+  that can vouch for its clock. Going back to the old firmware after that needs pairing again.
 - 401/`device_revoked`: stop automatic sessions, keep the queue, and show "Volvé a vincular este lector".
 - Disconnect: no route lets a device revoke itself, so online it rotates with
-  `expires_in_seconds:60` and `grace_seconds:0` and discards the result. Offline, the screen says the
-  server still has the credential. Another account on re-pair resets queue, cursor and ledgers; the
-  same account keeps them (by `account.id`, or by `account.username` when no id is sent).
+  `expires_in_seconds:60` and `grace_seconds:0` and discards the result. It sends what is queued first,
+  while it still can. Offline, the screen says the server still has the credential. Another account
+  on re-pair resets queue, cursor and ledgers, which the confirmation says; the same account keeps
+  them (by `account.id`, or by `account.username` when no id is sent), and so does a credential with
+  no account to compare, since nothing proves it changed.
 
 ## 7. Highlights
 
@@ -175,6 +203,18 @@ stored. The xpointer is resolved with `ChapterXPathResolver` while the book is s
 Inbound annotations from other devices advance the cursor and are not stored: nothing on the device
 shows them, and keeping them would cost up to 32 MB at 500 books for a list nobody can open.
 
+The clippings on the card do not belong to an account, and the ledger does. So the first time an
+account opens a book after taking over the card, everything on disk is recorded as seen and nothing
+is sent: not the previous person's highlights to this account, and not a highlight deleted on the
+web back to its owner as a conflict. Only what is made from then on goes up. A record seeded that way
+has nothing on the server to delete, so deleting it locally says nothing. The cost, accepted: someone
+who returns to the account they had and deletes an old highlight here deletes it here only. The first
+account a card ever has takes over nobody, and publishes what was there.
+
+The same goes for the place: back on an account with the same device id, a head from this device
+with no reading since the account returned is offered like anyone else's, because the page on the
+card is whoever had it last.
+
 ## 8. Testing
 
 1. Host unit tests of `lib/BorgesCore` (GoogleTest, CMake) with an in-memory FS that injects crashes at
@@ -185,7 +225,22 @@ shows them, and keeping them would cost up to 32 MB at 500 books for a list nobo
 4. TLS probe: wolfSSL built with the device's exact configuration and anchors, against production.
 5. Firmware build with the size gate. Not covered without hardware: real radio, real heap, panel.
 
-## 9. Scope limits
+## 9. Accepted risks
+
+**OTA has no firmware signature.** An update is checked against the SHA-256 and the size in the
+release manifest, its chip and board tag, and it comes from GitHub's API over verified TLS. That
+makes the trust root whoever can publish a release on `runadev-arg/borges-crossink`. Anyone holding
+that repository can ship firmware to every reader. A signature would move the trust to an offline key
+and is not implemented.
+
+**The file transfer server has no authentication.** It is a mode a person starts, on their own
+network. `/.crosspoint/borges` and `/.borges` are refused there, over WebDAV and over USB, even with
+Show Hidden Files on (`logic/PrivatePaths`); the rest of the card is as open as it always was. A rename
+of the parent folder `/.crosspoint` is still possible with hidden files shown, and it would put those
+files at another path until the next boot. What is there is sealed with a key on the chip, except
+for an old credential in `/.borges`, which is refused directly and retired by rotation.
+
+## 10. Scope limits
 
 Boots only as the X3/X4 `default` image. Other boards still compile because `src/borges` builds on
 SDK abstractions, but they are not validated. Rendering highlights inside the page is out of scope.

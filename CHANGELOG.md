@@ -13,8 +13,32 @@
 ### Changed
 
 - Updates now come from the CrossInk Borges releases.
+- Interface languages: English, Spanish, Portuguese (Brazil), French, German and Italian. The others made room for future updates; a reader set to one of them falls back to English.
+- With "Check position on open" off, this reader publishes where it is without asking.
+- A credential brought over from the previous firmware is replaced at the first sync. Going back to that firmware then needs pairing again.
 
 ### Fixed
+
+- A shared reader no longer sends one account's highlights and notes to another, and offers your place when you come back to your account.
+- Disconnecting sends what is pending first, and says what happens to the rest. Pairing again from an imported credential keeps the queue.
+- When a book opens without being able to look for your place, the page says so once.
+- A failed connection offers "Choose network" from sync, pairing and the library.
+- The first open after flashing has the time it needs to find your place.
+- A button pressed during a slow connection no longer costs the next two checks.
+- "Sync now" from Home syncs, instead of opening the Borges screen.
+- A session is no longer invented from a stale reading record, and reading time survives a low-memory restart.
+- Saying which books are waiting on you: the Borges screen counts them, and they no longer use up places.
+- Exiting a book no longer walks a whole long chapter for each highlight.
+- OTA: a download can be cancelled and cannot grow past its release's size.
+
+### Security
+
+- Crash reports no longer hold stack memory, where a token could be.
+- The transfer servers never serve Borges's own folders, even with hidden files shown.
+- An expired certificate can no longer pull the clock forward.
+- A token in a response caught by a power cut is scrubbed at the next boot.
+
+### Fixed (earlier in this version)
 
 - Home: Settings can be reached with the buttons again.
 - A book opened without a connection no longer overwrites your place on other devices when you next sleep.

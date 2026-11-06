@@ -7,6 +7,12 @@ title: Pasar el X4 a CrossInk Borges
 Para un Xteink X4 con Borges 1.6.0-borges.1. Lo probado en esta PC está marcado
 **[PC]**. Ningún paso se probó todavía en un lector real.
 
+## Si después querés volver al firmware viejo
+
+El vínculo que trae el firmware viejo está en la tarjeta en una forma que cualquiera puede leer. Por
+eso, en la primera sincronización, este firmware lo cambia por uno nuevo y el viejo deja de servir.
+Volver al firmware viejo funciona, pero hay que vincular el lector otra vez.
+
 ## Qué pasa con tus datos
 
 El firmware viejo guarda todo en `/.borges`. El nuevo guarda en `/.crosspoint` y del
