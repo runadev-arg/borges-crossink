@@ -64,6 +64,8 @@ class HttpDownloader {
     // writing anything if the SD card cannot hold the file. The first check
     // can scan the whole FAT, so leave it off for small files.
     bool checkFreeSpace = false;
+    // More bytes than this end the transfer in error, whatever the server says it is sending. 0: no cap.
+    size_t maxBytes = 0;
   };
 
   /**

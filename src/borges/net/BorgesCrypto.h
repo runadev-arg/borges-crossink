@@ -47,16 +47,18 @@ class DeviceSha256 : public ISha256 {
 };
 
 // AES-256-GCM with a random per-device key that lives in NVS, on the chip, and so is not on
-// the card a token could be read from. The key is created the first time it is needed and
-// read for each operation: nothing holds it between them.
+// the card a token could be read from. The key is created when the store first opens, with the
+// radio off, and read for each operation: nothing holds it between them.
 class NvsSecretBox : public ISecretBox {
  public:
   explicit NvsSecretBox(IRandom& random) : random_(random) {}
+  void prepare() override;
   bool seal(const uint8_t* plain, size_t len, uint8_t* out) override;
   bool open(const uint8_t* sealed, size_t len, uint8_t* out) override;
 
  private:
   IRandom& random_;
+  bool prepared_ = false;
 };
 
 #endif

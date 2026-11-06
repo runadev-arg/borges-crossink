@@ -180,6 +180,10 @@ void OtaUpdateActivity::render(RenderLock&&) {
     renderer.drawCenteredText(
         UI_10_FONT_ID, y,
         (std::to_string(updater.getProcessedSize()) + " / " + std::to_string(updater.getTotalSize())).c_str());
+    if (stillDownloading()) {
+      const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), "", "", "");
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    }
   } else if (state == NO_UPDATE) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_NO_UPDATE), true, EpdFontFamily::BOLD);
     const auto labels = mappedInput.mapLabels(mappedInput.withBackArrow(tr(STR_BACK)), "", "", "");
@@ -214,15 +218,33 @@ void OtaUpdateActivity::runUpdateInstall() {
     requestUpdate(true);
     return;
   }
+  cancelRequested.store(false, std::memory_order_relaxed);
   const auto res = updater.installUpdate(
       [](void* ctx) {
+        auto* self = static_cast<OtaUpdateActivity*>(ctx);
+        // This blocks the loop that normally reads the buttons, and Back is all that can stop a
+        // download. The flash itself, once started, runs to its end.
+        if (self->stillDownloading()) {
+          self->mappedInput.update();
+          if (self->mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+            self->cancelRequested.store(true, std::memory_order_relaxed);
+          }
+        }
         // immediate=true notifies the render task directly. The default deferred path only
         // sets a flag consumed at the end of ActivityManager::loop(), which never runs while
         // installUpdate() blocks this task.
-        static_cast<OtaUpdateActivity*>(ctx)->requestUpdate(true);
+        self->requestUpdate(true);
       },
-      this);
+      this, &cancelRequested);
 
+  if (res == OtaUpdater::CANCELLED_ERROR) {
+    {
+      RenderLock lock(*this);
+      state = WAITING_CONFIRMATION;
+    }
+    requestUpdate(true);
+    return;
+  }
   if (res != OtaUpdater::OK) {
     LOG_DBG("OTA", "Update failed: %d", res);
     {

@@ -33,18 +33,24 @@ constexpr size_t kNonceBytes = 12;
 constexpr size_t kTagBytes = 16;
 static_assert(ISecretBox::kOverhead == kNonceBytes + kTagBytes);
 
-// The existing key, or a new one. esp_fill_random is only pseudo-random with the radio
-// off unless the bootloader's entropy source is on, and this runs with the radio off.
+// esp_fill_random is only pseudo-random with the radio off unless the bootloader's entropy source
+// is on, and that source takes the ADC the radio also needs: it must not run with the radio up. So
+// prepare() makes the key when the store opens, before any radio, and that is the normal path.
+//
+// loadKey() can still find none: prepare() failed on NVS, say, and it worked since. Then this is a
+// seal during pairing, with the radio up, and the radio is what makes esp_fill_random truly random.
+bool generateKey(Preferences& prefs, uint8_t key[kKeyBytes], const bool radioOff) {
+  if (radioOff) bootloader_random_enable();
+  esp_fill_random(key, kKeyBytes);
+  if (radioOff) bootloader_random_disable();
+  return prefs.putBytes(kKeyName, key, kKeyBytes) == kKeyBytes;
+}
+
 bool loadKey(uint8_t key[kKeyBytes]) {
   Preferences prefs;
   if (!prefs.begin(kNamespace, false)) return false;
   bool ok = prefs.getBytesLength(kKeyName) == kKeyBytes && prefs.getBytes(kKeyName, key, kKeyBytes) == kKeyBytes;
-  if (!ok) {
-    bootloader_random_enable();
-    esp_fill_random(key, kKeyBytes);
-    bootloader_random_disable();
-    ok = prefs.putBytes(kKeyName, key, kKeyBytes) == kKeyBytes;
-  }
+  if (!ok) ok = generateKey(prefs, key, false);
   prefs.end();
   return ok;
 }
@@ -73,6 +79,16 @@ class GcmKey {
 };
 
 }  // namespace
+
+void NvsSecretBox::prepare() {
+  if (prepared_) return;
+  Preferences prefs;
+  if (!prefs.begin(kNamespace, false)) return;
+  uint8_t key[kKeyBytes];
+  if (prefs.getBytesLength(kKeyName) == kKeyBytes || generateKey(prefs, key, true)) prepared_ = true;
+  memset(key, 0, sizeof(key));
+  prefs.end();
+}
 
 bool NvsSecretBox::seal(const uint8_t* plain, const size_t len, uint8_t* out) {
   GcmKey key;

@@ -17,6 +17,7 @@
 
 #include "CrossPointSettings.h"
 #include "activities/boot_sleep/ImageFolderIndex.h"
+#include "borges/logic/PrivatePaths.h"
 #include "util/BookCacheUtils.h"
 
 #if defined(FREEINK_DEVICE_X4PRO) && FREEINK_DEVICE_X4PRO && !ARDUINO_USB_MODE && !defined(SIMULATOR)
@@ -193,6 +194,7 @@ bool isProtectedPathSegment(const char* name) {
 
 bool isProtectedPath(const char* path) {
   if (!path) return true;
+  if (borges::glue::isBorgesPrivatePath(path)) return true;
 
   int start = 0;
   const int length = strlen(path);

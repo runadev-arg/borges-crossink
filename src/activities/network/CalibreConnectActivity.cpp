@@ -7,10 +7,12 @@
 #include <WiFi.h>
 #include <esp_task_wdt.h>
 
+#include "CrossPointState.h"
 #include "MappedInputManager.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "WifiSelectionActivity.h"
+#include "borges/BorgesGlue.h"
 #include "components/CompactHeader.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -63,6 +65,7 @@ void CalibreConnectActivity::onExit() {
     WiFi.disconnect(false);
     delay(30);
     if (returnToReader) {
+      borges::glue::noteOpenedWithoutSession(APP_STATE.openEpubPath);
       silentRestartToReader();
     } else {
       silentRestart();

@@ -447,6 +447,8 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback onProgres
 
   HttpDownloader::DownloadOptions downloadOptions;
   downloadOptions.shouldCancel = isCancellationRequested;
+  // The size came with the release: anything longer is not that release, and fills the card if let.
+  downloadOptions.maxBytes = otaSize > 0 ? otaSize : updatePartition->size;
   // wolfSSL currently has no CA bundle, so only use it when the trusted release
   // manifest supplied a digest that pins the firmware bytes. Older HTTPS
   // releases without a digest retain the verified esp_http_client path.

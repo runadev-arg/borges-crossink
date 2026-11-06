@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "I18nKeys.h"
 #include "activities/Activity.h"
 #include "activities/ScreenTransitionRefresh.h"
@@ -25,7 +27,10 @@ class OtaUpdateActivity : public Activity {
   unsigned int lastUpdaterPercentage = UNINITIALIZED_PERCENTAGE;
   StrId failureMessage = StrId::STR_UPDATE_FAILED;
   OtaUpdater updater;
+  std::atomic<bool> cancelRequested{false};
 
+  // The first half of the work: nothing on the flash has been touched yet.
+  bool stillDownloading() const { return updater.getProcessedSize() * 2 < updater.getTotalSize(); }
   void onWifiSelectionComplete(bool success);
   void runUpdateInstall();
 

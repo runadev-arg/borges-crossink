@@ -14,6 +14,7 @@
 
 #include "CrossPointSettings.h"
 #include "activities/boot_sleep/ImageFolderIndex.h"
+#include "borges/logic/PrivatePaths.h"
 #include "util/BookCacheUtils.h"
 
 namespace {
@@ -255,11 +256,10 @@ void WebDAVHandler::handlePropfind(WebServer& s) {
     while (file) {
       file.getName(name, sizeof(name));
 
-      if (!isProtectedPathSegment(name)) {
-        String childPath = path;
-        if (!childPath.endsWith("/")) childPath += "/";
-        childPath += name;
-
+      String childPath = path;
+      if (!childPath.endsWith("/")) childPath += "/";
+      childPath += name;
+      if (!isProtectedPathSegment(name) && !borges::glue::isBorgesPrivatePath(childPath.c_str())) {
         if (file.isDirectory()) {
           sendPropEntry(s, childPath, true, 0, FIXED_DATE);
         } else {
@@ -811,6 +811,7 @@ void WebDAVHandler::urlEncodePath(const String& path, String& out) const {
 }
 
 bool WebDAVHandler::isProtectedPath(const String& path) const {
+  if (borges::glue::isBorgesPrivatePath(path.c_str())) return true;
   // Check every segment of the path, not just the last one.
   // This prevents access to e.g. /.hidden/somefile or /System Volume Information/foo
   int start = 0;

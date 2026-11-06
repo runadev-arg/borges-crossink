@@ -2,6 +2,8 @@
 
 #include <ArduinoJson.h>
 #include <BoardConfig.h>
+
+#include "borges/logic/PrivatePaths.h"
 #ifdef SIMULATOR
 #include <ArduinoJsonStringCompat.h>
 #endif
@@ -287,6 +289,7 @@ String normalizeWebPath(const String& inputPath) {
 }
 
 bool isProtectedPath(const String& path) {
+  if (borges::glue::isBorgesPrivatePath(path.c_str())) return true;
   // Hidden/system items stay out of the default file-manager view. Enabling
   // Show Hidden Files intentionally makes them fully manageable.
   if (SETTINGS.showHiddenFiles) return false;

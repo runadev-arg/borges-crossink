@@ -566,6 +566,7 @@ void NearbyBookTransferActivity::exitAfterRadio() {
   stopRadio();
   if (radioUsed_) {
     if (returnToReader_) {
+      borges::glue::noteOpenedWithoutSession(APP_STATE.openEpubPath);
       silentRestartToReader();
     } else {
       silentRestart();

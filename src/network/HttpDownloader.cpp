@@ -572,7 +572,17 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
     return fileOpen;
   };
 
-  sink.write = [&](const uint8_t* data, size_t len) { return openOutputFile() && file.write(data, len) == len; };
+  size_t writtenBytes = resumeOffset;
+  const size_t maxBytes = options.maxBytes;
+  const auto writeCapped = [&](const uint8_t* data, size_t len) {
+    if (maxBytes != 0 && writtenBytes + len > maxBytes) {
+      LOG_ERR("HTTP", "Response is longer than the %zu bytes expected", maxBytes);
+      return false;
+    }
+    writtenBytes += len;
+    return openOutputFile() && file.write(data, len) == len;
+  };
+  sink.write = writeCapped;
 
   DownloadError result =
       runGet(url, username, password, options.authorizationOrigin, sink, bufferSize, options.transport);
@@ -586,7 +596,8 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
     sink.resumeOffset = 0;
     sink.downloaded = 0;
     sink.total = 0;
-    sink.write = [&](const uint8_t* data, size_t len) { return openOutputFile() && file.write(data, len) == len; };
+    writtenBytes = 0;
+    sink.write = writeCapped;
     result = runGet(url, username, password, options.authorizationOrigin, sink, bufferSize, options.transport);
   }
 

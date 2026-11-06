@@ -349,6 +349,9 @@ std::string getPanicInfo(bool full) {
       }
     }
 #endif
+#if defined(CROSSINK_CRASH_REPORT_STACK)
+    // Off in every build that ships. These words go to a file on a removable card, and the stack of a
+    // task in a TLS session holds the bearer token. The backtrace and registers stay.
     if (panicStack[0].sp != 0) {
       info += "\n\nStack memory:\n";
       for (size_t i = 0; i < MAX_PANIC_STACK_DEPTH; i++) {
@@ -362,6 +365,7 @@ std::string getPanicInfo(bool full) {
         info += "\n";
       }
     }
+#endif
 
 #if CONFIG_IDF_TARGET_ARCH_RISCV
     const size_t backtraceDepth = panicBacktraceDepth <= MAX_PANIC_BACKTRACE_DEPTH ? panicBacktraceDepth : 0;
