@@ -12,6 +12,7 @@
 
 #include "BorgesGlue.h"
 #include "BorgesStack.h"
+#include "Inbound.h"
 #include "ReaderTracker.h"
 #include "SessionWorker.h"
 #include "activities/Activity.h"
@@ -189,6 +190,37 @@ class BorgesActivity final : public Activity {
   unsigned long autoLeaveAt_ = 0;  // 0: stays until a button is pressed.
   unsigned long hardDeadlineAt_ = 0;
   char requestId_[40] = {0};
+};
+
+// What this reader highlighted itself. Needs the book's clippings loaded.
+std::unique_ptr<IOwnPassages> makeOwnPassages();
+
+// Reader drawer -> Highlights from other readers. Read-only: nothing here goes to the server. Holds
+// 16 B per highlight and one record while open, and nothing after.
+class BorgesInboundActivity final : public Activity {
+ public:
+  BorgesInboundActivity(GfxRenderer& renderer, MappedInputManager& input, std::string bookPath);
+  ~BorgesInboundActivity() override;
+  void onEnter() override;
+  void onExit() override;
+  void loop() override;
+  void render(RenderLock&&) override;
+
+ private:
+  void go();
+  int rowsPerPage() const;
+  void drawRow(int y, int width, int height, int lines, bool focused);
+
+  std::string bookPath_;
+  net::BorgesFsHal fs_;
+  std::unique_ptr<InboundList> list_;
+  std::unique_ptr<InboundHighlight> row_;
+  WallTime now_;
+  ButtonNavigator navigator_;
+  int focus_ = 0;
+  int shownPage_ = -1;  // Another page on the glass is a slower, cleaner refresh than moving the focus.
+  bool unreadable_ = false;
+  bool readFailed_ = false;
 };
 
 class BorgesLibraryActivity final : public Activity {

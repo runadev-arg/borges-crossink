@@ -38,6 +38,7 @@ enum class EpubReaderMenuAction : uint8_t {
   BORGES_SYNC,
   BORGES_UNDO,
   BORGES_OTHER_DEVICE,
+  BORGES_INBOUND,
 };
 
 enum class ReaderDrawerTab : uint8_t { Font = 0, Layout = 1, More = 2, Location = 3, Settings = 4, Count };
@@ -156,6 +157,7 @@ enum class ReaderDrawerCatalogItem : uint8_t {
   BorgesSync,
   BorgesUndo,
   BorgesOtherDevice,
+  BorgesInbound,
 };
 
 struct ReaderDrawerAvailability {
@@ -170,6 +172,7 @@ struct ReaderDrawerAvailability {
   bool bookStatsEnabled = true;
   bool borgesPaired = false;
   bool borgesHasUndo = false;
+  bool borgesHasInbound = false;
 };
 
 struct ReaderDrawerTabCatalog {
@@ -223,6 +226,7 @@ constexpr ReaderDrawerCatalog makeReaderDrawerCatalog(const ReaderDrawerAvailabi
   }
   location.add(ReaderDrawerCatalogItem::SaveClipping);
   if (available.hasClippings) location.add(ReaderDrawerCatalogItem::ViewClippings);
+  if (available.borgesHasInbound) location.add(ReaderDrawerCatalogItem::BorgesInbound);
   if (available.borgesPaired) location.add(ReaderDrawerCatalogItem::BorgesSync);
   if (available.borgesPaired) location.add(ReaderDrawerCatalogItem::BorgesOtherDevice);
   if (available.borgesHasUndo) location.add(ReaderDrawerCatalogItem::BorgesUndo);

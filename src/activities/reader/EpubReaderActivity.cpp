@@ -61,13 +61,13 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "Types.h"
-#include "borges/BorgesGlue.h"
 #include "WordRef.h"
 #include "activities/home/RecentBookProgress.h"
 #include "activities/reader/ControlsOptionsActivity.h"
 #include "activities/settings/StatusBarSettingsActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "activities/util/IntervalSelectionActivity.h"
+#include "borges/BorgesGlue.h"
 #include "clippings/ClippingHighlightGeometry.h"
 #include "clippings/ClippingMatchTracker.h"
 #include "clippings/ClippingTextMatcher.h"
@@ -4249,6 +4249,23 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuAction action, const 
           borges::glue::makeHandoff(renderer, mappedInput, borges::glue::NetPayload::OtherDevice));
       break;
     }
+    case EpubReaderMenuAction::BORGES_INBOUND: {
+      pauseReadingPaceTimer("borges_inbound");
+      startActivityForResult(borges::glue::makeInboundActivity(renderer, mappedInput, epub->getPath()),
+                             [this, returnToReaderMenu](const ActivityResult& result) {
+                               resumeReadingPaceTimer("borges_inbound");
+                               if (const auto* highlight = std::get_if<BorgesHighlightJumpResult>(&result.data)) {
+                                 jumpToBorgesHighlight(*highlight);
+                                 return;
+                               }
+                               if (returnToReaderMenu) {
+                                 openReaderMenu();
+                                 return;
+                               }
+                               requestUpdate();
+                             });
+      break;
+    }
     case EpubReaderMenuAction::NEARBY_POSITION_SYNC: {
       const int currentPage = section ? section->currentPage : nextPageNumber;
       const int totalPages = section ? section->estimatedTotalPages() : std::max(1, cachedChapterTotalPageCount);
@@ -4347,8 +4364,9 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuAction action, const 
         const auto addResult =
             BOOKMARKS.addBookmark(spine, progress, bookmarkPageCount, chapterTitle, paragraphIndex, snippet);
         if (addResult == BookmarkStore::AddResult::Added) {
-          borges::glue::stampBookmark(epub->getCachePath(), spine, progress,
-                                      section->getVisibleTextOffsetForPage(static_cast<uint16_t>(section->currentPage)));
+          borges::glue::stampBookmark(
+              epub->getCachePath(), spine, progress,
+              section->getVisibleTextOffsetForPage(static_cast<uint16_t>(section->currentPage)));
         }
         bookmarkFeedbackType = (addResult == BookmarkStore::AddResult::Added) ? BookmarkFeedbackType::Added
                                                                               : BookmarkFeedbackType::LimitReached;
@@ -7433,6 +7451,9 @@ bool EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int fo
       case BookmarkFeedbackType::LimitReached:
         msg = tr(STR_BOOKMARK_LIMIT_REACHED);
         break;
+      case BookmarkFeedbackType::BorgesHighlightFailed:
+        msg = tr(STR_BORGES_INBOUND_FAILED);
+        break;
     }
     drawToastBuffer(renderer, msg);
   }
@@ -8446,5 +8467,39 @@ void EpubReaderActivity::undoBorgesJump() {
   borges::glue::publishRestoredPosition(epub, *target);
   // The page is rebuilt from nothing after this: say it worked while that takes its time.
   drawToast(renderer, tr(STR_BORGES_UNDONE));
+  activityManager.goToReader(epub->getPath(), false, false, true);
+}
+
+void EpubReaderActivity::jumpToBorgesHighlight(const BorgesHighlightJumpResult& highlight) {
+  if (!epub) return;
+  // Same shape as the exit's own snapshot: where the reader is now is the way back.
+  const bool settled = section && !activeFootnotePreview && section->pageCount > 0;
+  CrossPointPosition here = {currentSpineIndex, settled ? section->currentPage : 0,
+                             settled ? section->estimatedTotalPages() : std::max<int>(1, cachedChapterTotalPageCount)};
+  if (settled) {
+    if (const auto offset = section->getVisibleTextOffsetForPage(static_cast<uint16_t>(section->currentPage))) {
+      here.visibleTextOffset = *offset;
+      here.hasVisibleTextOffset = true;
+    }
+  }
+  borges::glue::HighlightJumpOutcome outcome;
+  {
+    RenderLock lock(*this);
+    outcome = borges::glue::jumpToHighlight(renderer, borgesTracker, epub, here,
+                                            settled ? getCurrentBookProgressPercent() : -1.0f, highlight.xpointer,
+                                            highlight.hasPct, highlight.pctMicro);
+  }
+  if (outcome == borges::glue::HighlightJumpOutcome::Failed) {
+    // Nothing moved, and a press is all it cost: the same page, and the reason on it for a moment,
+    // the way a bookmark says it could not be added.
+    pendingBookmarkFeedback = true;
+    bookmarkFeedbackType = BookmarkFeedbackType::BorgesHighlightFailed;
+    bookmarkFeedbackShowTime = millis();
+    requestUpdate();
+    return;
+  }
+  // The reader's exit must not write the page being left over the one just saved, nor publish it.
+  skipBorgesExitSave = true;
+  borgesTracker.positionSettled = true;
   activityManager.goToReader(epub->getPath(), false, false, true);
 }

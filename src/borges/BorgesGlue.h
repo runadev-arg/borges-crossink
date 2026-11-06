@@ -111,6 +111,20 @@ bool hasUndo(const std::string& bookPath);
 bool peekUndo(const std::string& bookPath, Position& out);
 void consumeUndo(const std::string& bookPath);
 
+// Highlights of other readers. The answer is kept until the book or its clippings change: it may
+// have to read every clipping on the first ask, and a menu opens often. Eight bytes of RAM.
+bool hasInboundHighlights(const std::string& bookPath);
+std::unique_ptr<Activity> makeInboundActivity(GfxRenderer& renderer, MappedInputManager& input,
+                                              const std::string& bookPath);
+
+enum class HighlightJumpOutcome : uint8_t { Exact, Approximate, Failed };
+// Saves the place in the book and the way back, and says where this reader now is. The frame on the
+// panel is lent for the mapping and comes back white: a toast can go on it either way. The caller
+// holds the render lock. On success, the caller reopens the book, as after "Volver a donde estaba".
+HighlightJumpOutcome jumpToHighlight(GfxRenderer& renderer, ReaderTracker& tracker, const std::shared_ptr<Epub>& epub,
+                                     const CrossPointPosition& here, float herePercent, const std::string& xpointer,
+                                     bool hasPct, uint32_t pctMicro);
+
 // The screen that turns a manual request into a network boot, after the current activity
 // has run its onExit(). Replace the current activity with it.
 std::unique_ptr<Activity> makeHandoff(GfxRenderer& renderer, MappedInputManager& input, NetPayload payload);

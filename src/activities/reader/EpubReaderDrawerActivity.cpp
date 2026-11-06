@@ -1,8 +1,5 @@
 #include "EpubReaderDrawerActivity.h"
 
-#include "CrossPointState.h"
-#include "borges/BorgesGlue.h"
-
 #include <Epub/Page.h>
 #include <FontCacheManager.h>
 #include <FreeInkUIIcon.h>
@@ -32,6 +29,7 @@
 #include "StablePageSelectionModel.h"
 #include "activities/reader/ControlsOptionsActivity.h"
 #include "activities/settings/StatusBarSettingsActivity.h"
+#include "borges/BorgesGlue.h"
 #if CROSSINK_SCALABLE_FONTS
 #include "activities/settings/TtfRenderOptionsActivity.h"
 #endif
@@ -452,7 +450,7 @@ void EpubReaderDrawerActivity::onEnter() {
   const ReaderDrawerCatalog catalog = makeReaderDrawerCatalog(
       {hasFootnotes, hasDictionary, hasBookmarks, hasClippings, showReadingPaceReset, stablePageCount > 0,
        !mappedInput.hasTouchHardware(), globalStatsEnabled, bookStatsEnabled, borges::glue::isPaired(),
-       borges::glue::hasUndo(APP_STATE.openEpubPath)});
+       borges::glue::hasUndo(APP_STATE.openEpubPath), borges::glue::hasInboundHighlights(APP_STATE.openEpubPath)});
   for (size_t tab = 0; tab < rootRows.size(); ++tab) {
     rootRows[tab].reserve(catalog[tab].count);
     rootRows[tab].assign(catalog[tab].items.begin(), catalog[tab].items.begin() + catalog[tab].count);
@@ -1812,6 +1810,9 @@ void EpubReaderDrawerActivity::activateRow(const RowId row) {
     case RowId::BorgesOtherDevice:
       action = EpubReaderMenuAction::BORGES_OTHER_DEVICE;
       break;
+    case RowId::BorgesInbound:
+      action = EpubReaderMenuAction::BORGES_INBOUND;
+      break;
     case RowId::NearbyPositionSync:
       action = EpubReaderMenuAction::NEARBY_POSITION_SYNC;
       break;
@@ -3066,6 +3067,8 @@ const char* EpubReaderDrawerActivity::rowLabel(const RowId row) const {
       return tr(STR_BORGES_UNDO);
     case RowId::BorgesOtherDevice:
       return tr(STR_BORGES_OTHER_DEVICE);
+    case RowId::BorgesInbound:
+      return tr(STR_BORGES_INBOUND);
     case RowId::NearbyPositionSync:
       return tr(STR_NEARBY_POSITION_SYNC);
     case RowId::SendNearbyBook:
@@ -3208,6 +3211,7 @@ bool EpubReaderDrawerActivity::rowShowsNavigationCaret(const RowId row) const {
     case RowId::BorgesSync:
     case RowId::BorgesUndo:
     case RowId::BorgesOtherDevice:
+    case RowId::BorgesInbound:
     case RowId::NearbyPositionSync:
     case RowId::SendNearbyBook:
       return false;

@@ -118,6 +118,7 @@ class EpubReaderActivity final : public Activity {
   int32_t borgesReferencePage() const;
   int32_t borgesTotalPages() const;
   void undoBorgesJump();
+  void jumpToBorgesHighlight(const BorgesHighlightJumpResult& highlight);
   ActiveBookReaderSettingsData initialBookReaderSettings;
   std::unique_ptr<Section> section = nullptr;
   int currentSpineIndex = 0;
@@ -231,6 +232,7 @@ class EpubReaderActivity final : public Activity {
   bool touchDictionaryLookupHandled = false;
   int pageLoadRetryCount = 0;
   enum class BookmarkFeedbackType : uint8_t {
+    BorgesHighlightFailed,
     Added,
     Removed,
     LimitReached,

@@ -12,6 +12,7 @@
 #include <Logging.h>
 #include <Memory.h>
 
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <optional>
@@ -23,15 +24,39 @@
 #include "ChapterXPathResolver.h"
 #include "ClippingStore.h"
 #include "CrossPointState.h"
+#include "Inbound.h"
 #include "ProgressMapper.h"
 #include "ReaderTracker.h"
 #include "activities/ActivityManager.h"
+#include "activities/home/RecentBookProgress.h"
+#include "activities/reader/EpubReaderUtils.h"
+#include "activities/reader/ReaderUtils.h"
 #include "components/UITheme.h"
+#include "fontIds.h"
+
+#ifdef SIMULATOR
+#include <HalDisplay.h>
+extern HalDisplay display;
+extern "C" int SDL_PollEvent(void* event);
+#endif
 
 namespace borges {
 namespace glue {
 
 namespace {
+
+#ifdef SIMULATOR
+// On a desktop the page is back before a screenshot can see a notice meant to last while a page
+// builds. Only the main loop presents and takes commands, and this is the main loop.
+void holdForScreenshot() {
+  if (!getenv("BORGES_SIM_HOLD_JUMP_NOTICE")) return;
+  for (int i = 0; i < 30; ++i) {
+    display.presentIfNeeded();
+    SDL_PollEvent(nullptr);
+    delay(50);
+  }
+}
+#endif
 
 constexpr const char* kCacheRoot = "/.crosspoint";
 constexpr const char* kUndoFlag = "/borges_undo";
@@ -169,6 +194,41 @@ class XpointerBudget {
   int taken_ = 0;
 };
 
+// What this reader highlighted itself, by asking its clippings. Only those in the chapter asked
+// about are read, once each: most of a long list stays on the card.
+class OwnClips final : public IOwnPassages {
+ public:
+  bool isOwn(const uint64_t passage, const int32_t spine) override {
+    const size_t clips = CLIPPINGS.clippingCount();
+    if (clips == 0 || passage == 0) return false;
+    if (!hashes_) hashes_ = makeUniqueNoThrow<uint64_t[]>(clips);
+    if (!hashes_) return false;
+    if (!cleared_) {
+      memset(hashes_.get(), 0, clips * sizeof(uint64_t));
+      cleared_ = true;
+    }
+    for (size_t i = 0; i < clips; ++i) {
+      const Clipping* clip = CLIPPINGS.clippingAt(i);
+      if (!clip || (spine >= 0 && clip->spineIndex != spine)) continue;
+      if (hashes_[i] == 0) {
+        // std::string::resize aborts when it cannot grow, and a passage listed although it is also
+        // here is only a row too many.
+        if (ESP.getMaxAllocHeap() < clip->textLength + kAllocationMargin || !CLIPPINGS.readClippingText(i, text_)) {
+          continue;
+        }
+        hashes_[i] = passageHash(text_.c_str());
+      }
+      if (hashes_[i] == passage) return true;
+    }
+    return false;
+  }
+
+ private:
+  std::unique_ptr<uint64_t[]> hashes_;
+  std::string text_;
+  bool cleared_ = false;
+};
+
 // What identifies each of the book's clippings. All an opening book needs to know about them.
 class ClipKeys : public IClipSource {
  public:
@@ -299,6 +359,8 @@ class ClipSource final : public ClipKeys {
 };
 
 }  // namespace
+
+std::unique_ptr<IOwnPassages> makeOwnPassages() { return makeUniqueNoThrow<OwnClips>(); }
 
 ClipKey bookmarkKey(const uint16_t spine, const uint16_t paragraph, const float progress) {
   uint32_t progressBits = 0;
@@ -520,20 +582,26 @@ bool takeReaderCheckNotice() {
 
 void noteLeftSessionOnPurpose() { sLeftOnPurpose = kLeftOnPurposeMagic; }
 
-void publishRestoredPosition(const std::shared_ptr<Epub>& epub, const Position& position) {
-  auto stack = makeStack();
-  if (!stack || !stack->openStore() || !stack->store.creds().paired() || !stack->openEngine()) return;
+namespace {
+void publishPosition(BorgesStack& stack, const std::shared_ptr<Epub>& epub, const Position& position) {
   auto input = makeUniqueNoThrow<FinalizeInput>();
-  if (!input || !partialMd5(stack->fs, epub->getPath().c_str(), input->book.id)) return;
+  if (!input || !partialMd5(stack.fs, epub->getPath().c_str(), input->book.id)) return;
   input->book.title = epub->getTitle().c_str();
   input->book.author = epub->getAuthor().c_str();
   input->book.file = fileNameOf(epub->getPath());
   input->position = position;
   input->paged = true;
-  input->lastTurn = stack->clock.wallNow();
+  input->lastTurn = stack.clock.wallNow();
   // An answer for this book: a kept place from before the jump must not outrun it.
   discardKeptReading(*epub);
-  if (!stack->engine.finalizeBook(*input).ok) LOG_ERR("BORGES", "Could not queue the restored place");
+  if (!stack.engine.finalizeBook(*input).ok) LOG_ERR("BORGES", "Could not queue the restored place");
+}
+}  // namespace
+
+void publishRestoredPosition(const std::shared_ptr<Epub>& epub, const Position& position) {
+  auto stack = makeStack();
+  if (!stack || !stack->openStore() || !stack->store.creds().paired() || !stack->openEngine()) return;
+  publishPosition(*stack, epub, position);
 }
 
 void stampClip(const std::string& cachePath, const uint16_t spine, const uint32_t uptimeStamp,
@@ -581,6 +649,122 @@ void consumeUndo(const std::string& bookPath) {
     stack->engine.takeUndo(id, *position);
   }
   Storage.remove((cachePathFor(bookPath) + kUndoFlag).c_str());
+}
+
+bool hasInboundHighlights(const std::string& bookPath) {
+  // No RTC, no file: a boot starts over, and every sync is a boot.
+  static uint32_t knownKey = 0;
+  static bool knownAnswer = false;
+  if (bookPath.empty() || !mayBePaired()) return false;
+  const uint32_t key =
+      pathHash(bookPath.c_str()) ^ (static_cast<uint32_t>(CLIPPINGS.clippingCount()) * 2654435761u) ^ 1u;
+  if (key == knownKey) return knownAnswer;
+  knownKey = key;
+  knownAnswer = false;
+  net::BorgesFsHal fs;
+  BookId id;
+  if (!partialMd5(fs, bookPath.c_str(), id) || !InboundList::present(fs, id)) return false;
+  auto stack = makeStack();
+  if (!stack || !stack->openStore()) return false;
+  auto own = makeOwnPassages();
+  knownAnswer = InboundList::hasAny(stack->fs, id, stack->store.state().accountEpoch, own.get());
+  LOG_INF("BORGES", "Highlights of other readers in this book: %d", knownAnswer ? 1 : 0);
+  return knownAnswer;
+}
+
+std::unique_ptr<Activity> makeInboundActivity(GfxRenderer& renderer, MappedInputManager& input,
+                                              const std::string& bookPath) {
+  return makeUniqueNoThrow<BorgesInboundActivity>(renderer, input, bookPath);
+}
+
+HighlightJumpOutcome jumpToHighlight(GfxRenderer& renderer, ReaderTracker& tracker, const std::shared_ptr<Epub>& epub,
+                                     const CrossPointPosition& here, const float herePercent,
+                                     const std::string& xpointer, const bool hasPct, const uint32_t pctMicro) {
+  const int spines = epub->getSpineItemsCount();
+  const int32_t namedSpine = spineOfXpointer(xpointer.c_str());
+  const bool hasPlace = namedSpine >= 0 && namedSpine < spines;
+  if (!hasPlace && !hasPct) {
+    LOG_ERR("BORGES", "This highlight says nowhere to go");
+    return HighlightJumpOutcome::Failed;
+  }
+  auto stack = makeStack();
+  auto before = makeUniqueNoThrow<Position>();  // Too large for the stack.
+  auto after = makeUniqueNoThrow<Position>();
+  BookId id;
+  if (!stack || !before || !after || !stack->openStore() || !stack->openEngine() ||
+      !partialMd5(stack->fs, epub->getPath().c_str(), id)) {
+    return HighlightJumpOutcome::Failed;
+  }
+
+  // Mapping streams a chapter and takes moments on a big one, with nothing else on the glass.
+  GUI.drawPopup(renderer, tr(STR_BORGES_ONE_MOMENT));
+  CrossPointPosition mapped{};
+  {
+    XpointerBudget budget(renderer, *epub);
+    if (budget.take(false, here.spineIndex)) {
+      const KOReaderPosition local = ProgressMapper::toKOReader(epub, here);
+      if (local.valid && local.xpath.size() < kMaxXpointer)
+        strncpy(before->xpointer, local.xpath.c_str(), kMaxXpointer - 1);
+    }
+    if (herePercent >= 0) before->setPercent(herePercent);
+    KOReaderPosition target;
+    target.xpath = hasPlace ? xpointer : "";
+    target.percentage = hasPct ? static_cast<float>(pctMicro) / 100000000.0f : 0.0f;
+    // Without the memory for it the mapper finds no match, and falls back on the percentage.
+    if (hasPlace) budget.take(false, namedSpine);
+    mapped = ProgressMapper::toCrossPoint(epub, target, here.spineIndex, here.totalPages);
+  }
+
+  // From here on the frame is whatever the loan left in it.
+  const auto failed = [&renderer](const char* why) {
+    LOG_ERR("BORGES", "%s", why);
+    renderer.clearScreen(ReaderUtils::readerBackgroundColor());
+    return HighlightJumpOutcome::Failed;
+  };
+  SavedPosition saved;
+  if (!mapped.valid ||
+      !normalizeForSave(mapped.spineIndex, mapped.pageNumber, mapped.totalPages, epub->getSpineItemsCount(), saved)) {
+    return failed("This highlight has no place in this book");
+  }
+  // Read nothing since the last jump, and the way back is still the place the reading was at.
+  const bool keepExisting = !tracker.paged && hasUndo(epub->getPath());
+  if (!stack->engine.setUndo(id, *before, keepExisting)) return failed("Could not keep the way back");
+  const std::optional<uint32_t> offset =
+      mapped.hasVisibleTextOffset ? std::optional<uint32_t>(mapped.visibleTextOffset) : std::nullopt;
+  if (!EpubReaderUtils::saveProgress(*epub, saved.spine, saved.page, saved.pageCount, offset)) {
+    return failed("Could not save the place of the highlight");
+  }
+  RecentBookProgress::saveCachedEpubPercent(*epub, saved.spine, saved.page, saved.pageCount);
+  HalFile flag;
+  if (Storage.openFileForWrite("BORGES", epub->getCachePath() + kUndoFlag, flag)) flag.close();
+
+  // It counts as any way of getting to a page does, as in the plugin: it is where this reader is.
+  if (hasPct) {
+    after->hasPct = true;
+    after->pctMicro = pctMicro;
+  } else {
+    after->setPercent(epub->calculateProgress(saved.spine, 0) * 100.0);
+  }
+  if (hasPlace) strncpy(after->xpointer, xpointer.c_str(), kMaxXpointer - 1);
+  discardKeptReading(*epub);
+  if (stack->store.creds().paired()) publishPosition(*stack, epub, *after);
+
+  const bool exact = mapped.hasVisibleTextOffset;
+  // The page is built from nothing after this. Meanwhile, what just happened and how to undo it.
+  renderer.clearScreen(ReaderUtils::readerBackgroundColor());
+  const Rect area = UITheme::getInstance().getScreenSafeArea(renderer, false, false);
+  Rect text = area;
+  text.x += kSideMargin;
+  text.width -= kSideMargin * 2;
+  int y = area.y + area.height / 3;
+  if (!exact) y = drawWrappedCentered(renderer, text, UI_10_FONT_ID, y, tr(STR_BORGES_WARN_APPROXIMATE), 3) + kBlockGap;
+  drawWrappedCentered(renderer, text, SMALL_FONT_ID, y, tr(STR_BORGES_JUMP_TIP), 4);
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  LOG_INF("BORGES", "Went to a highlight: spine=%d exact=%d", saved.spine, exact ? 1 : 0);
+#ifdef SIMULATOR
+  holdForScreenshot();
+#endif
+  return exact ? HighlightJumpOutcome::Exact : HighlightJumpOutcome::Approximate;
 }
 
 std::unique_ptr<Activity> makeHandoff(GfxRenderer& renderer, MappedInputManager& input, const NetPayload payload) {

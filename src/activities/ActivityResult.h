@@ -128,11 +128,19 @@ struct ClippingJumpResult {
   bool settingsChanged = false;
 };
 
+// Borges: a highlight of another reader, to go to. Empty xpointer: only the percentage says where.
+struct BorgesHighlightJumpResult {
+  std::string xpointer;
+  bool hasPct = false;
+  uint32_t pctMicro = 0;
+};
+
 using ResultVariant =
     std::variant<std::monostate, WifiResult, KeyboardResult, MenuResult, ChapterResult, PercentResult, IntervalResult,
                  OptionSelectionResult, PageResult, NetworkModeResult, FootnoteResult, BookmarkResult,
                  FileBrowserActionResult, FilePathResult, WordResult, ReadingStatsResult, ClippingResult,
-                 TtfRenderOptionsResult, DictionaryClippingRequest, ClippingJumpResult, FrontlightPanelResult>;
+                 TtfRenderOptionsResult, DictionaryClippingRequest, ClippingJumpResult, FrontlightPanelResult,
+                 BorgesHighlightJumpResult>;
 
 struct ActivityResult {
   bool isCancelled = false;

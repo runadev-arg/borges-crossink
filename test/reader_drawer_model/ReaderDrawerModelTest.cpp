@@ -5,6 +5,28 @@
 #include "PendingOverlayResume.h"
 #include "components/SliderValue.h"
 
+TEST(ReaderDrawerModel, BorgesInboundRowShowsOnlyWhenTheBookHasSome) {
+  const auto hasRow = [](const ReaderDrawerCatalog& catalog) {
+    const auto& location = catalog[static_cast<size_t>(ReaderDrawerTab::Location)];
+    for (uint8_t i = 0; i < location.count; ++i) {
+      if (location.items[i] == ReaderDrawerCatalogItem::BorgesInbound) return true;
+    }
+    return false;
+  };
+  ReaderDrawerAvailability available{};
+  EXPECT_FALSE(hasRow(makeReaderDrawerCatalog(available)));
+  available.borgesPaired = true;
+  EXPECT_FALSE(hasRow(makeReaderDrawerCatalog(available)));
+  available.borgesHasInbound = true;
+  EXPECT_TRUE(hasRow(makeReaderDrawerCatalog(available)));
+  // The tab's fixed array holds everything at once.
+  available.hasBookmarks = true;
+  available.hasClippings = true;
+  available.borgesHasUndo = true;
+  available.buttonDevice = true;
+  EXPECT_LE(makeReaderDrawerCatalog(available)[static_cast<size_t>(ReaderDrawerTab::Location)].count, 14);
+}
+
 TEST(ReaderDrawerModel, TabOrderMatchesTouchDesign) {
   EXPECT_EQ(static_cast<uint8_t>(ReaderDrawerTab::Font), 0);
   EXPECT_EQ(static_cast<uint8_t>(ReaderDrawerTab::Layout), 1);
