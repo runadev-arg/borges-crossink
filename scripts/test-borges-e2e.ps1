@@ -5,7 +5,8 @@
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\test-borges-e2e.ps1 [-Only 1,2] [-Keep] [-NoBuild]
 #
-# -NoBuild uses the program.exe already in .pio. Screenshots of a run land in
+# BORGES_KOBO points at another checkout of the server. -NoBuild uses the program.exe already
+# in .pio. Screenshots of a run land in
 # D:\CrossInkBorges\artifacts\e2e, everything else under D:\CrossInkBorges\tmp\e2e and goes
 # away at the end unless -Keep.
 

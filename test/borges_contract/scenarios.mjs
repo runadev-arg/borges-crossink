@@ -131,7 +131,10 @@ async function pairing(h, t) {
   const c1 = await proc.cmd("pair-start");
   await h.approve(account, c1.user_code);
   h.proxy.fault({ match: "/api/devices/pairing/claim", action: "drop-after" });
-  const c2 = await proc.cmd("pair-poll");
+  // Not repeated in the same breath, since the server claims once: it keeps waiting, and the next
+  // poll is told it was claimed.
+  let c2 = await proc.cmd("pair-poll");
+  if (c2.state === "waiting") c2 = await proc.cmd("pair-poll");
   t.eq(c2.state, "claim_lost", "lost claim answer is reported as such");
   t.eq(c2.paired, false, "no credential saved");
   const c3 = await proc.cmd("pair-start");

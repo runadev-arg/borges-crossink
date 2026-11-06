@@ -255,7 +255,7 @@ async function scenario2({ h, t, makeDevice }) {
   const page2 = JSON.parse(h.proxy.requestsTo(/page=2&/).at(-1).responseBody);
   t.ok(page2.books.some((b) => b.title === hostileTitle), "the hostile title is on page 2");
   const index = page2.books.findIndex((b) => b.title === hostileTitle);
-  for (let i = 0; i < index; i += 1) await d.tap("DOWN", { settleMs: 100 });
+  await ui.libraryFocusTo(d, index);
   await d.shot("list-hostile-focused");
   await ui.downloadFocused(h, d);
   await d.shot("hostile-downloaded");

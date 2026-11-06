@@ -6,7 +6,7 @@ import path from "node:path";
 import { book, bookArgs, bookInfo, eventsOf, headOf, iso, krRead, now, xp } from "./scenarios.mjs";
 import { buildEpub, koreaderPartialMd5, sha256 } from "./epub.mjs";
 import { KoreaderSim } from "./koreader.mjs";
-import { RUN_DIR } from "./harness.mjs";
+import { KOBO, RUN_DIR } from "./harness.mjs";
 
 const positions = (kr, md5) => kr.get(`/api/sync/v2/progress/positions?book_identifier_kind=koreader_partial_md5&book_identifier_value=${md5}`);
 const watermark = async (h, userId) => (await h.sql`SELECT COALESCE(max(server_sequence), 0)::text AS w FROM device_events WHERE user_id = ${userId}`)[0].w;
@@ -467,7 +467,7 @@ async function repair(h, t) {
   t.eq(notDelivered.report.outcome, "ok", "and the session goes on");
 
   // The previous firmware's credential, issued by this server.
-  const old = new KoreaderSim({ baseUrl: h.proxy.url, kobo: "C:\\Users\\totot\\Documents\\Proyectos\\highlights-kobo", name: "Xteink X4 viejo", platform: "crossink-x4", externalId: "x4-legacy-device" });
+  const old = new KoreaderSim({ baseUrl: h.proxy.url, kobo: KOBO, name: "Xteink X4 viejo", platform: "crossink-x4", externalId: "x4-legacy-device" });
   await h.approve(account, (await old.pairingRequest()).user_code);
   const claimed = await old.pairingClaim();
   const oldBook = book(null);
@@ -503,6 +503,7 @@ async function repair(h, t) {
   const firstSession = await imported.once("sleep-session");
   t.eq(firstSession.report.outcome, "ok", "the imported device syncs");
   t.eq(firstSession.report.sequence_repaired, true, "and repairs its way past the old firmware's sequences");
+  t.ok(h.proxy.log.some((e) => e.path === "/api/devices/self/credentials/rotate" && e.status === 200), "and retires the token that sat readable on the card");
   const [{ count: legacyRows }] = await h.sql`SELECT count(*)::int FROM devices WHERE external_id = 'x4-legacy-device'`;
   t.eq(legacyRows, 1, "no new device row");
   const after = await eventsOf(h, claimed.device.id);
@@ -520,7 +521,9 @@ async function repair(h, t) {
   fs.mkdirSync(path.join(plain.sd, ".borges"), { recursive: true });
   fs.writeFileSync(path.join(plain.sd, ".borges", "toto.json"), JSON.stringify({ deviceId: claimed.device.id, token: old.token }));
   t.eq((await plain.once("status")).device_id, claimed.device.id, "toto.json with a plain token is imported too");
-  t.eq((await plain.once("manual-session")).report.outcome, "ok", "and works");
+  // That token was spent by the import above: the server rotates a credential once. Still good
+  // through its grace, so the sync goes, and then this copy says it has to pair again.
+  t.eq((await plain.once("manual-session")).report.outcome, "needs_relink", "a copy of a token already retired asks to pair again");
 }
 
 // ---------------------------------------------------------------------------------

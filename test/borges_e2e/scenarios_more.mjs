@@ -87,14 +87,38 @@ async function scenario6({ h, t, makeDevice }) {
   await ui.readerToHome(d);
   const inSettings = await ui.homeToSettings(d);
   t.ok(inSettings, "Settings can be reached from Home with the buttons");
-  if (inSettings) {
-    await d.shot("settings-root");
-    t.skip("Settings, System tab, Borges: the row was reachable in this build but the walk to it is not scripted yet");
-    await d.tap("BACK", { settleMs: 500 });
-  } else {
-    t.skip("Settings, System tab, Borges: Home cannot focus Settings in this build (see the failed check above), and there is no other way there with buttons");
-    await d.shot("home-settings-out-of-reach");
+  await d.shot("settings-root");
+  await ui.settingsToBorges(d);
+  await d.shot("settings-borges-status");
+  t.ok(d.logSince().includes("Entering activity: Borges"), "Settings, System, Borges opens the status screen");
+  const backToSettings = d.mark();
+  await d.press("BACK");
+  await d.waitLog(/Entering activity: Setting/, { since: backToSettings, timeoutMs: 15000 }).catch(() => {});
+  await d.waitStable(500);
+  await d.shot("settings-after-borges");
+  t.ok(/Exiting activity: Borges/.test(d.logSince(backToSettings)), "and Back leaves it");
+  // Back leaves the row list for the tab bar first, and then Settings.
+  const backHome = d.mark();
+  for (let i = 0; i < 3 && !/Entering activity: Home/.test(d.logSince(backHome)); i += 1) {
+    await d.press("BACK");
+    await d.waitStable(800);
   }
+  await d.waitLog(/Entering activity: Home/, { since: backHome, timeoutMs: 15000 });
+  await d.waitStable(500);
+  await d.shot("home-after-settings");
+
+  // On Home the same shortcut syncs: "Sync now" does that wherever it is pressed.
+  h.proxy.clear();
+  boots = d.helloCount;
+  mark = d.mark();
+  await d.press("POWER", 80);
+  await d.waitBoot(boots);
+  await d.waitLog(/Entering activity: Borges\b/, { since: mark });
+  await until("the sync the shortcut asked for on Home", () => h.proxy.requestsTo("/api/devices/self/health").some((e) => e.status > 0), 30000);
+  await wait(2000);
+  await d.waitStable(500);
+  await d.shot("shortcut-on-home-synced");
+  await ui.statusToHome(d);
 
   // Something queued, then Disconnect from Home, Borges.
   ui.letThrottleExpire(d);
@@ -116,19 +140,26 @@ async function scenario6({ h, t, makeDevice }) {
   await d.tap("CONFIRM", { settleMs: 400 });
   await d.tap("DOWN", { settleMs: 200 });
   await d.shot("disconnect-confirm-focused");
-  await d.tap("CONFIRM", { settleMs: 500 });
+  const unlink = d.mark();
+  await d.press("CONFIRM");
+  await d.waitLog(/Entering activity: Borges\b/, { since: unlink, timeoutMs: 30000 });
+  await until("the credential to be retired", () => h.proxy.requestsTo("/api/devices/self/credentials/rotate").some((e) => e.status > 0), 40000);
+  await d.waitStable(300);
   await d.shot("disconnected");
+  // "Done" reads in passing, and leaves for the status of this same network boot.
+  await d.waitStable(2500, 20000);
+  await d.shot("disconnected-status");
   const outbox = fs.readdirSync(d.file("/.crosspoint/borges/outbox"));
   t.ok(outbox.length > 0, `the queue stays on the card (${outbox.join(",")})`);
   const leftover = d.allFiles().filter((f) => fs.readFileSync(f).includes(Buffer.from(d.token)));
   t.eq(leftover.length, 0, `no plain token on the card after disconnecting (${leftover.map((f) => f.slice(d.dir.length)).join(",")})`);
   const [row] = await h.sql`SELECT status FROM devices WHERE id = ${d.deviceId}`;
-  t.note(`the server's device row after Disconnect: ${row?.status}. It is local only: the server was not told, and the credential is not revoked`);
+  t.note(`the server's device row after Disconnect: ${row?.status}. The row stays; its credential was rotated into one that dies in a minute`);
 
   // Pair again: same row, and the queue drains.
   h.proxy.clear();
   const firstId = d.deviceId;
-  const claim = await ui.pairFromStatus(h, d, account);
+  const claim = await ui.pairFromStatus(h, d, account, { sameBoot: true });
   t.eq(claim.device.id, firstId, "re-pairing is the same device row");
   await d.shot("repaired-status");
   // The pairing ran the sync itself, so the queue drains without a press.
@@ -154,6 +185,9 @@ async function scenario7({ h, t, makeDevice }) {
   const opened = await ui.openFromHome(d);
   t.eq(opened.reached, "EpubReader", "no server: the book opens anyway");
   t.note(`refused: press to reader ${opened.elapsedMs} ms, route ${opened.acts.join(",")}`);
+  t.ok(/Check notice shown/.test(d.logSince(opened.mark)), "the reader says the check could not happen");
+  await until("the notice on the page", async () => (await d.pixels()).darkFraction(30, 392, 40, 408) > 0.9, 8000);
+  t.ok(true, "and it is on the panel");
   t.ok(opened.acts.includes("BorgesOpen"), "it did try");
   t.ok(opened.elapsedMs < 16000, `within the open budget (${opened.elapsedMs} ms)`);
   await d.shot("offline-reader");
@@ -168,6 +202,7 @@ async function scenario7({ h, t, makeDevice }) {
   // end by its deadline with nobody there.
   const wokeOffline = await ui.wake(d);
   t.eq(wokeOffline.reached, "EpubReader", "waking offline opens the book");
+  t.eq(/Check notice shown/.test(d.logSince(wokeOffline.mark)), false, "and does not say it again at every wake");
   t.note(`wake in backoff: route ${wokeOffline.acts.join(",")}`);
   await d.tap("RIGHT", { settleMs: 150 });
   await wait(19000);
@@ -234,6 +269,7 @@ async function scenario8({ h, t, makeDevice }) {
     t.note(`${key} during a slow check: reader ${skippedMs} ms after the press`);
     t.ok(skippedMs < 3000, `${key} skips at once (${skippedMs} ms)`);
     t.eq(ui.activities(d.logSince(mark)).includes("BorgesResume"), false, `${key}: no prompt, the check was abandoned`);
+    t.eq(/Check notice shown/.test(d.logSince(mark)), false, `${key}: a person who skipped it needs no telling`);
     await d.waitStable(800);
     await d.shot(`slow-check-after-${key}`);
     await ui.readerToHome(d);
@@ -455,13 +491,64 @@ async function scenario10({ h, t, makeDevice }) {
 // 11. First-time Wi-Fi picker
 // ---------------------------------------------------------------------------------
 
-async function scenario11({ t }) {
-  t.skip(
-    "the Borges path to WifiSelectionActivity needs !hasSavedWifi() && !link.connected(). In the simulator hasSavedWifi() is true whenever BORGES_SIM_BASE_URL is set (src/borges/BorgesStack.cpp:112) and BorgesLink::connected() is always true (src/borges/net/BorgesLink.cpp:52), and without BORGES_SIM_BASE_URL the firmware would talk to production"
-  );
-  t.skip(
-    "a saved network out of range: BORGES_SIM_NO_WIFI does nothing on a Borges session, because BorgesStack::bringUp asks link.connected() first and the simulator's answers true, so connect() and its check of that variable never run"
-  );
+async function scenario11({ h, t, makeDevice }) {
+  // A card with no network yet: Connect has to go through the picker.
+  const account = await h.account("redes");
+  const d = makeDevice("x4", { env: { BORGES_SIM_NO_SAVED_WIFI: "1" } });
+  await ui.bootToHome(d);
+  await ui.homeToBorges(d);
+  await d.shot("no-network-status");
+  const boots = d.helloCount;
+  const mark = d.mark();
+  await d.press("CONFIRM");
+  await d.waitBoot(boots);
+  await d.waitLog(/Entering activity: \w*WifiSelection\w*/, { since: mark, timeoutMs: 20000 });
+  await d.waitStable(1500);
+  await d.shot("first-time-picker");
+  t.eq(h.proxy.requestsTo("/api/devices/pairing/request").length, 0, "no request goes out before there is a network");
+  const pick = d.mark();
+  await d.press("CONFIRM");
+  await d.waitStable(1500);
+  await d.shot("first-time-picker-after-choosing");
+  t.ok(/Selected open network[\s\S]*Exiting activity: WifiSelection/.test(d.logSince(pick)), "the open network is joined and the picker gives way");
+  await until("the pairing request once a network was chosen", () => h.proxy.requestsTo("/api/devices/pairing/request").some((e) => e.status > 0), 30000);
+  t.ok(true, "choosing a network went on to pair");
+  await d.waitStable(800);
+  await d.shot("first-time-pair-code");
+  await h.approve(account, ui.pairingCode(h));
+  await until("the claim", () => h.proxy.requestsTo("/api/devices/pairing/claim").some((e) => e.status === 200), 30000);
+  await d.close();
+
+  // A saved network out of range, and then a password refused: the way out is on the screen.
+  const e = makeDevice("x5");
+  await ui.freshPaired(h, e, await h.account("alcance"));
+  await e.kill();
+  await ui.bootToHome(e, { env: { BORGES_SIM_NO_WIFI: "1" } });
+  await ui.homeToBorges(e);
+  let bootsE = e.helloCount;
+  let markE = e.mark();
+  await e.press("CONFIRM");
+  await e.waitBoot(bootsE);
+  await e.waitLog(/Entering activity: Borges\b/, { since: markE });
+  await e.waitStable(1500);
+  await e.shot("out-of-range-offers-a-network");
+  const offered = e.mark();
+  await e.press("CONFIRM");
+  await e.waitLog(/Entering activity: \w*WifiSelection\w*/, { since: offered, timeoutMs: 15000 });
+  await e.waitStable(1500);
+  await e.shot("out-of-range-picker");
+  t.ok(true, "out of range offers the picker and Confirm opens it");
+  // Choosing one: the sync it could not do now goes.
+  const chosen = e.mark();
+  h.proxy.clear();
+  await e.press("CONFIRM");
+  await e.waitLog(/Exiting activity: WifiSelection/, { since: chosen, timeoutMs: 15000 });
+  await until("the sync on the network just chosen", () => h.proxy.requestsTo("/api/devices/self/health").some((r) => r.status > 0), 30000);
+  await wait(2500);
+  await e.waitStable(500);
+  await e.shot("out-of-range-synced-after-choosing");
+  t.ok(true, "and the sync goes on the network chosen");
+  await e.close();
 }
 
 // ---------------------------------------------------------------------------------
@@ -505,6 +592,80 @@ async function scenario12({ h, t, makeDevice }) {
   t.note(`legacy file still on the card after the import: ${fs.existsSync(d.file("/.borges/borges.json"))}`);
 }
 
+// ---------------------------------------------------------------------------------
+// 13. The screens that changed, in Spanish, the longest of the languages kept
+// ---------------------------------------------------------------------------------
+
+async function scenario13({ h, t, makeDevice }) {
+  const { account, book, d } = await deviceWithBook(h, makeDevice);
+  const setSpanish = () => {
+    const file = d.file("/.crosspoint/crossink-settings.json");
+    const now = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {};
+    fs.writeFileSync(file, JSON.stringify({ ...now, language: "ES" }));
+  };
+  await d.kill();
+  setSpanish();
+
+  // The prompt: this reader has no place to state, and another has one.
+  await koreaderAt(h, account, book, { percent: 60, chapter: 7 });
+  for (const f of d.progressFiles()) fs.rmSync(f, { force: true });
+  await ui.bootToHome(d);
+  const prompt = await ui.openFromHome(d);
+  t.eq(prompt.reached, "BorgesResume", "with no place here it offers the other reader's");
+  await d.shot("es-prompt-no-place");
+  await d.press("BACK");
+  await d.waitLog(/Entering activity: EpubReader/, { timeoutMs: 40000 });
+  await d.waitStable(800);
+  await ui.readerToHome(d);
+
+  // Held: a position waits for an answer.
+  ui.letThrottleExpire(d);
+  await h.proxy.down();
+  const refused = await ui.openFromHome(d);
+  t.eq(refused.reached, "EpubReader", "no server: opens anyway");
+  await until("the notice on the page", async () => (await d.pixels()).darkFraction(30, 392, 40, 408) > 0.9, 8000);
+  await d.waitStable(300);
+  await d.shot("es-check-notice");
+  await d.tap("RIGHT", { settleMs: 300 });
+  await d.shot("es-check-notice-gone");
+  await ui.readerToHome(d);
+  await ui.homeToBorges(d);
+  await d.shot("es-status-with-held");
+  // Disconnect's question.
+  for (let i = 0; i < 4; i += 1) await d.tap("DOWN", { settleMs: 200 });
+  await d.tap("CONFIRM", { settleMs: 400 });
+  await d.shot("es-disconnect-confirm");
+  await d.tap("CONFIRM", { settleMs: 400 });
+  for (let i = 0; i < 4; i += 1) await d.tap("UP", { settleMs: 200 });
+
+  // A server that cannot be reached, with the new words.
+  const boots = d.helloCount;
+  let mark = d.mark();
+  await d.press("CONFIRM");
+  await d.waitBoot(boots);
+  await d.waitLog(/Entering activity: Borges\b/, { since: mark });
+  await d.waitStable(4000, 40000);
+  await d.shot("es-sync-failed");
+  await d.tap("CONFIRM", { settleMs: 500 });
+  await d.shot("es-status-after-failure");
+  await h.proxy.up();
+  await d.kill();
+
+  // A network out of reach, and a password refused: the way out is on the screen.
+  for (const [env, label] of [[{ BORGES_SIM_NO_WIFI: "1" }, "es-out-of-range"], [{ BORGES_SIM_WIFI_AUTH: "1" }, "es-wrong-password"]]) {
+    await ui.bootToHome(d, { env });
+    await ui.homeToBorges(d);
+    const bootsNow = d.helloCount;
+    mark = d.mark();
+    await d.press("CONFIRM");
+    await d.waitBoot(bootsNow);
+    await d.waitLog(/Entering activity: Borges\b/, { since: mark });
+    await d.waitStable(2000);
+    await d.shot(label);
+    await d.kill();
+  }
+}
+
 export const MORE_SCENARIOS = [
   { id: 6, name: "Manual: drawer, shortcut, Settings, disconnect, re-pair", run: scenario6 },
   { id: 7, name: "Offline: budgets, no modal, sleep deadline, drain", run: scenario7 },
@@ -513,5 +674,6 @@ export const MORE_SCENARIOS = [
   { id: 10, name: "Crash-loop guard, power loss during flush", run: scenario10 },
   { id: 11, name: "First-time Wi-Fi picker", run: scenario11 },
   { id: 12, name: "Legacy credential import", run: scenario12 },
+  { id: 13, name: "The changed screens in Spanish", run: scenario13 },
 ];
 

@@ -288,10 +288,14 @@ export class Harness {
   }
 
   async approve(account, userCode, scopes) {
-    const res = await this.web("POST", "/api/devices/pairing/approve", {
-      cookie: account.cookie,
-      body: { user_code: userCode, ...(scopes ? { scopes } : {}) },
-    });
+    const send = (extra) =>
+      this.web("POST", "/api/devices/pairing/approve", {
+        cookie: account.cookie,
+        body: { user_code: userCode, ...(scopes ? { scopes } : {}), ...extra },
+      });
+    let res = await send({});
+    // A code for a reader this account already has: the page asks first, and a person says yes.
+    if (res.status === 409 && res.body?.error?.code === "pairing_replaces_device") res = await send({ replace_device: true });
     if (res.status !== 200) throw new Error(`approve failed: ${res.status} ${JSON.stringify(res.body)}`);
     return res.body;
   }

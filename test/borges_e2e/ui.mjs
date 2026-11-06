@@ -77,6 +77,19 @@ export async function homeToSettings(d) {
   return true;
 }
 
+// Settings opens on its tab bar, on Display. Confirm moves along the tabs: the button says which is
+// next. System is the last, and Borges its fifth row: Device, Files, Stats, Wi-Fi, Borges.
+export async function settingsToBorges(d) {
+  for (let i = 0; i < 3; i += 1) await d.tap("CONFIRM", { settleMs: 300 });
+  await d.shot("settings-system-tab");
+  for (let i = 0; i < 5; i += 1) await d.tap("DOWN", { settleMs: 200 });
+  await d.shot("settings-borges-row");
+  const mark = d.mark();
+  await d.press("CONFIRM");
+  await d.waitLog(/Entering activity: Borges\b/, { since: mark });
+  await d.waitStable(500);
+}
+
 export function pairingCode(h) {
   const request = h.proxy.requestsTo("/api/devices/pairing/request").filter((e) => e.status === 201 || e.status === 200).at(-1);
   return request ? JSON.parse(request.responseBody).user_code : null;
@@ -84,14 +97,16 @@ export function pairingCode(h) {
 
 // From the Borges status screen with its "Connect" row focused. Leaves the device on the
 // status screen of the network boot, paired.
-export async function pairFromStatus(h, d, account, { shots = {}, t } = {}) {
+export async function pairFromStatus(h, d, account, { shots = {}, t, sameBoot = false } = {}) {
   const boots = d.helloCount;
   const before = h.proxy.requestsTo("/api/devices/pairing/claim").length;
   const requestsBefore = h.proxy.requestsTo("/api/devices/pairing/request").length;
   d.mark();
   await d.press("CONFIRM");
-  await d.waitBoot(boots);
-  await d.waitLog(/Entering activity: Borges\b/);
+  if (!sameBoot) {
+    await d.waitBoot(boots);
+    await d.waitLog(/Entering activity: Borges\b/);
+  }
   await until(() => h.proxy.requestsTo("/api/devices/pairing/request").length > requestsBefore && pairingCode(h), "the pairing request");
   await d.waitStable(500);
   const code = pairingCode(h);
@@ -103,8 +118,11 @@ export async function pairFromStatus(h, d, account, { shots = {}, t } = {}) {
   await d.waitNewFrame(framesAtCode);
   if (shots.done) shots.donePath = await d.shot(shots.done);
   const framesAtDone = d.frames;
-  await d.waitNewFrame(framesAtDone, 10000);
-  await d.waitStable(400);
+  // The first sync's screen, then "Done" for 3 s, then the status. How many of those show up as a
+  // new frame depends on how fast the sync goes. A press before the status dismisses "Done" and does
+  // not reach the row the focus is on, so this waits out all of it.
+  await until(() => h.proxy.requestsTo("/api/devices/self/health").some((e) => e.status > 0) || d.frames > framesAtDone + 2, "the first sync", 30000);
+  await d.waitStable(3600, 40000);
   const claim = JSON.parse(h.proxy.requestsTo("/api/devices/pairing/claim").filter((e) => e.status === 200).at(-1).responseBody);
   return claim;
 }
@@ -165,7 +183,22 @@ export async function waitLibraryList(h, d, page = 1) {
   const frames = d.frames;
   await until(async () => d.frames > frames || (await libraryListOnScreen(d)), "the list on screen", 15000);
   await until(() => libraryListOnScreen(d), "the list on screen", 15000);
-  await d.waitStable(300);
+  // A new page: the old list stays up through "Loading", which takes no buttons, and the answer has
+  // to be parsed before the new one paints. A press before that is lost, and the next press on the
+  // focused row downloads some other book.
+  await d.waitStable(1500);
+}
+
+// The focused row is the solid bar. Looked at, not assumed: a press that lands while a page is still
+// on its way is ignored, as it should be, and the Confirm after it would fetch the wrong book.
+export async function libraryFocusTo(d, row, rowTop = 93, rowHeight = 59) {
+  for (let press = 0; press < 12; press += 1) {
+    const screen = await d.pixels();
+    if (screen.darkFraction(2, rowTop + row * rowHeight + 10, 10, rowTop + row * rowHeight + 30) > 0.9) return;
+    await d.press("DOWN");
+    await d.waitStable(300);
+  }
+  throw new Error(`the library's focus never reached row ${row}`);
 }
 
 // The Downloading screen is the only one of the library with no label on its second button:

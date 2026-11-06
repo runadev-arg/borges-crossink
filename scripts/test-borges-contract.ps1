@@ -4,6 +4,8 @@
 # environment and test/borges_contract/guard.mjs refuses any non-loopback socket.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts\test-borges-contract.ps1 [-Only 1,2] [-Keep]
+#
+# BORGES_KOBO points at another checkout of the server, for a fix on its way to production.
 
 param(
   [string]$Only = "",
