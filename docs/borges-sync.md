@@ -14,6 +14,7 @@ no always-on Wi-Fi budget). It must feel like the KOReader plugin. Server contra
 | Leave a book to Home | Position is finalized locally. It goes out on the next open or sleep. No surprise reboot on Home. |
 | Manual | Reader drawer **Sincronizar ahora**, assignable button shortcut, and Home → Borges. |
 | Library | Home → Borges → Biblioteca: paged list of the account's books, one-press download with resume and integrity check, marked when already on the SD card. |
+| Highlights from elsewhere | Reader drawer **Subrayados de otros lectores**, only in a book that has some: a list to read and to jump from. Section 7. |
 
 Never: Wi-Fi on while reading, an error dialog interrupting reading, a jump without consent.
 
@@ -49,6 +50,7 @@ lib/BorgesCore/   Pure C++. No Arduino, no HAL. Host-tested. Depends only on inj
   Ports.h           IFs, IHttp, IClock, IRandom, ICancel
   AtomicFile        Two-slot CRC-checked records; a torn write always falls back to the last good one
   Store             Credentials, sync state, per-book ledger
+  Inbound           Other devices' highlights: one bounded log per book, and the list that reads it
   Outbox            Append-only CRC log + ack watermark; immutable events; sequence repair
   Events            progress.changed, annotation.*, session.ended envelopes
   Spool/JsonStream  Responses go to SD first and are parsed element by element
@@ -200,9 +202,6 @@ compared against the ledger, keyed by a stable hash of (partial MD5, spine, text
 New ones become `annotation.created`, removed ones `annotation.deleted`. `sync_id` is derived once and
 stored. The xpointer is resolved with `ChapterXPathResolver` while the book is still loaded. Clip
 `timestamp` is uptime, so the wall time is stamped by a hook at save time, or `time` is omitted.
-Inbound annotations from other devices advance the cursor and are not stored: nothing on the device
-shows them, and keeping them would cost up to 32 MB at 500 books for a list nobody can open.
-
 The clippings on the card do not belong to an account, and the ledger does. So the first time an
 account opens a book after taking over the card, everything on disk is recorded as seen and nothing
 is sent: not the previous person's highlights to this account, and not a highlight deleted on the
@@ -214,6 +213,77 @@ account a card ever has takes over nobody, and publishes what was there.
 The same goes for the place: back on an account with the same device id, a head from this device
 with no reading since the account returned is offered like anyone else's, because the page on the
 card is whoever had it last.
+
+### Highlights from other readers
+
+KOReader applies what another reader or the web highlighted to the book. The firmware cannot draw
+one in the page (section 10), so it keeps them per book and lists them: reader drawer
+**Subrayados de otros lectores** / **Highlights from other readers**, read-only, and only in a book
+that has one. Each row: the text (up to three lines across a portrait screen, two across a landscape one,
+ending in an ellipsis when there is more), then chapter, source device and how long ago, each when
+known. The date is the highlight's own `time`, else `occurred_at` when its precision is `exact` or
+`anchored`, and only with a clock that can tell. Rows go in book order, one fixed height so the focus moves
+by a fixed step; a focus move is a fast refresh and a new page a half one. Confirm jumps there.
+
+**What is kept.** The `annotation.*` events with directive `apply_remote`, as the plugin applies:
+
+| Comes in | What happens |
+|---|---|
+| Newer revision of a highlight | Replaces it. An older revision arriving later says nothing. With no revision on the wire (`metadata_omitted`) arrival order decides |
+| `annotation.deleted` | Off the list, and out of the log (it is compacted) before the cursor moves. On FAT that frees the old clusters without overwriting them |
+| `annotation_conflict`, any other directive | Not listed: a conflict waits on the web for a person |
+| `bookmark.*`, `kind:"bookmark"` | Not listed: the list says highlights |
+| No usable `sync_id`, or a text of nothing | Not listed. The cursor moves past all of these |
+
+Notes are not kept or shown: a row has no room for them, and the web has them.
+
+**Own highlights never echo.** An event whose origin is this device is ignored, as ever. A `sync_id`
+in this book's clipping ledger is this device's too, whoever touched it last: a web edit of a
+highlight made here moves its revision and lists nothing.
+
+**The same passage shows once.** KOReader and this firmware derive different `sync_id`s for the same
+selection, so an id cannot tell. A passage is its text compared the way `annotationadapter.lua:comparableText`
+does (white space collapsed, NBSP as space, soft hyphens gone), over the first 200 bytes left, plus the
+chapter the xpointer names. If this reader has that passage in a clipping, the list leaves it out. If
+two other devices do, it shows once, as the newer. The same words elsewhere in the book are another
+passage. So a slightly different selection of the same sentence shows as its own row, which is what KOReader
+does as well. The drawer's check reads only the clippings in the chapters asked about and is kept in
+RAM until the book or its clipping count changes (eight bytes), since a menu opens often.
+
+**Bounds, always true on the card.** Per book, 256 records and 64 KiB; on reaching either, the log
+compacts, dropping the oldest, down to 192 and 48 KiB, and the list then says it holds the most recent.
+A long text is cut at 480 bytes on a character. Across the card, 200 books and 4 MiB; past that the book used
+longest ago goes whole. Measured against the real server: 300 highlights of one book, about 110 bytes of
+text each, end as a 56 KB log.
+
+**Crash-safe.** `inbound/<xx>/<rest of md5>` is an append-only log of CRC-framed records flushed one by
+one, with the server sequence in each: a redelivered event at or under the newest one is a no-op, and a
+tear only costs the record the cursor had not passed. A compaction writes `<name>.n` beside it and ends in
+a seal record; a sealed one found at any open wins, an unsealed one is what a crash left and goes. No
+rename over a file, which FAT cannot do atomically. `inbound/index.{a,b}` is an `AtomicFile` listing the books, oldest
+use first: a book is named there before its log exists, so a crash leaves a name with no file, never a
+file nobody can find to count or delete.
+
+**Whose they are.** Each log and the index carry `accountEpoch`. Another epoch reads as empty and is
+overwritten at the next write. Another account taking the card deletes them through the index then and there:
+these are the first words of a person's own the firmware keeps from the server. Disconnecting keeps them,
+as it keeps the queue. They live under `/.crosspoint/borges`, which the transfer servers refuse.
+
+**Memory.** Nothing resident while reading. A pull holds one record and its encoding for the session
+(about 2.8 KB, allocated at the first page, so never during a finalize with a book loaded), and 4 KB for the moment
+a compaction or an index update takes. Pull parsing is unchanged: one element at a time in the fixed window, the
+parse budget still skipping the rest. The list holds 16 B per highlight and one record (about 1.2 KB) while it
+is open, plus up to 4 KB while it opens, and nothing after.
+
+**The jump.** Before leaving, where the reader is becomes the undo point, unless a jump was made and nothing
+read since, in which case the way back stays where the reading was. With the framebuffer lent, as for an
+exit, the mapper resolves the xpointer. When it cannot, the percentage is used (from `percentage`, else from
+`page`/`total_pages`), never outside the chapter the xpointer names; the screen says the place is approximate. With
+neither, or with no place in this book, it says `No pude ir a ese subrayado` over the same page for a moment and
+nothing moved. A jump counts as any other way to a page, as in the plugin: the place is published as this
+reader's (not as `explicit_jump`, since nobody asked for it to win over another device), and `Volver a donde
+estaba` publishes the way back. Everything else about the reader is untouched: it reopens the book at that
+place, as after `Volver a donde estaba`.
 
 ## 8. Testing
 
@@ -243,4 +313,8 @@ for an old credential in `/.borges`, which is refused directly and retired by ro
 ## 10. Scope limits
 
 Boots only as the X3/X4 `default` image. Other boards still compile because `src/borges` builds on
-SDK abstractions, but they are not validated. Rendering highlights inside the page is out of scope.
+SDK abstractions, but they are not validated.
+
+Rendering highlights inside the page is out of scope, both this device's and other readers'. Other
+readers' are reachable from the reader drawer (section 7), and that list is read-only: nothing can be
+edited, deleted or adopted from it, and it has no touch handling beyond what the drawer has.

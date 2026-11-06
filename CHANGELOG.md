@@ -1,3 +1,9 @@
+## [v1.6.1-borges.2] - Unreleased
+
+### Added
+
+- Reader menu: Highlights from other readers, in a book that has some. What you highlighted in KOReader or edited on the web now reaches this reader: a list in book order with the text, chapter, device and date, and a press takes you there, with Back to where I was to return. Highlights are not drawn in the page. A passage you also highlighted here shows once, and what you delete elsewhere leaves the list and the card at the next sync.
+
 ## [v1.6.1-borges.1] - Unreleased
 
 ### Added
