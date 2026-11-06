@@ -1,3 +1,18 @@
+# CrossInk Borges
+
+Firmware for the **Xteink X4** with native [Borges](https://borges.runadev.com) sync: reading position, highlights and your library, like the KOReader plugin. Based on [CrossInk](https://github.com/uxjulia/CrossInk) by uxjulia, itself a fork of CrossPoint Reader. Not affiliated with either project; see [NOTICE.md](NOTICE.md).
+
+- **Install:** [docs/flashing-borges.md](docs/flashing-borges.md)
+- **How sync works:** [docs/borges-sync.md](docs/borges-sync.md)
+- **Download:** [latest release](https://github.com/runadev-arg/borges-crossink/releases/latest), file `firmware-x3-x4-*.bin`
+- **Tests on Windows:** `powershell -ExecutionPolicy Bypass -File scripts	est-borges-all.ps1`
+
+Only the X3/X4 image is released here. Report problems at <https://borges.runadev.com/ayuda>.
+
+The rest of this file is CrossInk's own README.
+
+---
+
 > **This is a personal fork of [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)** with a focus on improved fonts and minimal reading stats.
 
 ### Supported Devices
