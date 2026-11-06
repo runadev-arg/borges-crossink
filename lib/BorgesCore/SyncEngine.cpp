@@ -96,6 +96,13 @@ struct SyncEngine::Scratch {
   Batch batch;
 };
 
+// Only from the first page a session pulls: a finalize with a book loaded never pays for it.
+struct SyncEngine::InboundWork {
+  explicit InboundWork(IFs& fs) : store(fs) {}
+  InboundStore store;
+  InboundHighlight highlight;
+};
+
 struct SyncEngine::PageInfo {
   int64_t protocolVersion = 0;
   bool hasCursor = false;
@@ -137,6 +144,8 @@ bool SyncEngine::begin() {
 }
 
 void SyncEngine::end() {
+  delete inbound_;
+  inbound_ = nullptr;
   delete scratch_;
   scratch_ = nullptr;
 }
@@ -802,16 +811,8 @@ bool SyncEngine::applyRemote(SessionReport& report) {
   BookId book;
   if (!book.setHex(e.bookValue)) return true;
 
-  // Another device's annotations are not kept: nothing here shows them, and 500 books of
-  // them would be 32 MB on the card. Rendering them in the page is out of scope (section 9).
   if (!e.isProgress()) {
-    // What is kept is the revision of the ones this device published: deleting one that
-    // was edited on the web needs it, or the server sees a stale delete and opens a conflict.
-    uint8_t syncId[16];
-    if (e.annotationRevision && uuidParse(e.syncId, syncId) &&
-        !store_.noteAnnotationRevision(book, syncId, e.annotationRevision)) {
-      return false;
-    }
+    if (!applyAnnotation(book)) return false;
     ++report.eventsApplied;
     return true;
   }
@@ -847,11 +848,56 @@ bool SyncEngine::applyRemote(SessionReport& report) {
   return true;
 }
 
+bool SyncEngine::applyAnnotation(const BookId& book) {
+  const RemoteEvent& e = scratch_->event;
+  uint8_t syncId[16];
+  if (!uuidParse(e.syncId, syncId)) return true;
+  // The revision of the ones this device published: deleting one that was edited on the web needs
+  // it, or the server sees a stale delete and opens a conflict. And they are this device's own,
+  // whoever touched them last: not somebody else's highlight to list.
+  bool own = false;
+  if (!store_.noteAnnotationRevision(book, syncId, e.annotationRevision, &own)) return false;
+  if (own) return true;
+  // As in the plugin, which only applies what the server tells it to. A conflict waits on the web
+  // for a person. A bookmark is not a highlight, and this list says highlights.
+  if (e.annotationConflict || (e.directive[0] && strcmp(e.directive, "apply_remote") != 0)) return true;
+  if (e.bookmark || strncmp(e.eventType, "bookmark.", 9) == 0) return true;
+  if (!inbound_) return false;  // No memory for it when the page started: the page comes again.
+
+  InboundHighlight& h = inbound_->highlight;
+  h.deleted = e.isAnnotationDelete();
+  if (!h.deleted && passageHash(h.text) == 0) return true;  // A highlight of nothing lists nothing.
+  memcpy(h.syncId, syncId, 16);
+  h.serverSeq = e.serverSeq;
+  h.revision = e.annotationRevision > 0xFFFFFFFFu ? 0xFFFFFFFFu : static_cast<uint32_t>(e.annotationRevision);
+  h.passage = passageHash(h.text);
+  if (e.xpointerUsable) copyText(h.xpointer, sizeof(h.xpointer), e.xpointer);
+  copyText(h.device, sizeof(h.device), e.originName);
+  h.hasPct = e.hasPct;
+  h.pctMicro = e.pctMicro;
+  if (!h.hasPct && e.annotationPage >= 1 && e.totalPages >= 1 && e.annotationPage <= e.totalPages) {
+    // The inverse of events::referencePage. Good enough to fall back on.
+    h.hasPct = true;
+    h.pctMicro = static_cast<uint32_t>(static_cast<int64_t>(e.annotationPage) * 100000000 / e.totalPages);
+  }
+  // The date a person gave it, else when the event says it happened, if that can be believed.
+  constexpr int64_t kPlausibleMarkEpoch = 946684800;  // 2000: a highlight can be older than this firmware.
+  int64_t occurred = 0;
+  const int64_t marked = e.annotationTimeMs / 1000;
+  if (marked >= kPlausibleMarkEpoch && marked <= net::kMaxTrustedEpoch) {
+    h.timeEpoch = marked;
+  } else if (e.precision >= TimePrecision::Anchored && parseRfc3339(e.occurredAt, occurred)) {
+    h.timeEpoch = occurred;
+  }
+  return inbound_->store.apply(book, store_.state().accountEpoch, h);
+}
+
 bool SyncEngine::applyPage(File& f, const PageInfo& page, SyncStage stage, const ApiResult& result,
                            SessionReport& report) {
   FileByteSource source(f);
   JsonScanner scan(source);
   if (page.hasEvents) {
+    if (!inbound_) inbound_ = new (std::nothrow) InboundWork(fs_);
     scan.seekTo(page.eventsOffset);
     if (!scan.enterArray()) {
       recordProtocolError(stage, "malformed_response", result, report);
@@ -859,7 +905,7 @@ bool SyncEngine::applyPage(File& f, const PageInfo& page, SyncStage stage, const
     }
     while (scan.nextElement()) {
       const uint32_t start = scan.offset();
-      if (!parseRemoteEvent(scan, scratch_->event)) break;
+      if (!parseRemoteEvent(scan, scratch_->event, inbound_ ? &inbound_->highlight : nullptr)) break;
       const uint32_t size = scan.offset() - start;
       if (size > config_.eventParseBudget) {
         // Never a poison page: skip it, keep going, and leave a trace.
@@ -876,6 +922,7 @@ bool SyncEngine::applyPage(File& f, const PageInfo& page, SyncStage stage, const
       if (!api_.canContinue()) {
         // Nothing persisted a new cursor, so this page simply comes again.
         flushLedger();
+        if (inbound_) inbound_->store.finish();
         noteInterruption(report);
         return false;
       }
@@ -885,7 +932,7 @@ bool SyncEngine::applyPage(File& f, const PageInfo& page, SyncStage stage, const
       return false;
     }
   }
-  if (!flushLedger()) {
+  if (!flushLedger() || (inbound_ && !inbound_->store.finish())) {
     recordLocalError(stage, "ledger_write", report);
     return false;
   }
@@ -1911,6 +1958,16 @@ bool SyncEngine::peekUndo(const BookId& book, Position& out) {
 bool SyncEngine::takeUndo(const BookId& book, Position& out) {
   if (!peekUndo(book, out)) return false;
   scratch_->ledger.hasUndo = false;
+  return store_.saveBook(scratch_->ledger);
+}
+
+bool SyncEngine::setUndo(const BookId& book, const Position& position, const bool keepExisting) {
+  if (!scratch_ && !begin()) return false;
+  ledgerLoaded_ = false;
+  if (!store_.loadBook(book, scratch_->ledger)) return false;
+  if (keepExisting && scratch_->ledger.hasUndo) return true;
+  scratch_->ledger.hasUndo = true;
+  scratch_->ledger.undo = position;
   return store_.saveBook(scratch_->ledger);
 }
 

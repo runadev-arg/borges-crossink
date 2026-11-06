@@ -6,6 +6,7 @@
 //   /.crosspoint/borges/state.{a,b}         Cursor, holds, backoff, diagnostics
 //   /.crosspoint/borges/books/<xx>/<rest of md5>.{a,b}  Per-book ledger: head, choices, undo
 //   /.crosspoint/borges/ann/<xx>/<rest of md5>.{a,b}    Clippings this device already published
+//   /.crosspoint/borges/inbound/...                     Highlights of other devices: see Inbound.h
 //
 // Sharded by the first hex byte: with 500 books a flat directory holds 1000 long names,
 // FAT looks them up one by one, and a page of 20 books would spend most of a 12 s open
@@ -211,8 +212,9 @@ class Store {
   // Records these as known to the server, skipping any key already there. Idempotent.
   bool addKnownAnnotations(const BookId& id, const KnownAnnotation* known, size_t count, bool bookmark);
   // Someone else changed this annotation. A clipping this device never published is not its
-  // business, so that costs no write. False only on IO.
-  bool noteAnnotationRevision(const BookId& id, const uint8_t syncId[16], uint64_t revision);
+  // business, so that costs no write. *known: it is one of this device's. revision 0 only looks.
+  // False only on IO.
+  bool noteAnnotationRevision(const BookId& id, const uint8_t syncId[16], uint64_t revision, bool* known = nullptr);
 
   IFs& fs() { return fs_; }
 

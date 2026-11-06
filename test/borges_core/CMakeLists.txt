@@ -14,6 +14,7 @@ add_library(borges_core_lib STATIC
   ${BORGES_CORE_DIR}/Positions.cpp
   ${BORGES_CORE_DIR}/Codec.cpp
   ${BORGES_CORE_DIR}/Events.cpp
+  ${BORGES_CORE_DIR}/Inbound.cpp
   ${BORGES_CORE_DIR}/JsonStream.cpp
   ${BORGES_CORE_DIR}/Outbox.cpp
   ${BORGES_CORE_DIR}/PairingFlow.cpp
@@ -36,6 +37,7 @@ add_executable(borges_core
   DesignRulesTest.cpp
   EventsTest.cpp
   FinalizeTest.cpp
+  InboundTest.cpp
   JsonStreamTest.cpp
   OutboxTest.cpp
   PairingFlowTest.cpp

@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "Inbound.h"
 #include "JsonStream.h"
 #include "PageStats.h"
 #include "Ports.h"
@@ -130,6 +131,10 @@ struct RemoteEvent {
   // Annotations only.
   char syncId[40] = {0};
   uint64_t annotationRevision = 0;  // 0: the server did not say.
+  bool annotationConflict = false;
+  bool bookmark = false;  // payload.kind, for the event types that do not say.
+  int32_t annotationPage = -1;
+  int64_t annotationTimeMs = 0;
 
   bool isProgress() const;
   bool isAnnotation() const;
@@ -138,6 +143,10 @@ struct RemoteEvent {
 
 // Consumes exactly one JSON value. A non-object value yields an empty event. Returns
 // false only if the document is malformed.
-bool parseRemoteEvent(JsonScanner& scan, RemoteEvent& out);
+//
+// highlight, when given, receives the text and the chapter of an annotation. It is apart
+// because of its size: a focus check and everything that happens with a book loaded have no use
+// for it. Left empty for anything else.
+bool parseRemoteEvent(JsonScanner& scan, RemoteEvent& out, InboundHighlight* highlight = nullptr);
 
 }  // namespace borges

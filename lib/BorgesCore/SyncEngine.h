@@ -8,6 +8,10 @@
 //   Heap, whole engine lifetime
 //     Scratch (one RemoteEvent, BookLedger, Batch)                      3.5 KB
 //     Outbox index                  24 B per live event, 128 at most    ~3.1 KB
+//   Heap, once a session has pulled a page
+//     One inbound highlight, its encoding and the index handle          2.8 KB
+//   Heap, a moment, in a pull that found highlights
+//     A log's compaction or an index update                             4 KB
 //   Heap, one request at a time
 //     Exchange body: default bound 8 KiB + one envelope. A single oversized event
 //     goes alone, so the worst case is that event (a queued event is under 48 KiB).
@@ -244,6 +248,10 @@ class SyncEngine {
   // Latest position another device was seen at, from replayed pulls.
   bool remoteHead(const BookId& book, RemoteHead& out);
 
+  // "Ir ahi" from the list of other devices' highlights: where the reader was becomes the way back.
+  // keepExisting: a place to go back to from an earlier jump stays, as nothing was read since.
+  bool setUndo(const BookId& book, const Position& position, bool keepExisting);
+
   // Forgets this device's credential. There is no revoke route a device may call, so when
   // online this rotates it into one that expires in a minute, with no grace for the old
   // one, and throws the new one away: the old token dies at once and the new one is known
@@ -256,6 +264,7 @@ class SyncEngine {
  private:
   struct Scratch;
   struct PageInfo;
+  struct InboundWork;
 
   bool hasSleepWork() const;
   bool startSession(SessionKind kind, SessionReport& report);
@@ -284,6 +293,7 @@ class SyncEngine {
   // Applies a page's events and persists the cursor. Returns false when the session must stop.
   bool applyPage(File& f, const PageInfo& page, SyncStage stage, const ApiResult& result, SessionReport& report);
   bool applyRemote(SessionReport& report);
+  bool applyAnnotation(const BookId& book);
   bool flushLedger();
   bool processAcks(File& f, const PageInfo& page, const Batch& batch, const ApiResult& result, SessionReport& report);
   bool repairSequences(const Batch& batch, SessionReport& report);
@@ -305,6 +315,7 @@ class SyncEngine {
   Api api_;
   EngineConfig config_;
   Scratch* scratch_ = nullptr;
+  InboundWork* inbound_ = nullptr;
   bool ledgerDirty_ = false;
   bool ledgerLoaded_ = false;
   bool pendingChoice_ = false;

@@ -4,6 +4,7 @@
 #include <new>
 
 #include "Codec.h"
+#include "Inbound.h"
 #include "JsonStream.h"
 #include "Spool.h"
 
@@ -170,6 +171,7 @@ bool Store::begin() {
   scrubFile(fs_, kSpoolPath);
   fs_.mkdir("/.crosspoint/borges/books");
   fs_.mkdir("/.crosspoint/borges/ann");
+  fs_.mkdir(kInboundDir);
   fs_.mkdir("/.crosspoint/borges/catalog");
 
   creds_ = Credentials{};
@@ -416,6 +418,9 @@ bool Store::adoptAccount(const char* accountId, const char* accountName, Outbox&
     state_.accountEpoch = static_cast<uint16_t>(epoch + 1 < kFirstMovedEpoch ? kFirstMovedEpoch : epoch + 1);
     state_.anchorEpoch = anchor;  // The clock is not the account's.
     if (!saveState()) return false;
+    // Their words, on a card someone else now reads. The new epoch already hides them, and the
+    // first write of the new account finishes this if it does not get to the end here.
+    InboundStore::purge(fs_);
     creds_.accountId[0] = '\0';
     creds_.accountName[0] = '\0';
     syncMarkers();
@@ -649,15 +654,17 @@ bool Store::addKnownAnnotations(const BookId& id, const KnownAnnotation* known, 
   return ok;
 }
 
-bool Store::noteAnnotationRevision(const BookId& id, const uint8_t syncId[16], uint64_t revision) {
+bool Store::noteAnnotationRevision(const BookId& id, const uint8_t syncId[16], uint64_t revision, bool* known) {
+  if (known) *known = false;
   AnnotationRecord* records = nullptr;
   uint16_t count = 0;
   if (!loadAnnotations(id, &records, &count)) return false;
   bool ok = true;
   for (uint16_t i = 0; i < count; ++i) {
     if (memcmp(records[i].syncId, syncId, 16) != 0) continue;
+    if (known) *known = true;
     const uint32_t value = revision > 0xFFFFFFFFu ? 0xFFFFFFFFu : static_cast<uint32_t>(revision);
-    if (records[i].revision != value) {
+    if (revision && records[i].revision != value) {
       records[i].revision = value;
       ok = saveAnnotations(id, records, count);
     }

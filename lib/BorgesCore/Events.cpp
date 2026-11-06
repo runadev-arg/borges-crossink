@@ -309,7 +309,7 @@ void parseBookIdentifier(JsonScanner& scan, RemoteEvent& out) {
   }
 }
 
-void parsePayload(JsonScanner& scan, RemoteEvent& out) {
+void parsePayload(JsonScanner& scan, RemoteEvent& out, InboundHighlight* highlight) {
   if (!scan.enterObject()) {
     scan.skipValue();
     return;
@@ -323,6 +323,18 @@ void parsePayload(JsonScanner& scan, RemoteEvent& out) {
       if (scan.readInt(number) && number >= 0 && number <= 0x7FFFFFFF) out.page = static_cast<int32_t>(number);
     } else if (strcmp(key, "total_pages") == 0) {
       if (scan.readInt(number) && number >= 1 && number <= 0x7FFFFFFF) out.totalPages = static_cast<int32_t>(number);
+    } else if (strcmp(key, "page") == 0) {
+      if (scan.readInt(number) && number >= 0 && number <= 0x7FFFFFFF)
+        out.annotationPage = static_cast<int32_t>(number);
+    } else if (strcmp(key, "time") == 0) {
+      if (scan.readInt(number) && number > 0) out.annotationTimeMs = number;
+    } else if (strcmp(key, "kind") == 0) {
+      char kind[12];
+      if (scan.readString(kind, sizeof(kind))) out.bookmark = strcmp(kind, "bookmark") == 0;
+    } else if (highlight && strcmp(key, "text") == 0) {
+      scan.readString(highlight->text, sizeof(highlight->text), &highlight->truncated);
+    } else if (highlight && strcmp(key, "chapter") == 0) {
+      scan.readString(highlight->chapter, sizeof(highlight->chapter));
     } else if (strcmp(key, "xpointer") == 0) {
       bool truncated = false;
       out.xpointerUsable =
@@ -351,6 +363,8 @@ void parseDirectiveMetadata(JsonScanner& scan, RemoteEvent& out) {
       scan.readBool(out.readingHead);
     } else if (strcmp(key, "annotation_revision") == 0) {
       if (!scan.readSequence(out.annotationRevision)) out.annotationRevision = 0;
+    } else if (strcmp(key, "annotation_conflict") == 0) {
+      scan.readBool(out.annotationConflict);
     } else if (strcmp(key, "suggestion") == 0) {
       if (scan.enterObject()) {
         char inner[12];
@@ -384,8 +398,9 @@ bool RemoteEvent::isAnnotationDelete() const {
   return strcmp(eventType, "annotation.deleted") == 0 || strcmp(eventType, "bookmark.deleted") == 0;
 }
 
-bool parseRemoteEvent(JsonScanner& scan, RemoteEvent& out) {
+bool parseRemoteEvent(JsonScanner& scan, RemoteEvent& out, InboundHighlight* highlight) {
   out = RemoteEvent{};
+  if (highlight) *highlight = InboundHighlight{};
   if (!scan.enterObject()) return scan.skipValue();
   char key[24];
   while (scan.nextMember(key, sizeof(key))) {
@@ -407,7 +422,7 @@ bool parseRemoteEvent(JsonScanner& scan, RemoteEvent& out) {
       char text[16];
       if (scan.readString(text, sizeof(text))) parsePrecision(text, out.precision);
     } else if (strcmp(key, "payload") == 0) {
-      parsePayload(scan, out);
+      parsePayload(scan, out, highlight);
     } else if (strcmp(key, "directive") == 0) {
       scan.readString(out.directive, sizeof(out.directive));
     } else if (strcmp(key, "directive_metadata") == 0) {

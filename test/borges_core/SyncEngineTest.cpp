@@ -1049,15 +1049,13 @@ TEST_F(SyncEngineTest, AWebEditIsRememberedSoDeletingItIsNotAConflict) {
   EXPECT_EQ(doc["payload"]["base_revision"], "4");
 }
 
-TEST_F(SyncEngineTest, InboundAnnotationsMoveTheCursorAndLeaveNothingOnTheCard) {
+// InboundTest.cpp has what they become. Here: that none of it stands in the cursor's way.
+TEST_F(SyncEngineTest, InboundAnnotationsMoveTheCursor) {
   d.server.addFeedEvent(10, remoteAnnotation(10, kOtherId, "annotation.created", std::string(3000, 'a')));
   d.server.addFeedEvent(11, remoteAnnotation(11, kOtherId, "annotation.deleted", ""));
   d.server.addFeedEvent(12, remoteAnnotation(12, kSelfId, "annotation.created", "propio"));
   EXPECT_EQ(manual().eventsApplied, 2);
   EXPECT_EQ(d.store->state().cursor, 12u);
-  for (const std::string& path : d.fs.paths()) {
-    if (path != kSpoolPath) EXPECT_EQ(d.fs.content(path).find("aaaaaaaa"), std::string::npos) << path;
-  }
 }
 
 // --- Focus check ------------------------------------------------------------------
