@@ -28,6 +28,9 @@ struct BookRef {
   const char* author = nullptr;
   const char* file = nullptr;
   int32_t totalPages = -1;
+  // totalPages is this device's estimate. Good for placing things within this book, but the last
+  // value sent sets the document's page count, and must not replace another device's real one.
+  bool totalPagesApproximate = false;
 };
 
 struct EventTime {

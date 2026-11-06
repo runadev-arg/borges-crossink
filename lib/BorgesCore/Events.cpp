@@ -42,7 +42,7 @@ void writeBook(JsonWriter& w, const BookRef& book) {
   w.kv("title", book.title && *book.title ? book.title : book.id.hex);
   if (book.author && *book.author) w.kv("author", book.author);
   if (book.file && *book.file) w.kv("file", book.file);
-  if (book.totalPages >= 1) w.kvInt("total_pages", book.totalPages);
+  if (book.totalPages >= 1 && !book.totalPagesApproximate) w.kvInt("total_pages", book.totalPages);
   w.objectEnd();
 }
 
@@ -240,7 +240,7 @@ void writePageStats(JsonWriter& w, const BookRef& book, TimePrecision precision,
   // Over its limit a field would get the whole chunk refused: boundedMetadata leaves it out.
   if (book.title && *book.title && strlen(book.title) <= kMaxStatsText) w.kv("title", book.title);
   if (book.author && *book.author && strlen(book.author) <= kMaxStatsText) w.kv("authors", book.author);
-  if (book.totalPages >= 1) w.kvInt("pages", book.totalPages);
+  if (book.totalPages >= 1 && !book.totalPagesApproximate) w.kvInt("pages", book.totalPages);
   w.objectEnd();
   w.arrayEnd();
   w.objectEnd();

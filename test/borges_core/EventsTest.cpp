@@ -324,6 +324,29 @@ TEST(PageStatBuffer, WithNothingLeftToMergeTheOldestGoes) {
   EXPECT_EQ(b.at(b.count() - 1).page, PageStatBuffer::kCapacity);
 }
 
+TEST(Events, AnEstimatedPageCountNeverReachesTheDocument) {
+  // documents.number_of_pages takes what it is given: the last one sent on an annotation, the first
+  // one on page stats. This device's estimate must not freeze or replace another's real count.
+  ClipKey key;
+  ClipDetail detail;
+  detail.text = "uno";
+  detail.xpointer = "/body/p[1].0";
+  uint8_t syncId[16] = {1};
+  BookRef book = Device::bookRef();
+  book.totalPagesApproximate = true;
+  auto annotation =
+      parse(render([&](JsonWriter& w) { events::writeAnnotation(w, book, exactTime(), key, detail, syncId); }));
+  EXPECT_FALSE(annotation["payload"]["book"]["total_pages"].is<int>());
+  EXPECT_EQ(annotation["payload"]["book"]["title"], "Ficciones");
+  PageStatRow row{1793800000, 3, 60};
+  auto stats = parse(render([&](JsonWriter& w) { events::writePageStats(w, book, TimePrecision::Exact, &row, 1, 0); }));
+  EXPECT_FALSE(stats["payload"]["books"][0]["pages"].is<int>());
+  // Real pages go as they always went.
+  book.totalPagesApproximate = false;
+  auto real = parse(render([&](JsonWriter& w) { events::writeAnnotation(w, book, exactTime(), key, detail, syncId); }));
+  EXPECT_EQ(real["payload"]["book"]["total_pages"], 200);
+}
+
 TEST(Events, SessionWithinRulesAndNotOutside) {
   SessionSummary s;
   s.started = WallTime{1784880000, TimePrecision::Exact};
