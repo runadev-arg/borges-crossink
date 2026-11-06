@@ -58,7 +58,8 @@ enum class Gate : uint8_t {
   Go,
   NotPaired,
   NeedsRelink,  // Automatic sessions stop. Show "Volve a conectar". Manual still tries.
-  BackedOff,    // Automatic sessions wait. Manual always tries.
+  BackedOff,    // The server asked for time. Automatic sessions wait. Manual always tries.
+  LinkSkipped,  // The radio keeps finding no network: the next few automatic attempts do not try.
   NothingToDo,  // A sleep session with an empty queue costs no radio.
 };
 
@@ -144,8 +145,8 @@ struct FinalizeResult {
   bool ok = false;  // False: try again at the next finalize, nothing was lost.
   bool progressQueued = false;
   bool sessionQueued = false;
-  uint16_t annotationsCreated = 0;
   bool sessionFailed = false;  // There was a valid session and it did not reach the queue.
+  uint16_t annotationsCreated = 0;
   uint16_t annotationsDeleted = 0;
   bool annotationsPending = false;  // Limit reached; the rest go at the next finalize.
   uint8_t pageStatEvents = 0;
@@ -201,7 +202,6 @@ class SyncEngine {
   // Local, no network. Materializes progress, the session and clipping changes.
   FinalizeResult finalizeBook(const FinalizeInput& input);
 
-  // Session entry points. Each owns the budget for its kind.
   // Local, no network. A book first opened under this account after it took over the card: what is
   // there now was made under another one, so it is recorded as seen and never sent. Called when
   // the book opens, before anything can be highlighted, so what comes later is this account's.
@@ -211,6 +211,7 @@ class SyncEngine {
   // "Search at open" went off: nothing will ever answer these, so they stop waiting.
   void releaseHolds();
 
+  // Session entry points. Each owns the budget for its kind.
   SessionReport runOpenSession(const BookRef& book, const Position& local, ResumeDecision& out);
   SessionReport runSleepSession();
   // Asked for from the drawer. An offer of another device's place, answered like any prompt:
@@ -233,6 +234,7 @@ class SyncEngine {
 
   // "Volver a donde estaba". Single use: consumed only when the place is safely back.
   bool hasUndo(const BookId& book);
+  bool peekUndo(const BookId& book, Position& out);
   bool takeUndo(const BookId& book, Position& out);
 
   // Where this device last published itself in this book, xpointer included.
@@ -291,13 +293,13 @@ class SyncEngine {
   bool enqueueSession(const BookId& book, const SessionSummary& session, FinalizeResult& result);
   bool enqueuePageStats(const FinalizeInput& input, FinalizeResult& result);
   bool finalizeClips(const FinalizeInput& input, const EventTime& time, FinalizeResult& result);
+  bool seedClips(const BookId& book, IClipSource& clips);
   bool appendEvent(EventKind kind, const BookId& book, const char* body, size_t len, bool replace);
 
   Store& store_;
   Outbox& outbox_;
   IFs& fs_;
   IClock& clock_;
-  bool seedClips(const BookId& book, IClipSource& clips);
   IRandom& random_;
   Api api_;
   EngineConfig config_;

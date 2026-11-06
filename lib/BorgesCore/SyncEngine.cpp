@@ -149,7 +149,7 @@ Gate SyncEngine::gate(SessionKind kind) const {
   if (s.needsRelink) return Gate::NeedsRelink;
   if (backoff::blocked(clock_.wallNow(), s.nextAttemptEpoch)) return Gate::BackedOff;
   if (kind == SessionKind::Sleep && outbox_.isOpen() && !hasSleepWork()) return Gate::NothingToDo;
-  if (s.linkSkipsLeft > 0) return Gate::BackedOff;
+  if (s.linkSkipsLeft > 0) return Gate::LinkSkipped;
   return Gate::Go;
 }
 
@@ -168,7 +168,7 @@ bool SyncEngine::hasSleepWork() const {
 Gate SyncEngine::decideAutomatic(SessionKind kind) {
   const Gate decided = gate(kind);
   SyncState& s = store_.state();
-  if (decided == Gate::BackedOff && s.linkSkipsLeft > 0 && !backoff::blocked(clock_.wallNow(), s.nextAttemptEpoch)) {
+  if (decided == Gate::LinkSkipped) {
     --s.linkSkipsLeft;
     store_.saveState();
   }
@@ -179,6 +179,13 @@ void SyncEngine::noteLinkFailure() {
   SyncState& s = store_.state();
   if (s.linkFailStreak < 250) ++s.linkFailStreak;
   if (s.linkFailStreak >= kLinkFailuresBeforeSkipping) s.linkSkipsLeft = kLinkSkips;
+  store_.saveState();
+}
+
+void SyncEngine::releaseHolds() {
+  SyncState& s = store_.state();
+  if (s.holds.size() == 0) return;
+  s.holds.clear();
   store_.saveState();
 }
 
@@ -306,6 +313,8 @@ SessionReport SyncEngine::finish(SessionReport report, SessionKind kind) {
     if (!report.focusInvalid) s.diag.clear();
     const WallTime now = clock_.wallNow();
     if (now.precision != TimePrecision::Unknown) s.lastSuccessEpoch = now.epochSec;
+    // Last: what it finds wrong with the credential must survive the clearing above.
+    if (kind != SessionKind::Open) maybeRotate(report);
   }
   if (kind != SessionKind::Open) reportHealth(report);
   store_.saveState();
@@ -313,8 +322,6 @@ SessionReport SyncEngine::finish(SessionReport report, SessionKind kind) {
   return report;
 }
 
-    // Last: what it finds wrong with the credential must survive the clearing above.
-    if (kind != SessionKind::Open) maybeRotate(report);
 // Pull before push (rule 9): if the pull fails, drain does not run, or stale progress
 // would become the latest write.
 void SyncEngine::pullAndDrain(SessionReport& report) {
@@ -353,13 +360,6 @@ SessionReport SyncEngine::runOpenSession(const BookRef& book, const Position& lo
   return finish(report, SessionKind::Open);
 }
 
-SessionReport SyncEngine::runSleepSession() {
-  SessionReport report;
-  pendingChoice_ = false;
-  if (!startSession(SessionKind::Sleep, report)) return report;
-  if (checkHeldBooks(nullptr, report)) pullAndDrain(report);
-  return finish(report, SessionKind::Sleep);
-}
 SessionReport SyncEngine::runAfterChoice(const BookId& book) {
   SessionReport report;
   pendingChoice_ = false;
@@ -369,6 +369,13 @@ SessionReport SyncEngine::runAfterChoice(const BookId& book) {
   return finish(report, SessionKind::Sleep);
 }
 
+SessionReport SyncEngine::runSleepSession() {
+  SessionReport report;
+  pendingChoice_ = false;
+  if (!startSession(SessionKind::Sleep, report)) return report;
+  if (checkHeldBooks(nullptr, report)) pullAndDrain(report);
+  return finish(report, SessionKind::Sleep);
+}
 
 SessionReport SyncEngine::runManualSession(const BookRef* book, const Position* local, ResumeDecision* out) {
   SessionReport report;
@@ -683,10 +690,18 @@ bool SyncEngine::checkHeldBooks(const BookId* except, SessionReport& report) {
       ++index;
       continue;
     }
-    // Only books with something waiting are worth a request, and at sleep only once for
-    // each thing read: the answer will not change until a person opens the book.
-    if (!outbox_.hasEventFor(bookTagOf(book.md5), EventKind::Progress) ||
-        (currentKind_ == SessionKind::Sleep && store_.state().holds.checked(index))) {
+    // A hold keeps a position back. With none in the queue it keeps nothing, and it would hold on
+    // to one of the 32 places for as long as the book stays closed. Opening it holds it again.
+    if (!outbox_.hasEventFor(bookTagOf(book.md5), EventKind::Progress)) {
+      store_.state().holds.remove(book.md5);
+      if (!store_.saveState()) {
+        recordLocalError(SyncStage::Focus, "state_write", report);
+        return false;
+      }
+      continue;
+    }
+    // At sleep only once for each thing read: the answer will not change until a person opens it.
+    if (currentKind_ == SessionKind::Sleep && store_.state().holds.checked(index)) {
       ++index;
       continue;
     }
@@ -1436,8 +1451,21 @@ void SyncEngine::maybeRotate(SessionReport& report) {
   const ApiResult r = api_.callOnce("POST", kRotatePath, reinterpret_cast<const uint8_t*>(kEmpty), 2);
   if (r.kind != ApiKind::Ok) {
     scrubFile(fs_, kSpoolPath);  // A cut answer can still hold the token.
-    if (r.kind == ApiKind::HttpError && (r.status == 401 || r.status == 403))
+    if (r.kind == ApiKind::HttpError && (r.status == 401 || r.status == 403)) {
       recordFailure(SyncStage::Rotate, r, report);
+    } else if (r.kind == ApiKind::HttpError && r.status == 409 && strcmp(r.code, "credential_already_rotated") == 0) {
+      // The token that replaced this one was lost with an answer. This one still works for its
+      // grace, then the server stops taking it, and only pairing again recovers from that. Said
+      // now, while nothing is lost, rather than as a surprise later. Stops asking: it cannot help.
+      c.renewAfterEpoch = 0;
+      c.expiresAtEpoch = 0;
+      store_.saveCredentials();
+      SyncState& s = store_.state();
+      s.needsRelink = true;
+      setDiag(SyncStage::Rotate, r.code, r.message, r);
+      store_.saveState();
+      report.outcome = SessionOutcome::NeedsRelink;
+    }
     return;
   }
   File f(fs_, kSpoolPath, IFs::Mode::Read);
@@ -1471,19 +1499,6 @@ void SyncEngine::maybeRotate(SessionReport& report) {
   if (scan.failed() || !token[0] || truncated) return;
   copyText(c.token, sizeof(c.token), token);
   memset(token, 0, sizeof(token));
-    } else if (r.kind == ApiKind::HttpError && r.status == 409 && strcmp(r.code, "credential_already_rotated") == 0) {
-      // The token that replaced this one was lost with an answer. This one still works for its
-      // grace, then the server stops taking it, and only pairing again recovers from that. Said
-      // now, while nothing is lost, rather than as a surprise later. Stops asking: it cannot help.
-      c.renewAfterEpoch = 0;
-      c.expiresAtEpoch = 0;
-      store_.saveCredentials();
-      SyncState& s = store_.state();
-      s.needsRelink = true;
-      setDiag(SyncStage::Rotate, r.code, r.message, r);
-      store_.saveState();
-      report.outcome = SessionOutcome::NeedsRelink;
-    }
   c.expiresAtEpoch = expires;
   c.renewAfterEpoch = 0;
   store_.saveCredentials();
@@ -1493,6 +1508,9 @@ DisconnectResult SyncEngine::disconnect(bool online) {
   bool invalidated = false;
   SessionReport ignored;
   if (online && startSession(SessionKind::Manual, ignored)) {
+    // Last chance for what is queued: once the credential is gone, it can only go up by pairing
+    // this same account again. Failing here costs nothing: the queue stays, and the credential is
+    // still forgotten below.
     api_.beginSession(kDisconnectBudgetMs);
     if (checkHeldBooks(nullptr, ignored)) pullAndDrain(ignored);
     flushLedger();
@@ -1516,9 +1534,6 @@ DisconnectResult SyncEngine::disconnect(bool online) {
   return invalidated ? DisconnectResult::ServerInvalidated : DisconnectResult::StillValidOnServer;
 }
 
-    // Last chance for what is queued: once the credential is gone, it can only go up by pairing
-    // this same account again. Failing here costs nothing: the queue stays, and the credential is
-    // still forgotten below.
 // ---------------------------------------------------------------------------------
 // Finalize
 // ---------------------------------------------------------------------------------
@@ -1552,6 +1567,7 @@ bool SyncEngine::enqueueSession(const BookId& book, const SessionSummary& sessio
   const int64_t end = session.ended.epochSec;
   bool queued = true;
   bool any = false;
+  result.sessionFailed = false;
   while (queued && end - start >= events::kMinSessionSec) {
     const int64_t segmentEnd = end - start > events::kMaxSessionSec ? start + events::kMaxSessionSec : end;
     SessionSummary segment = session;
@@ -1573,6 +1589,7 @@ bool SyncEngine::enqueueSession(const BookId& book, const SessionSummary& sessio
     start = segmentEnd;
   }
   result.sessionQueued = any && queued;
+  result.sessionFailed = !queued;
   return queued;
 }
 
@@ -1583,7 +1600,6 @@ bool SyncEngine::enqueuePageStats(const FinalizeInput& input, FinalizeResult& re
   if (input.lastTurn.precision < TimePrecision::Anchored) {
     buffer.clear();
     return true;
-  result.sessionFailed = false;
   }
   uint8_t done = 0;
   uint8_t chunk = 0;
@@ -1605,7 +1621,6 @@ bool SyncEngine::enqueuePageStats(const FinalizeInput& input, FinalizeResult& re
     char* body = new (std::nothrow) char[counter.size()];
     ok = body != nullptr;
     if (body) {
-  result.sessionFailed = !queued;
       JsonWriter w(body, counter.size());
       events::writePageStats(w, input.book, input.lastTurn.precision, rows, count, chunk);
       ok = appendEvent(EventKind::PageStats, input.book.id, body, w.size(), false);
@@ -1778,6 +1793,18 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
     for (uint16_t j = 0; j < nextCount; ++j) {
       const bool wasStored = j < storedCount;
       if (wasStored && !seen[j]) {
+        // Never sent under this account: the server has nothing to delete, and being told would
+        // read as a conflict at best.
+        if (next[j].bookmark & kAnnSeeded) {
+          changed = true;
+          continue;
+        }
+        bool repeated = false;
+        for (uint16_t k = 0; k < j && !repeated; ++k) repeated = stored[k].key == stored[j].key;
+        if (repeated) {
+          changed = true;
+          continue;
+        }
         if (published >= config_.maxAnnotationEvents) {
           result.annotationsPending = true;
           next[kept++] = next[j];
@@ -1806,18 +1833,6 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
         changed = true;
         continue;
       }
-        // Never sent under this account: the server has nothing to delete, and being told would
-        // read as a conflict at best.
-        if (next[j].bookmark & kAnnSeeded) {
-          changed = true;
-          continue;
-        }
-        bool repeated = false;
-        for (uint16_t k = 0; k < j && !repeated; ++k) repeated = stored[k].key == stored[j].key;
-        if (repeated) {
-          changed = true;
-          continue;
-        }
       next[kept++] = next[j];
     }
     nextCount = kept;
@@ -1830,34 +1845,6 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
   return ok;
 }
 
-// ---------------------------------------------------------------------------------
-// Small queries
-// ---------------------------------------------------------------------------------
-
-bool SyncEngine::hasUndo(const BookId& book) {
-  if (!scratch_ && !begin()) return false;
-  ledgerLoaded_ = false;
-  return store_.loadBook(book, scratch_->ledger) && scratch_->ledger.hasUndo;
-}
-
-bool SyncEngine::takeUndo(const BookId& book, Position& out) {
-  if (!hasUndo(book)) return false;
-  out = scratch_->ledger.undo;
-  scratch_->ledger.hasUndo = false;
-  return store_.saveBook(scratch_->ledger);
-}
-
-bool SyncEngine::lastFinalized(const BookId& book, Position& out) {
-  if (!scratch_ && !begin()) return false;
-  ledgerLoaded_ = false;
-  if (!store_.loadBook(book, scratch_->ledger) || !scratch_->ledger.hasFinalized) return false;
-  out = scratch_->ledger.lastFinalized;
-  return true;
-}
-
-bool SyncEngine::remoteHead(const BookId& book, RemoteHead& out) {
-  if (!scratch_ && !begin()) return false;
-  ledgerLoaded_ = false;
 bool SyncEngine::seedClipsIfForeign(const BookId& book, IClipSource& clips) {
   AnnotationRecord* stored = nullptr;
   uint16_t storedCount = 0;
@@ -1898,6 +1885,39 @@ bool SyncEngine::seedClips(const BookId& book, IClipSource& clips) {
   return ok;
 }
 
+// ---------------------------------------------------------------------------------
+// Small queries
+// ---------------------------------------------------------------------------------
+
+bool SyncEngine::hasUndo(const BookId& book) {
+  if (!scratch_ && !begin()) return false;
+  ledgerLoaded_ = false;
+  return store_.loadBook(book, scratch_->ledger) && scratch_->ledger.hasUndo;
+}
+
+bool SyncEngine::peekUndo(const BookId& book, Position& out) {
+  if (!hasUndo(book)) return false;
+  out = scratch_->ledger.undo;
+  return true;
+}
+
+bool SyncEngine::takeUndo(const BookId& book, Position& out) {
+  if (!peekUndo(book, out)) return false;
+  scratch_->ledger.hasUndo = false;
+  return store_.saveBook(scratch_->ledger);
+}
+
+bool SyncEngine::lastFinalized(const BookId& book, Position& out) {
+  if (!scratch_ && !begin()) return false;
+  ledgerLoaded_ = false;
+  if (!store_.loadBook(book, scratch_->ledger) || !scratch_->ledger.hasFinalized) return false;
+  out = scratch_->ledger.lastFinalized;
+  return true;
+}
+
+bool SyncEngine::remoteHead(const BookId& book, RemoteHead& out) {
+  if (!scratch_ && !begin()) return false;
+  ledgerLoaded_ = false;
   if (!store_.loadBook(book, scratch_->ledger) || !scratch_->ledger.head.valid) return false;
   out = scratch_->ledger.head;
   return true;

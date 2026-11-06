@@ -682,13 +682,24 @@ TEST_F(SyncEngineTest, TwoLinkFailuresSkipTheNextFiveAutomaticAttempts) {
   EXPECT_EQ(d.engine->decideAutomatic(SessionKind::Open), Gate::Go) << "one failure is not a pattern";
   d.engine->noteLinkFailure();
   for (int i = 0; i < 5; ++i) {
-    EXPECT_EQ(d.engine->decideAutomatic(i % 2 ? SessionKind::Open : SessionKind::Sleep), Gate::BackedOff) << i;
+    EXPECT_EQ(d.engine->decideAutomatic(i % 2 ? SessionKind::Open : SessionKind::Sleep), Gate::LinkSkipped) << i;
   }
   EXPECT_EQ(d.engine->gate(SessionKind::Manual), Gate::Go);
   EXPECT_EQ(d.engine->decideAutomatic(SessionKind::Open), Gate::Go);
   // Still failing: another five, not one more try each time.
   d.engine->noteLinkFailure();
-  EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::BackedOff);
+  EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::LinkSkipped);
+}
+
+TEST_F(SyncEngineTest, ALinkSkipIsNotServerBackoff) {
+  d.engine->noteLinkFailure();
+  d.engine->noteLinkFailure();
+  EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::LinkSkipped);
+  d.store->state().nextAttemptEpoch = kNow + 100;
+  EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::BackedOff) << "the server's word comes first";
+  const uint8_t left = d.store->state().linkSkipsLeft;
+  EXPECT_EQ(d.engine->decideAutomatic(SessionKind::Open), Gate::BackedOff);
+  EXPECT_EQ(d.store->state().linkSkipsLeft, left) << "only a skip spends a skip";
 }
 
 TEST_F(SyncEngineTest, LinkSkipsDoNotDependOnTheClockAndSurviveAReboot) {
@@ -697,15 +708,15 @@ TEST_F(SyncEngineTest, LinkSkipsDoNotDependOnTheClockAndSurviveAReboot) {
   d.engine->noteLinkFailure();
   d.crashAndBoot();
   d.clock.setWall(0, TimePrecision::Unknown);
-  EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::BackedOff);
-  EXPECT_EQ(d.engine->decideAutomatic(SessionKind::Open), Gate::BackedOff);
+  EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::LinkSkipped);
+  EXPECT_EQ(d.engine->decideAutomatic(SessionKind::Open), Gate::LinkSkipped);
   EXPECT_EQ(d.store->state().linkSkipsLeft, 4);
 }
 
 TEST_F(SyncEngineTest, AnySessionWithALinkClearsTheSkips) {
   d.engine->noteLinkFailure();
   d.engine->noteLinkFailure();
-  ASSERT_EQ(d.engine->gate(SessionKind::Open), Gate::BackedOff);
+  ASSERT_EQ(d.engine->gate(SessionKind::Open), Gate::LinkSkipped);
   EXPECT_EQ(manual().outcome, SessionOutcome::Ok);
   EXPECT_EQ(d.store->state().linkSkipsLeft, 0);
   EXPECT_EQ(d.store->state().linkFailStreak, 0);
@@ -738,17 +749,6 @@ TEST_F(SyncEngineTest, DisconnectOnlineRotatesAwayTheTokenAndKeepsNothingOfTheNe
   for (const std::string& path : d.fs.paths()) {
     EXPECT_EQ(d.fs.content(path).find("toto_THROWN_AWAY"), std::string::npos) << path;
   }
-  EXPECT_EQ(d.outbox->depth(), 1u) << "re-pairing the same account finds its queue";
-}
-
-TEST_F(SyncEngineTest, DisconnectOfflineSaysTheServerStillHasIt) {
-  EXPECT_EQ(d.engine->disconnect(false), DisconnectResult::StillValidOnServer);
-  EXPECT_TRUE(d.http.log.empty());
-  EXPECT_FALSE(d.store->creds().paired());
-}
-
-TEST_F(SyncEngineTest, DisconnectWithTheServerUnreachableSaysTheServerStillHasIt) {
-  d.http.handler = nullptr;
 }
 
 TEST_F(SyncEngineTest, DisconnectSendsWhatIsQueuedWhileItStillCan) {
@@ -776,6 +776,17 @@ TEST_F(SyncEngineTest, DisconnectThatCouldNotSendKeepsTheQueueAndStillForgets) {
   };
   EXPECT_EQ(d.engine->disconnect(true), DisconnectResult::ServerInvalidated);
   EXPECT_FALSE(d.store->creds().paired());
+  EXPECT_EQ(d.outbox->depth(), 1u) << "re-pairing the same account finds its queue";
+}
+
+TEST_F(SyncEngineTest, DisconnectOfflineSaysTheServerStillHasIt) {
+  EXPECT_EQ(d.engine->disconnect(false), DisconnectResult::StillValidOnServer);
+  EXPECT_TRUE(d.http.log.empty());
+  EXPECT_FALSE(d.store->creds().paired());
+}
+
+TEST_F(SyncEngineTest, DisconnectWithTheServerUnreachableSaysTheServerStillHasIt) {
+  d.http.handler = nullptr;
   d.http.script.push_back(dropped());
   d.http.script.push_back(dropped());
   EXPECT_EQ(d.engine->disconnect(true), DisconnectResult::StillValidOnServer);
@@ -1126,17 +1137,6 @@ TEST_F(SyncEngineTest, AnOpenWithNothingToSendLeavesHistoryForLater) {
   EXPECT_TRUE(d.server.hasText("uno"));
 }
 
-  EXPECT_EQ(d.http.log.size(), 1u);
-  EXPECT_EQ(report.held, 1u);
-  EXPECT_FALSE(d.server.hasText("mine"));
-  // The connection stays for applyChoice().
-  EXPECT_EQ(d.http.disconnects, 0);
-}
-
-TEST_F(SyncEngineTest, FocusRequestIsReadOnlyAndExact) {
-  d.store->state().cursor = 7;
-  d.server.delivered = 7;
-  ResumeDecision decision;
 TEST_F(SyncEngineTest, FocusOtherAsksAndHoldsBackProgress) {
   ASSERT_EQ(d.appendRaw("mine", nullptr, kMd5A, 0, EventKind::Progress), Outbox::AppendResult::Ok);
   d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
@@ -1152,6 +1152,17 @@ TEST_F(SyncEngineTest, FocusOtherAsksAndHoldsBackProgress) {
   EXPECT_STREQ(decision.occurredAt, "2026-11-05T10:00:00.000Z");
   EXPECT_EQ(decision.warnings, 0);
   // The prompt does not wait on history, and nothing went up.
+  EXPECT_EQ(d.http.log.size(), 1u);
+  EXPECT_EQ(report.held, 1u);
+  EXPECT_FALSE(d.server.hasText("mine"));
+  // The connection stays for applyChoice().
+  EXPECT_EQ(d.http.disconnects, 0);
+}
+
+TEST_F(SyncEngineTest, FocusRequestIsReadOnlyAndExact) {
+  d.store->state().cursor = 7;
+  d.server.delivered = 7;
+  ResumeDecision decision;
   open(decision);
   JsonDocument doc;
   ASSERT_FALSE(deserializeJson(doc, d.http.log[0].body));
@@ -1205,7 +1216,6 @@ TEST_F(SyncEngineTest, InvalidFocusIsAReportedErrorWithNoPrompt) {
     EXPECT_STREQ(d.store->state().diag.code, "reading_head_invalid") << focus;
     // The hold stays: nothing stale goes up on an answer nobody can read.
     EXPECT_TRUE(d.store->state().holds.contains(Device::book().md5)) << focus;
-    // The rest of the session still runs.
     EXPECT_EQ(report.outcome, SessionOutcome::Ok) << focus;
   }
 }
@@ -1413,16 +1423,6 @@ TEST_F(SyncEngineTest, PendingSuggestionIsResolvedWithTheChoice) {
   EXPECT_EQ(ledger.suggestionId[0], '\0');
 }
 
-TEST_F(SyncEngineTest, SuggestionSurvivesAFailedResolveAndIsDismissedOnStay) {
-  const std::string suggestion = "40000000-0000-4000-8000-000000000002";
-  d.server.addFeedEvent(
-      10, remoteProgress(10, kOtherId, kMd5A, 60, "", "{\"suggestion\":{\"id\":\"" + suggestion + "\"}}"));
-  ASSERT_EQ(manual().outcome, SessionOutcome::Ok);
-  d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
-  ResumeDecision decision;
-  ASSERT_EQ(open(decision).outcome, SessionOutcome::AwaitingChoice);
-  d.http.log.clear();
-  d.http.handler = [this, suggestion](const RecordedRequest& r) {
 TEST_F(SyncEngineTest, SuggestionAnsweredWithTheRadioOffIsResolvedAfterwards) {
   const std::string suggestion = "40000000-0000-4000-8000-000000000003";
   d.server.addFeedEvent(
@@ -1462,6 +1462,16 @@ TEST_F(SyncEngineTest, ASuggestionAnsweredWithNoLinkIsResolvedAtTheNextOpen) {
   EXPECT_EQ(d.http.countPath("/api/sync/v2/suggestions/" + suggestion + "/dismiss"), 1u);
 }
 
+TEST_F(SyncEngineTest, SuggestionSurvivesAFailedResolveAndIsDismissedOnStay) {
+  const std::string suggestion = "40000000-0000-4000-8000-000000000002";
+  d.server.addFeedEvent(
+      10, remoteProgress(10, kOtherId, kMd5A, 60, "", "{\"suggestion\":{\"id\":\"" + suggestion + "\"}}"));
+  ASSERT_EQ(manual().outcome, SessionOutcome::Ok);
+  d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
+  ResumeDecision decision;
+  ASSERT_EQ(open(decision).outcome, SessionOutcome::AwaitingChoice);
+  d.http.log.clear();
+  d.http.handler = [this, suggestion](const RecordedRequest& r) {
     if (r.path.find("/suggestions/") != std::string::npos) return apiError(503, "sync_service_unavailable");
     return d.server.handle(r);
   };
@@ -1510,6 +1520,46 @@ TEST_F(SyncEngineTest, HeldBookWithNothingWaitingCostsNoRequest) {
   ASSERT_TRUE(d.engine->onBookOpened(Device::book()));
   EXPECT_EQ(manual().outcome, SessionOutcome::Ok);
   for (const auto& r : d.http.log) EXPECT_EQ(r.body.find("focus_only"), std::string::npos);
+}
+
+TEST_F(SyncEngineTest, AHoldWithNothingToHoldGivesItsPlaceBack) {
+  // Thirty-two books opened once and never read in are thirty-two places, and the thirty-third
+  // pushes out a hold that matters.
+  ASSERT_TRUE(d.engine->onBookOpened(Device::book(kMd5A)));
+  ASSERT_TRUE(d.engine->onBookOpened(Device::book(kMd5B)));
+  ASSERT_TRUE(d.engine->finalizeBook(d.finalizeInput(30)).progressQueued);  // kMd5A has something.
+  d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
+  EXPECT_EQ(manual().outcome, SessionOutcome::Ok);
+  EXPECT_FALSE(d.store->state().holds.contains(Device::book(kMd5B).md5));
+  EXPECT_TRUE(d.store->state().holds.contains(Device::book(kMd5A).md5)) << "a real position still waits for its answer";
+  d.crashAndBoot();
+  EXPECT_FALSE(d.store->state().holds.contains(Device::book(kMd5B).md5)) << "and it was saved";
+}
+
+TEST_F(SyncEngineTest, ReleasingHoldsLetsThePositionGoUp) {
+  // "Search at open" switched off: nobody is going to answer.
+  ASSERT_TRUE(d.engine->onBookOpened(Device::book()));
+  ASSERT_TRUE(d.engine->finalizeBook(d.finalizeInput(30)).progressQueued);
+  EXPECT_EQ(d.outbox->sendableDepth(&d.store->state().holds), 0u);
+  d.engine->releaseHolds();
+  EXPECT_EQ(d.outbox->sendableDepth(&d.store->state().holds), 1u);
+  d.crashAndBoot();
+  EXPECT_EQ(d.store->state().holds.size(), 0);
+}
+
+TEST_F(SyncEngineTest, UndoIsNotSpentUntilItIsTaken) {
+  BookLedger ledger;
+  ASSERT_TRUE(d.store->loadBook(Device::book(), ledger));
+  ledger.undo = Device::position(40);
+  ledger.hasUndo = true;
+  ASSERT_TRUE(d.store->saveBook(ledger));
+  Position out;
+  ASSERT_TRUE(d.engine->peekUndo(Device::book(), out));
+  EXPECT_EQ(out.pctMicro, 40000000u);
+  EXPECT_TRUE(d.engine->hasUndo(Device::book())) << "mapping it can still fail";
+  ASSERT_TRUE(d.engine->takeUndo(Device::book(), out));
+  EXPECT_FALSE(d.engine->hasUndo(Device::book()));
+  EXPECT_FALSE(d.engine->peekUndo(Device::book(), out));
 }
 
 TEST_F(SyncEngineTest, ManualFromTheDrawerCanPrompt) {
@@ -1599,6 +1649,36 @@ TEST_F(SyncEngineTest, NoRotationWithoutADateOrWithAnUntrustedClock) {
   };
   manual();
   EXPECT_EQ(d.http.countPath("/api/devices/self/credentials/rotate"), 0u);
+}
+
+TEST_F(SyncEngineTest, ALostRotationAnswerIsNotAskedForAgainInTheSameBreath) {
+  d.store->creds().renewAfterEpoch = kNow - 10;
+  d.http.handler = [this](const RecordedRequest& r) {
+    if (r.path == "/api/devices/self/credentials/rotate") return dropped();
+    return d.server.handle(r);
+  };
+  EXPECT_EQ(manual().outcome, SessionOutcome::Ok);
+  EXPECT_EQ(d.http.countPath("/api/devices/self/credentials/rotate"), 1u) << "the server rotates once";
+  EXPECT_STREQ(d.store->creds().token, "toto_SECRET_TOKEN_VALUE");
+}
+
+TEST_F(SyncEngineTest, ARotationThatWasAlreadySpentAsksToPairAgain) {
+  // The answer that carried the new token never arrived. The old one works until its grace ends,
+  // and nothing recovers it after that: better said now than discovered then.
+  d.store->creds().renewAfterEpoch = kNow - 10;
+  d.http.handler = [this](const RecordedRequest& r) {
+    if (r.path == "/api/devices/self/credentials/rotate") return apiError(409, "credential_already_rotated");
+    return d.server.handle(r);
+  };
+  EXPECT_EQ(manual().outcome, SessionOutcome::NeedsRelink);
+  EXPECT_TRUE(d.store->state().needsRelink);
+  EXPECT_STREQ(d.store->state().diag.code, "credential_already_rotated");
+  EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::NeedsRelink);
+  EXPECT_STREQ(d.store->creds().token, "toto_SECRET_TOKEN_VALUE") << "still good while it lasts";
+  d.http.log.clear();
+  d.store->state().needsRelink = false;
+  manual();
+  EXPECT_EQ(d.http.countPath("/api/devices/self/credentials/rotate"), 0u) << "asking again cannot help";
 }
 
 TEST_F(SyncEngineTest, FailedRotationKeepsTheOldToken) {
@@ -1766,36 +1846,6 @@ TEST_F(SyncEngineTest, EachKindGetsItsOwnBudget) {
 }
 
 // --- Bookkeeping ------------------------------------------------------------------
-TEST_F(SyncEngineTest, ALostRotationAnswerIsNotAskedForAgainInTheSameBreath) {
-  d.store->creds().renewAfterEpoch = kNow - 10;
-  d.http.handler = [this](const RecordedRequest& r) {
-    if (r.path == "/api/devices/self/credentials/rotate") return dropped();
-    return d.server.handle(r);
-  };
-  EXPECT_EQ(manual().outcome, SessionOutcome::Ok);
-  EXPECT_EQ(d.http.countPath("/api/devices/self/credentials/rotate"), 1u) << "the server rotates once";
-  EXPECT_STREQ(d.store->creds().token, "toto_SECRET_TOKEN_VALUE");
-}
-
-TEST_F(SyncEngineTest, ARotationThatWasAlreadySpentAsksToPairAgain) {
-  // The answer that carried the new token never arrived. The old one works until its grace ends,
-  // and nothing recovers it after that: better said now than discovered then.
-  d.store->creds().renewAfterEpoch = kNow - 10;
-  d.http.handler = [this](const RecordedRequest& r) {
-    if (r.path == "/api/devices/self/credentials/rotate") return apiError(409, "credential_already_rotated");
-    return d.server.handle(r);
-  };
-  EXPECT_EQ(manual().outcome, SessionOutcome::NeedsRelink);
-  EXPECT_TRUE(d.store->state().needsRelink);
-  EXPECT_STREQ(d.store->state().diag.code, "credential_already_rotated");
-  EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::NeedsRelink);
-  EXPECT_STREQ(d.store->creds().token, "toto_SECRET_TOKEN_VALUE") << "still good while it lasts";
-  d.http.log.clear();
-  d.store->state().needsRelink = false;
-  manual();
-  EXPECT_EQ(d.http.countPath("/api/devices/self/credentials/rotate"), 0u) << "asking again cannot help";
-}
-
 
 TEST_F(SyncEngineTest, StatusAndDiagnosticsAreStructured) {
   ASSERT_EQ(d.appendRaw("a"), Outbox::AppendResult::Ok);
