@@ -1,3 +1,10 @@
+## [v1.6.1-borges.3] - Unreleased
+
+### Fixed
+
+- A power cut on Home no longer boots into the book you had already left.
+- On a network that wants a login on a web page (a hotel's, a café's), Sync now says so and asks for another network, rather than saying the server could not be reached. The reader still cannot do that login.
+
 ## [v1.6.1-borges.2] - Unreleased
 
 ### Added

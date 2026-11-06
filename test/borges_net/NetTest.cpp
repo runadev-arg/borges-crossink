@@ -585,6 +585,58 @@ TEST(NetFailureRule12, CertificateDatesBlameTheClockOnlyWhenItCouldBeWrong) {
   EXPECT_FALSE(isClockFailure(TransportStage::Tls, wolfcode::kNoSigner));
 }
 
+TEST(NetFailureCaptivePortal, OnlyAFailureAPortalCouldCauseIsWorthAsking) {
+  EXPECT_TRUE(couldBeCaptivePortal(TransportStage::Connect, kCodeTcp));
+  EXPECT_TRUE(couldBeCaptivePortal(TransportStage::Tls, wolfcode::kNoSigner));
+  EXPECT_TRUE(couldBeCaptivePortal(TransportStage::Tls, wolfcode::kNameMismatch));
+  EXPECT_TRUE(couldBeCaptivePortal(TransportStage::Tls, wolfcode::kVerifyCert));
+  EXPECT_TRUE(couldBeCaptivePortal(TransportStage::Tls, -313));
+  EXPECT_FALSE(couldBeCaptivePortal(TransportStage::Tls, wolfcode::kAfterDate));
+  EXPECT_FALSE(couldBeCaptivePortal(TransportStage::Tls, wolfcode::kHashType));
+  EXPECT_FALSE(couldBeCaptivePortal(TransportStage::Tls, kCodeTimeout));
+  EXPECT_FALSE(couldBeCaptivePortal(TransportStage::Tls, kCodeLowMemory));
+  EXPECT_FALSE(couldBeCaptivePortal(TransportStage::Connect, kCodeLowMemory));
+  EXPECT_FALSE(couldBeCaptivePortal(TransportStage::Dns, kCodeNoAddress));
+  EXPECT_FALSE(couldBeCaptivePortal(TransportStage::ReadBody, kCodeLost));
+}
+
+TEST(NetFailureCaptivePortal, ItsOwnWord) {
+  EXPECT_STREQ(failureCode(TransportStage::Connect, kCodeCaptivePortal, TimePrecision::Exact), "captive_portal");
+  EXPECT_LT(strlen("captive_portal"), sizeof(NetDiag{}.failure));
+  EXPECT_EQ(heapAwareCode(TransportStage::Connect, kCodeCaptivePortal, 1024), kCodeCaptivePortal);
+}
+
+TEST(NetFailureCaptivePortal, OurOwnRedirectIsNotAPortal) {
+  const char* host = "borges.runadev.com";
+  EXPECT_FALSE(portalAnswered(301, "https://borges.runadev.com/", host));  // What production answers.
+  EXPECT_FALSE(portalAnswered(301, " https://borges.runadev.com/\r", host));
+  EXPECT_FALSE(portalAnswered(308, "HTTPS://Borges.RunaDev.com", host));
+  EXPECT_FALSE(portalAnswered(302, "https://borges.runadev.com:443/x?y=1", host));
+}
+
+TEST(NetFailureCaptivePortal, SomeoneElseAnsweringIs) {
+  const char* host = "borges.runadev.com";
+  EXPECT_TRUE(portalAnswered(200, nullptr, host));
+  EXPECT_TRUE(portalAnswered(204, "", host));
+  EXPECT_TRUE(portalAnswered(511, nullptr, host));
+  EXPECT_TRUE(portalAnswered(302, "http://login.hotel.example/?u=x", host));
+  EXPECT_TRUE(portalAnswered(302, "https://login.hotel.example/", host));
+  EXPECT_TRUE(portalAnswered(302, "/login", host));
+  EXPECT_TRUE(portalAnswered(302, "http://borges.runadev.com/", host));
+  EXPECT_TRUE(portalAnswered(302, "https://borges.runadev.com.evil.example/", host));
+  EXPECT_TRUE(portalAnswered(302, "https://borges.runadev", host));
+}
+
+TEST(NetFailureCaptivePortal, NoAnswerOrAnErrorSaysNothing) {
+  const char* host = "borges.runadev.com";
+  EXPECT_FALSE(portalAnswered(0, nullptr, host));
+  EXPECT_FALSE(portalAnswered(101, nullptr, host));
+  EXPECT_FALSE(portalAnswered(404, nullptr, host));
+  EXPECT_FALSE(portalAnswered(503, nullptr, host));
+  EXPECT_FALSE(portalAnswered(302, nullptr, host));
+  EXPECT_FALSE(portalAnswered(302, "  \r", host));
+}
+
 TEST(NetFailureRule12, HeapGate) {
   EXPECT_TRUE(heapAllowsHandshake(50 * 1024, 20 * 1024));
   EXPECT_FALSE(heapAllowsHandshake(50 * 1024 - 1, 20 * 1024));

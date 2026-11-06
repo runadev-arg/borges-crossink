@@ -808,6 +808,13 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
 void HomeActivity::onEnter() {
   Activity::onEnter();
 
+  // This flag said where the last sleep was. Left set, a power cut on Home would boot into the book
+  // the person had already left.
+  if (APP_STATE.lastSleepFromReader) {
+    APP_STATE.lastSleepFromReader = false;
+    APP_STATE.saveToFile();
+  }
+
   hasOpdsServers = OPDS_STORE.hasServers();
   if (UITheme::hasCoverGridHome()) {
     coverGridUi = makeUniqueNoThrow<CoverGridHomeUi>(renderer);

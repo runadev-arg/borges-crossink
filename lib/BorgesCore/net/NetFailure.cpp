@@ -53,6 +53,7 @@ const char* failureCode(const TransportStage stage, const int32_t code, const Ti
   if (stage == TransportStage::None && code == 0) return nullptr;
   if (stage == TransportStage::Aborted) return "aborted";
   if (code == kCodeBadUrl) return "bad_url";
+  if (code == kCodeCaptivePortal) return "captive_portal";
   if (code == kCodeLowMemory || code == wolfcode::kMemory || code == wolfcode::kMathMemory) return "low_memory";
   switch (stage) {
     case TransportStage::Dns:
@@ -86,6 +87,43 @@ const char* failureCode(const TransportStage stage, const int32_t code, const Ti
     default:
       return "connection_lost";
   }
+}
+
+bool couldBeCaptivePortal(const TransportStage stage, const int32_t code) {
+  if (stage == TransportStage::Connect) return code == kCodeTcp;
+  if (stage != TransportStage::Tls) return false;
+  switch (code) {
+    case wolfcode::kMemory:
+    case wolfcode::kMathMemory:
+    case wolfcode::kBeforeDate:
+    case wolfcode::kAfterDate:
+    case wolfcode::kHashType:
+    case kCodeLowMemory:
+    case kCodeAnchorLoad:
+    case kCodeTimeout:
+      return false;
+    default:
+      return true;
+  }
+}
+
+bool portalAnswered(const int status, const char* location, const char* host) {
+  if (status == 511 || (status >= 200 && status < 300)) return true;
+  if (status < 300 || status >= 400) return false;
+  if (location == nullptr) return false;
+  while (*location == ' ' || *location == '\t') ++location;
+  if (*location == '\0' || *location == '\r') return false;  // A redirect to nowhere says nothing.
+
+  const auto lower = [](const char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; };
+  const char* p = location;
+  for (const char* want = "https://"; *want; ++want, ++p) {
+    if (lower(*p) != *want) return true;
+  }
+  for (const char* want = host; *want; ++want, ++p) {
+    if (lower(*p) != lower(*want)) return true;
+  }
+  // "https://borges.runadev.com.evil.example" starts the same and is not us.
+  return !(*p == '\0' || *p == '\r' || *p == '/' || *p == ':' || *p == '?' || *p == '#');
 }
 
 bool isClockFailure(const TransportStage stage, const int32_t code) {

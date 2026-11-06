@@ -315,6 +315,12 @@ for an old credential in `/.borges`, which is refused directly and retired by ro
 Boots only as the X3/X4 `default` image. Other boards still compile because `src/borges` builds on
 SDK abstractions, but they are not validated.
 
+A network that holds everything back until a web login cannot be used: the device has no browser. A
+transport failure a portal could cause gets one plain HTTP `HEAD` to our own host, with no token, for
+at most 2.5 s. A page, a redirect anywhere but `https://<host>` or a 511 means the status screen says
+the network wants a login, instead of blaming the server. A portal that answers nothing on port 80, or
+that blocks DNS, still reads as the server being unreachable.
+
 Rendering highlights inside the page is out of scope, both this device's and other readers'. Other
 readers' are reachable from the reader drawer (section 7), and that list is read-only: nothing can be
 edited, deleted or adopted from it, and it has no touch handling beyond what the drawer has.

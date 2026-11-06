@@ -1,6 +1,7 @@
 #include "BorgesHttp.h"
 
 #include <Arduino.h>
+#include <Logging.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -11,6 +12,10 @@
 #include "BorgesTrustAnchors.h"
 #include "net/NetFailure.h"
 #include "net/NetRecords.h"
+#if !defined(SIMULATOR) && !defined(BORGES_NET_PROBE)
+#include <WiFiClient.h>
+#include <strings.h>
+#endif
 
 #if defined(FREEINK_NET_WOLFSSL)
 #include <wolfssl/error-ssl.h>
@@ -55,6 +60,66 @@ void copyHeader(const freeink::SecureHttpClient& http, const char* name, char* o
   const std::string value = http.getHeader(name);
   strncpy(out, value.c_str(), cap - 1);
   out[cap - 1] = '\0';
+}
+
+// Asks port 80 for our own host, with no token and nothing of the person's in it: a failed handshake
+// looks the same whether the server is down or a hotel's network is holding everything back, and
+// only the second one has something the person can do about it.
+bool networkAsksForLogin(const uint8_t ip[4], const char* host, ICancel& abort) {
+#if defined(SIMULATOR)
+  (void)ip;
+  (void)host;
+  (void)abort;
+  return getenv("BORGES_SIM_PORTAL") != nullptr;
+#elif defined(BORGES_NET_PROBE)
+  (void)ip;
+  (void)host;
+  (void)abort;
+  return false;
+#else
+  constexpr uint32_t kBudgetMs = 2500;
+  constexpr size_t kMaxHeaderBytes = 2048;
+  const uint32_t deadline = millis() + kBudgetMs;
+  WiFiClient client;
+  client.setConnectionTimeout(kBudgetMs);
+  if (!client.connect(IPAddress(ip[0], ip[1], ip[2], ip[3]), 80)) return false;
+
+  std::string request = "HEAD / HTTP/1.1\r\nHost: ";
+  request += host;
+  request += "\r\nUser-Agent: Borges\r\nConnection: close\r\n\r\n";
+  int status = 0;
+  char location[96] = {0};
+  if (client.write(reinterpret_cast<const uint8_t*>(request.data()), request.size()) == request.size()) {
+    char line[112];
+    size_t lineLen = 0;
+    size_t total = 0;
+    while (total < kMaxHeaderBytes && static_cast<int32_t>(millis() - deadline) < 0 && !abort.cancelled()) {
+      const int c = client.read();
+      if (c < 0) {
+        if (!client.connected() && client.available() == 0) break;
+        delay(5);
+        continue;
+      }
+      ++total;
+      if (c != '\n') {
+        if (lineLen < sizeof(line) - 1) line[lineLen++] = static_cast<char>(c);
+        continue;
+      }
+      line[lineLen] = '\0';
+      if (status == 0) {
+        if (strncmp(line, "HTTP/1.", 7) != 0 || lineLen < 12) break;
+        status = atoi(line + 9);
+      } else if (lineLen <= 1) {
+        break;  // End of headers.
+      } else if (strncasecmp(line, "location:", 9) == 0) {
+        strncpy(location, line + 9, sizeof(location) - 1);
+      }
+      lineLen = 0;
+    }
+  }
+  client.stop();
+  return portalAnswered(status, location, host);
+#endif
 }
 
 }  // namespace
@@ -128,10 +193,23 @@ void BorgesHttp::perform(const HttpRequest& request, IHttpSink& sink, ICancel& a
   };
   const auto shouldAbort = [&abort]() { return abort.cancelled(); };
 
+  // Whichever way the handshake fails, the heap has its buffers back only after end(). A connection
+  // being reused has no address list, and its next request starts over with one.
+  const auto finishHandshake = [&](const TransportStage stage, const int32_t code) {
+    if (fresh && candidates->count > 0 && couldBeCaptivePortal(stage, code) && !abort.cancelled()) {
+      http_.end();
+      if (ESP.getFreeHeap() >= kTlsFailureLowHeap && networkAsksForLogin(candidates->items[0].ip, host, abort)) {
+        LOG_INF("BORGES", "The network asks for a web login first");
+        return finish(TransportStage::Connect, kCodeCaptivePortal);
+      }
+    }
+    return finish(stage, code);
+  };
+
   uint8_t next = 0;
   for (;;) {
     if (fresh) {
-      if (next >= candidates->count) return finish(TransportStage::Connect, kCodeTcp);
+      if (next >= candidates->count) return finishHandshake(TransportStage::Connect, kCodeTcp);
       const uint8_t* ip = candidates->items[next].ip;
       http_.setServerAddress(IPAddress(ip[0], ip[1], ip[2], ip[3]));
     }
@@ -198,7 +276,7 @@ void BorgesHttp::perform(const HttpRequest& request, IHttpSink& sink, ICancel& a
       clockRepairUsed_ = true;
       if (clock_->repair(kClockRepairBudgetMs, abort, code == wolfcode::kAfterDate)) continue;
     }
-    return finish(TransportStage::Tls, code);
+    return finishHandshake(TransportStage::Tls, code);
   }
 }
 

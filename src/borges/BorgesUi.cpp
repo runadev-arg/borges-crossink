@@ -255,6 +255,7 @@ StrId describeDiagnostics(const Diagnostics& diagnostics) {
   if (strcmp(code, "transport") == 0) {
     const char* failure =
         net::failureCode(diagnostics.transportStage, diagnostics.transportCode, TimePrecision::Unknown);
+    if (failure && strcmp(failure, "captive_portal") == 0) return StrId::STR_BORGES_ERR_PORTAL;
     if (failure && strcmp(failure, "tls_clock") == 0) return StrId::STR_BORGES_ERR_CLOCK;
     if (failure && strcmp(failure, "tls_timeout") == 0) return StrId::STR_BORGES_ERR_TIMEOUT;
     return StrId::STR_BORGES_ERR_TRANSPORT;

@@ -25,16 +25,26 @@ constexpr int32_t kVerifyCert = -329;    // VERIFY_CERT_ERROR
 }  // namespace wolfcode
 
 // Failures that come from this layer. Far from any wolfSSL or socket value.
-constexpr int32_t kCodeLowMemory = -9001;   // The heap gate refused the handshake.
-constexpr int32_t kCodeNoAddress = -9002;   // The DNS chain produced nothing.
-constexpr int32_t kCodeTcp = -9003;         // No candidate accepted the connection.
-constexpr int32_t kCodeTimeout = -9004;     // The handshake ran out of time.
-constexpr int32_t kCodeAnchorLoad = -9005;  // A trust anchor failed to load.
-constexpr int32_t kCodeBadUrl = -9006;      // The URL did not parse.
-constexpr int32_t kCodeLost = -9007;        // The connection died mid-exchange.
+constexpr int32_t kCodeLowMemory = -9001;      // The heap gate refused the handshake.
+constexpr int32_t kCodeNoAddress = -9002;      // The DNS chain produced nothing.
+constexpr int32_t kCodeTcp = -9003;            // No candidate accepted the connection.
+constexpr int32_t kCodeTimeout = -9004;        // The handshake ran out of time.
+constexpr int32_t kCodeAnchorLoad = -9005;     // A trust anchor failed to load.
+constexpr int32_t kCodeBadUrl = -9006;         // The URL did not parse.
+constexpr int32_t kCodeLost = -9007;           // The connection died mid-exchange.
+constexpr int32_t kCodeCaptivePortal = -9008;  // The network wants a login on a web page first.
+
+// A failure a network holding everything back until a web login would also cause. Only these are
+// worth a plain HTTP question: a date or a cipher says nothing about who is answering.
+bool couldBeCaptivePortal(TransportStage stage, int32_t code);
+
+// What a plain HTTP request to our own host answered, read as: is someone else answering? Ours only
+// ever redirects to itself over https. A page, a redirect anywhere else or a 511 is the network's.
+// `location` may be null or empty, and is the raw header value.
+bool portalAnswered(int status, const char* location, const char* host);
 
 // dns_failed, tcp_failed, low_memory, tls_untrusted, tls_name, tls_clock, tls_anchor,
-// tls_unsupported, tls_timeout, tls_failed, connection_lost, aborted, bad_url.
+// tls_unsupported, tls_timeout, tls_failed, connection_lost, aborted, bad_url, captive_portal.
 // A certificate outside its dates means tls_clock unless the clock is exact, when the
 // certificate really is out of date and it means tls_untrusted. Null for no failure.
 const char* failureCode(TransportStage stage, int32_t code, TimePrecision clock);
