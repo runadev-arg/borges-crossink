@@ -7,59 +7,42 @@ title: Pasar el X4 a CrossInk Borges
 Para un Xteink X4 con Borges 1.6.0-borges.1. Lo probado en esta PC está marcado
 **[PC]**. Ningún paso se probó todavía en un lector real.
 
-## Si después querés volver al firmware viejo
-
-El vínculo que trae el firmware viejo está en la tarjeta en una forma que cualquiera puede leer. Por
-eso, en la primera sincronización, este firmware lo cambia por uno nuevo y el viejo deja de servir.
-Volver al firmware viejo funciona, pero hay que vincular el lector otra vez.
-
 ## Qué pasa con tus datos
 
-El firmware viejo guarda todo en `/.borges`. El nuevo guarda en `/.crosspoint` y del
-viejo sólo lee el vínculo con la cuenta. Nada se borra, pero el nuevo arranca así:
+Al primer arranque, el firmware nuevo copia lo tuyo desde `/.borges` a `/.crosspoint`. No borra ni
+cambia nada en `/.borges`, así que podés volver atrás. Si hay muchos libros, muestra «Un momento…».
 
 | Dato | Después de pasar |
 |---|---|
 | Vínculo con Borges | Sigue, sin volver a vincular |
 | Libros y `/.fonts` | Siguen |
-| Wi-Fi, idioma y ajustes | Vacíos, y la interfaz arranca en inglés |
-| Libros recientes | Vacíos |
-| Posición de lectura | En el lector se pierde; vuelve la que ya estaba en el servidor |
-| Marcadores locales | No se ven, siguen en `/.borges/bookmarks` |
-| Cola sin enviar | No se envía, sigue en `/.borges/borges/outbox` |
+| Wi-Fi, idioma y ajustes | Siguen |
+| Libros recientes | Siguen |
+| Posición de lectura | Sigue |
+| Marcadores | Siguen, sin volver a publicar los que el servidor ya tenía |
+| Eventos sin enviar del firmware viejo | **No se envían**: las posiciones se regeneran, las sesiones de esa cola se pierden |
 | Índices de los libros | Se rehacen al abrir cada libro: tarda la primera vez |
+
+La interfaz viene en seis idiomas: castellano, inglés, portugués de Brasil, francés, alemán e
+italiano. Si el lector estaba en otro, queda en inglés.
+
+Si después querés volver al firmware viejo, se puede, pero hay que vincular el lector otra vez: el
+vínculo viejo estaba en la tarjeta en una forma que cualquiera puede leer, así que este firmware lo
+cambia por uno nuevo en la primera sincronización.
 
 ## Antes de empezar
 
 1. Con el firmware viejo y Wi-Fi: **Ajustes > Sistema > Borges > Sincronizar ahora**. Seguí hasta
    que diga `Salida: 0`.
-2. Copiá la carpeta `/.borges` de la tarjeta a la PC.
-3. Usá el `.bin` de una release, no uno de desarrollo. Si su versión dice `-dev+`, es de
+2. Copiá la carpeta `/.borges` de la tarjeta a la PC. Es tu copia de seguridad.
+3. Usá el `.bin` de la release, no uno de desarrollo. Si su versión dice `-dev+`, es de
    desarrollo.
-
-## Opcional: conservar Wi-Fi, idioma y posición
-
-Hacelo con la tarjeta en la PC y **antes** del primer arranque del firmware nuevo.
-Salió de leer el código de los dos firmwares; no se probó en un lector.
-
-```powershell
-$sd = 'E:'   # la letra de tu tarjeta
-New-Item -ItemType Directory -Force "$sd\.crosspoint" | Out-Null
-foreach ($f in 'settings.json','wifi.json','recent.json') {
-  if (Test-Path "$sd\.borges\$f") { Copy-Item "$sd\.borges\$f" "$sd\.crosspoint\$f" }
-}
-Get-ChildItem "$sd\.borges" -Directory -Force | Where-Object { $_.Name -match '^(epub|xtc|txt)_' } | ForEach-Object {
-  if (Test-Path "$($_.FullName)\progress.bin") {
-    New-Item -ItemType Directory -Force "$sd\.crosspoint\$($_.Name)" | Out-Null
-    Copy-Item "$($_.FullName)\progress.bin" "$sd\.crosspoint\$($_.Name)\progress.bin"
-  }
-}
-```
 
 ## Camino 1: por tarjeta SD (sin PC conectada)
 
 1. Copiá `firmware-x3-x4-v<versión>.bin` a la raíz de la tarjeta.
-2. En el lector: **Ajustes > Sistema > SD Card Firmware Update**.
+2. En el lector: **Ajustes > Sistema > Actualizar firmware por tarjeta SD** (si está en inglés,
+   *SD Card Firmware Update*).
 3. Elegí el archivo y confirmá. Al terminar, reinicia solo.
 
 Si el menú no abre: apagado, mantené **Arriba** y apretá **Encendido** para ir directo
@@ -97,8 +80,8 @@ catálogo de CrossInk. Borges no está ahí. Usá el camino 2.
 
 ## Camino 4: actualización por Wi-Fi
 
-Todavía no. El firmware viejo sólo acepta descargas de `runadev-arg/borges-firmware` y
-lo que anuncie el manifiesto de `borges.runadev.com`, y ninguno ofrece esta versión.
+Desde el firmware viejo, no: sólo acepta descargas de `runadev-arg/borges-firmware` y lo que
+anuncie el manifiesto de `borges.runadev.com`, y ninguno ofrece esta versión.
 
 Una vez instalado, el firmware nuevo busca en **Ajustes > Sistema > Buscar actualización**
 la última release de `runadev-arg/borges-crossink`. Necesita unos 6,5 MB libres en la
@@ -112,7 +95,7 @@ tarjeta.
 2. Instalalo igual que antes: por SD con **Ajustes > Sistema > Actualizar firmware por
    tarjeta SD**, o por USB con `-Firmware borges-x4.bin`.
 
-Vuelve con lo que tenía `/.borges`. Lo leído en el firmware nuevo queda en el servidor si
+Vuelve con lo que tenía `/.borges`, sin el vínculo. Lo leído en el firmware nuevo queda en el servidor si
 se sincronizó, y en `/.crosspoint` si no. No borres `/.borges` mientras quieras poder
 volver: si falta, el firmware viejo renombra `/.crosspoint` a `/.borges` y no entiende
 las contraseñas de Wi-Fi guardadas por el nuevo.
