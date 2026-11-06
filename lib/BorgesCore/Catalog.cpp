@@ -118,9 +118,12 @@ bool isReservedStem(const char* name, size_t len) {
   while (stem < len && name[stem] != '.') ++stem;
   if (stem != 3 && stem != 4) return false;
   char upper[5] = {0};
-  for (size_t i = 0; i < stem; ++i) upper[i] = name[i] >= 'a' && name[i] <= 'z' ? static_cast<char>(name[i] - 'a' + 'A') : name[i];
-  if (stem == 4) return (memcmp(upper, "COM", 3) == 0 || memcmp(upper, "LPT", 3) == 0) && upper[3] >= '1' && upper[3] <= '9';
-  return memcmp(upper, "CON", 3) == 0 || memcmp(upper, "PRN", 3) == 0 || memcmp(upper, "AUX", 3) == 0 || memcmp(upper, "NUL", 3) == 0;
+  for (size_t i = 0; i < stem; ++i)
+    upper[i] = name[i] >= 'a' && name[i] <= 'z' ? static_cast<char>(name[i] - 'a' + 'A') : name[i];
+  if (stem == 4)
+    return (memcmp(upper, "COM", 3) == 0 || memcmp(upper, "LPT", 3) == 0) && upper[3] >= '1' && upper[3] <= '9';
+  return memcmp(upper, "CON", 3) == 0 || memcmp(upper, "PRN", 3) == 0 || memcmp(upper, "AUX", 3) == 0 ||
+         memcmp(upper, "NUL", 3) == 0;
 }
 
 }  // namespace
@@ -517,7 +520,8 @@ bool Catalog::isOnSd(const CatalogEntry& entry, const char* dir) {
   return locate(entry, dir, name, sizeof(name)) == Local::Here;
 }
 
-DownloadResult Catalog::download(const CatalogEntry& entry, const char* dir, IDownloadProgress* progress, uint32_t budgetMs) {
+DownloadResult Catalog::download(const CatalogEntry& entry, const char* dir, IDownloadProgress* progress,
+                                 uint32_t budgetMs) {
   CatalogEntry copy = entry;
   return download(copy, dir, progress, budgetMs);
 }
@@ -656,7 +660,8 @@ DownloadResult Catalog::download(CatalogEntry& entry, const char* dir, IDownload
   uint8_t headerHash[32];
   const bool hasManifest = entry.sha256[0] && hexDecode(entry.sha256, manifestHash, 32);
   const bool hasHeader = r.contentSha256[0] && hexDecode(r.contentSha256, headerHash, 32);
-  bool agreed = !(r.contentSha256[0] && !hasHeader) && !(hasManifest && hasHeader && memcmp(manifestHash, headerHash, 32) != 0);
+  bool agreed =
+      !(r.contentSha256[0] && !hasHeader) && !(hasManifest && hasHeader && memcmp(manifestHash, headerHash, 32) != 0);
   int64_t actualSize = -1;
   {
     File part(fs_, partPath, IFs::Mode::Read);
@@ -665,7 +670,8 @@ DownloadResult Catalog::download(CatalogEntry& entry, const char* dir, IDownload
   if (actualSize < 0) return DownloadResult::LocalError;
   BookId actual;
   if (!partialMd5(fs_, partPath, actual)) return DownloadResult::LocalError;
-  if (agreed) agreed = static_cast<uint64_t>(actualSize) == entry.fileSize && memcmp(actual.md5, entry.book.md5, 16) == 0;
+  if (agreed)
+    agreed = static_cast<uint64_t>(actualSize) == entry.fileSize && memcmp(actual.md5, entry.book.md5, 16) == 0;
   if (agreed && (hasManifest || hasHeader)) {
     // The partial MD5 samples a few KiB. This is what catches a byte outside them.
     switch (sha256Matches(partPath, hasManifest ? manifestHash : headerHash)) {

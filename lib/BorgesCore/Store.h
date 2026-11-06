@@ -95,16 +95,16 @@ struct SyncState {
   uint64_t committedCursor = 0;  // What the server has been told about it.
   uint16_t accountEpoch = 0;
   uint8_t failures = 0;
-  bool needsRelink = false;      // 401/403: stop automatic sessions, keep the queue.
-  uint32_t capsClientHash = 0;   // Non-zero: capabilities verified for this client_version.
-  uint8_t linkFailStreak = 0;    // Automatic sessions in a row that never got a link.
-  uint8_t linkSkipsLeft = 0;     // Automatic attempts to skip before trying the radio again.
+  bool needsRelink = false;     // 401/403: stop automatic sessions, keep the queue.
+  uint32_t capsClientHash = 0;  // Non-zero: capabilities verified for this client_version.
+  uint8_t linkFailStreak = 0;   // Automatic sessions in a row that never got a link.
+  uint8_t linkSkipsLeft = 0;    // Automatic attempts to skip before trying the radio again.
   int64_t nextAttemptEpoch = 0;
-  int64_t anchorEpoch = 0;       // Last server_time seen.
+  int64_t anchorEpoch = 0;  // Last server_time seen.
   int64_t lastSuccessEpoch = 0;
-  uint32_t skippedEvents = 0;    // Pulled events skipped for exceeding the parse budget.
+  uint32_t skippedEvents = 0;  // Pulled events skipped for exceeding the parse budget.
   uint64_t lastSkippedSeq = 0;
-  uint32_t rejectedEvents = 0;   // Events the server rejected.
+  uint32_t rejectedEvents = 0;  // Events the server rejected.
   char lastRejection[40] = {0};
   Diagnostics diag;
   HoldSet holds;
@@ -125,13 +125,13 @@ struct BookLedger {
   static constexpr uint8_t kMaxChoices = 40;
 
   BookId id;
-  RemoteHead head;                // Latest progress of another device seen in pulls.
+  RemoteHead head;  // Latest progress of another device seen in pulls.
   bool hasUndo = false;
   Position undo;
-  bool hasFinalized = false;      // lastFinalized and lastTurnEpoch are meaningful.
+  bool hasFinalized = false;  // lastFinalized and lastTurnEpoch are meaningful.
   Position lastFinalized;
   int64_t lastTurnEpoch = 0;
-  char suggestionId[40] = {0};    // Open suggestion for this book.
+  char suggestionId[40] = {0};                                 // Open suggestion for this book.
   SuggestionAction suggestionAction = SuggestionAction::None;  // Decided, not yet told to the server.
   uint8_t choiceCount = 0;
   uint64_t choices[kMaxChoices] = {0};  // Fingerprints of answered events, oldest first.

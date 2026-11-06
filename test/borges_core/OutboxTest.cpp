@@ -9,10 +9,13 @@ class OutboxTest : public testing::Test {
  protected:
   void SetUp() override { d.boot(); }
   Device d;
-  std::string log() const { return std::string(kOutboxDir) + "/outbox." + std::to_string(d.outbox->generation()) + ".log"; }
+  std::string log() const {
+    return std::string(kOutboxDir) + "/outbox." + std::to_string(d.outbox->generation()) + ".log";
+  }
 };
 
-std::vector<std::string> selectIds(Outbox& outbox, size_t maxEvents, size_t maxBytes, const IHoldFilter* holds = nullptr) {
+std::vector<std::string> selectIds(Outbox& outbox, size_t maxEvents, size_t maxBytes,
+                                   const IHoldFilter* holds = nullptr) {
   Batch batch;
   outbox.selectBatch(maxEvents, maxBytes, holds, nullptr, 0, batch);
   std::vector<std::string> ids;

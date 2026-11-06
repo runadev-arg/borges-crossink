@@ -73,12 +73,12 @@ std::string credV1(const std::string& token, const std::string& account, const s
   str(xored);
   str(account);
   raw.append(16, '\0');  // expires, renew
-  str("");                // serverIp
-  str("");                // serverIpHost
-  str("");                // requestId
-  str("");                // nonce
-  str("");                // userCode
-  str("");                // verificationUrl
+  str("");               // serverIp
+  str("");               // serverIpHost
+  str("");               // requestId
+  str("");               // nonce
+  str("");               // userCode
+  str("");               // verificationUrl
   raw.append(12, '\0');  // interval, pairing expiry
   return raw;
 }
@@ -565,7 +565,8 @@ TEST(Store, ABaseUrlOnTheCardCannotMoveTheServer) {
 
 TEST(LegacyImport, ABaseUrlInTheOldFileIsNeverBelieved) {
   MemFs fs;
-  fs.put(kLegacyCredentialPath, std::string("{\"baseUrl\":\"https://evil.example\",\"deviceId\":\"") + kSelfId + "\",\"token\":\"t\"}");
+  fs.put(kLegacyCredentialPath,
+         std::string("{\"baseUrl\":\"https://evil.example\",\"deviceId\":\"") + kSelfId + "\",\"token\":\"t\"}");
   Store store(fs, testKey(), 6, testBox());
   ASSERT_TRUE(store.begin());
   EXPECT_TRUE(store.creds().paired());

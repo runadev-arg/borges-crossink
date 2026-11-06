@@ -71,8 +71,7 @@ TEST(NetFailure, AVerificationFailureOnALowHeapIsLowMemory) {
 TEST(DnsCodec, QueryIsLengthPrefixedAndWellFormed) {
   uint8_t out[kDnsMaxQuery];
   const size_t n = buildDnsQuery("a.bc", 0x1234, out, sizeof(out));
-  const uint8_t expected[] = {0,   22,  0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0,
-                              1,   'a', 2,    'b',  'c', 0, 0, 1, 0, 1};
+  const uint8_t expected[] = {0, 22, 0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 'a', 2, 'b', 'c', 0, 0, 1, 0, 1};
   ASSERT_EQ(n, sizeof(expected));
   EXPECT_EQ(memcmp(out, expected, n), 0);
 }
@@ -304,9 +303,10 @@ TEST(HttpDate, ParsesImfFixdate) {
 
 TEST(HttpDate, RefusesEverythingElse) {
   int64_t e = 42;
-  for (const char* bad : {"", "Sunday, 06-Nov-94 08:49:37 GMT", "Sun Nov  6 08:49:37 1994", "Sun, 06 Nov 1994 08:49:37 UTC",
-                          "Mon, 06 Nov 1994 08:49:37 GMT", "Sun, 31 Feb 2026 08:49:37 GMT", "Thu, 29 Feb 2023 00:00:00 GMT",
-                          "Sun, 06 Foo 1994 08:49:37 GMT", "Sun, 06 Nov 1994 25:49:37 GMT", "Sun, 06 Nov 19x4 08:49:37 GMT"}) {
+  for (const char* bad :
+       {"", "Sunday, 06-Nov-94 08:49:37 GMT", "Sun Nov  6 08:49:37 1994", "Sun, 06 Nov 1994 08:49:37 UTC",
+        "Mon, 06 Nov 1994 08:49:37 GMT", "Sun, 31 Feb 2026 08:49:37 GMT", "Thu, 29 Feb 2023 00:00:00 GMT",
+        "Sun, 06 Foo 1994 08:49:37 GMT", "Sun, 06 Nov 1994 25:49:37 GMT", "Sun, 06 Nov 19x4 08:49:37 GMT"}) {
     EXPECT_FALSE(parse(bad, e)) << bad;
   }
   EXPECT_EQ(e, 42);

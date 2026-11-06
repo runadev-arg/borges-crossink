@@ -9,7 +9,8 @@ constexpr const char* kRequestId = "60000000-0000-4000-8000-000000000001";
 
 const char* kRequestReply =
     "{\"request_id\":\"60000000-0000-4000-8000-000000000001\",\"user_code\":\"ABCD-EFGH\","
-    "\"verification_url\":\"/devices/pair\",\"expires_at\":\"2026-11-05T12:05:00.000Z\",\"expires_in\":300,\"interval\":5}";
+    "\"verification_url\":\"/devices/"
+    "pair\",\"expires_at\":\"2026-11-05T12:05:00.000Z\",\"expires_in\":300,\"interval\":5}";
 
 std::string statusReply(const std::string& status) {
   return "{\"request_id\":\"" + std::string(kRequestId) + "\",\"status\":\"" + status +
@@ -17,10 +18,15 @@ std::string statusReply(const std::string& status) {
 }
 
 std::string claimReply(const std::string& account = "account-1") {
-  return "{\"request_id\":\"" + std::string(kRequestId) +
-         "\",\"status\":\"claimed\",\"account\":{\"id\":\"" + account + "\",\"username\":\"toto\"},"
-         "\"device\":{\"id\":\"" + kSelfId + "\",\"name\":\"X4\",\"platform\":\"crossink-x4\",\"external_id\":\"x4-1\",\"status\":\"active\",\"capabilities\":{}},"
-         "\"credential\":{\"token\":\"toto_PAIRED_TOKEN\",\"id\":\"c\",\"scopes\":[\"sync:v2\"],\"username\":\"" + kSelfId + "\",\"token_prefix\":\"toto_\",\"created_at\":\"x\"},"
+  return "{\"request_id\":\"" + std::string(kRequestId) + "\",\"status\":\"claimed\",\"account\":{\"id\":\"" + account +
+         "\",\"username\":\"toto\"},"
+         "\"device\":{\"id\":\"" +
+         kSelfId +
+         "\",\"name\":\"X4\",\"platform\":\"crossink-x4\",\"external_id\":\"x4-1\",\"status\":\"active\","
+         "\"capabilities\":{}},"
+         "\"credential\":{\"token\":\"toto_PAIRED_TOKEN\",\"id\":\"c\",\"scopes\":[\"sync:v2\"],\"username\":\"" +
+         kSelfId +
+         "\",\"token_prefix\":\"toto_\",\"created_at\":\"x\"},"
          "\"claimed_at\":\"x\"}";
 }
 
@@ -52,8 +58,9 @@ class PairingFlowTest : public testing::Test {
 namespace {
 
 std::string claimByUsername(const std::string& username) {
-  return "{\"request_id\":\"" + std::string(kRequestId) + "\",\"status\":\"claimed\",\"account\":{\"username\":\"" + username +
-         "\"},\"device\":{\"id\":\"" + kSelfId + "\"},\"credential\":{\"token\":\"toto_T\",\"username\":\"" + kSelfId + "\"}}";
+  return "{\"request_id\":\"" + std::string(kRequestId) + "\",\"status\":\"claimed\",\"account\":{\"username\":\"" +
+         username + "\"},\"device\":{\"id\":\"" + kSelfId + "\"},\"credential\":{\"token\":\"toto_T\",\"username\":\"" +
+         kSelfId + "\"}}";
 }
 
 }  // namespace
@@ -186,7 +193,8 @@ TEST_F(PairingFlowTest, ShowsTheCodeAndTheQrUrl) {
 
 TEST_F(PairingFlowTest, AVerificationUrlFromTheServerCannotRedirectTheQr) {
   d.http.script.push_back(jsonReply(201, "{\"request_id\":\"" + std::string(kRequestId) +
-                                             "\",\"user_code\":\"ABCD-EFGH\",\"verification_url\":\"https://evil.example/pair\",\"expires_in\":300,\"interval\":5}"));
+                                             "\",\"user_code\":\"ABCD-EFGH\",\"verification_url\":\"https://"
+                                             "evil.example/pair\",\"expires_in\":300,\"interval\":5}"));
   ASSERT_TRUE(flow->start());
   EXPECT_STREQ(flow->qrUrl(), "https://borges.runadev.com/devices/pair?code=ABCD-EFGH");
 }
@@ -209,12 +217,14 @@ TEST_F(PairingFlowTest, PollsAtTheServersIntervalAndNoFaster) {
 }
 
 TEST_F(PairingFlowTest, IntervalIsClamped) {
-  d.http.script.push_back(jsonReply(201, "{\"request_id\":\"" + std::string(kRequestId) + "\",\"user_code\":\"ABCD-EFGH\",\"expires_in\":300,\"interval\":0}"));
+  d.http.script.push_back(jsonReply(201, "{\"request_id\":\"" + std::string(kRequestId) +
+                                             "\",\"user_code\":\"ABCD-EFGH\",\"expires_in\":300,\"interval\":0}"));
   ASSERT_TRUE(flow->start());
   EXPECT_EQ(flow->intervalSec(), 3u);
   flow->cancelFlow();
   d.store->creds().pairing = PendingPairing{};
-  d.http.script.push_back(jsonReply(201, "{\"request_id\":\"" + std::string(kRequestId) + "\",\"user_code\":\"ABCD-EFGH\",\"expires_in\":300,\"interval\":99999}"));
+  d.http.script.push_back(jsonReply(201, "{\"request_id\":\"" + std::string(kRequestId) +
+                                             "\",\"user_code\":\"ABCD-EFGH\",\"expires_in\":300,\"interval\":99999}"));
   ASSERT_TRUE(flow->start());
   EXPECT_EQ(flow->intervalSec(), 60u);
 }
@@ -264,7 +274,8 @@ TEST_F(PairingFlowTest, StatusAndClaimCarryTheProof) {
   ASSERT_FALSE(deserializeJson(first, d.http.log[0].body));
   const std::string nonce = first["device_nonce"].as<std::string>();
   d.http.handler = [](const RecordedRequest& r) {
-    return r.path == "/api/devices/pairing/status" ? jsonReply(200, statusReply("approved")) : jsonReply(200, claimReply());
+    return r.path == "/api/devices/pairing/status" ? jsonReply(200, statusReply("approved"))
+                                                   : jsonReply(200, claimReply());
   };
   advance(5);
   flow->step();

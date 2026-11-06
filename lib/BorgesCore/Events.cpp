@@ -93,8 +93,8 @@ int32_t referencePage(uint32_t pctMicro, int32_t totalPages) {
   return page < 1 ? 1 : static_cast<int32_t>(page);
 }
 
-bool writeAnnotation(JsonWriter& w, const BookRef& book, const EventTime& time, const ClipKey& key,
-                     const ClipDetail& d, const uint8_t syncId[16]) {
+bool writeAnnotation(JsonWriter& w, const BookRef& book, const EventTime& time, const ClipKey& key, const ClipDetail& d,
+                     const uint8_t syncId[16]) {
   const int32_t page = d.page >= 0 ? d.page : d.hasPct ? referencePage(d.pctMicro, book.totalPages) : -1;
   // A bookmark has no selection to be without: annotationadapter.lua:annotationText.
   char bookmarkText[32];
@@ -323,7 +323,8 @@ void parsePayload(JsonScanner& scan, RemoteEvent& out) {
       if (scan.readInt(number) && number >= 1 && number <= 0x7FFFFFFF) out.totalPages = static_cast<int32_t>(number);
     } else if (strcmp(key, "xpointer") == 0) {
       bool truncated = false;
-      out.xpointerUsable = scan.readString(out.xpointer, sizeof(out.xpointer), &truncated) && !truncated && out.xpointer[0];
+      out.xpointerUsable =
+          scan.readString(out.xpointer, sizeof(out.xpointer), &truncated) && !truncated && out.xpointer[0];
       if (!out.xpointerUsable) out.xpointer[0] = '\0';
     } else if (strcmp(key, "explicit_jump") == 0) {
       scan.readBool(out.explicitJump);

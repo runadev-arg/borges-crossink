@@ -138,7 +138,9 @@ TEST(Codec, JsonWriterEscapesAndCounts) {
   write(w);
   ASSERT_TRUE(w.ok());
   EXPECT_EQ(w.size(), counter.size());
-  EXPECT_EQ(buffer, "{\"a\\\"b\":\"line\\n\\\"q\\\"\\\\\\u0001\",\"seq\":\"42\",\"t\":true,\"n\":null,\"arr\":[-3,12.5,100,0.000001]}");
+  EXPECT_EQ(buffer,
+            "{\"a\\\"b\":\"line\\n\\\"q\\\"\\\\\\u0001\",\"seq\":\"42\",\"t\":true,\"n\":null,\"arr\":[-3,12.5,100,0."
+            "000001]}");
   JsonDocument doc;
   ASSERT_FALSE(deserializeJson(doc, buffer));
   EXPECT_EQ(doc["seq"], "42");

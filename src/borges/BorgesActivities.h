@@ -226,7 +226,7 @@ class BorgesLibraryActivity final : public Activity {
   bool fullPaint_ = true;
   bool listPainted_ = false;  // A list was already on the glass: the next one is a page change.
   bool cancelling_ = false;
-  bool linkShown_ = false;    // What the screen says about the radio: coming up, or up.
+  bool linkShown_ = false;  // What the screen says about the radio: coming up, or up.
   SessionWorker worker_;
   ButtonNavigator navigator_;
   uint32_t shownPercent_ = 0;

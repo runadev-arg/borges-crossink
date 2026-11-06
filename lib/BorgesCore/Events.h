@@ -49,7 +49,7 @@ struct ClipDetail {
   const char* text = nullptr;  // Required by the server.
   const char* note = nullptr;
   const char* chapter = nullptr;
-  const char* color = nullptr;     // Defaults to gray.
+  const char* color = nullptr;        // Defaults to gray.
   const char* xpointer = nullptr;     // From ChapterXPathResolver. Start of the selection.
   const char* xpointerEnd = nullptr;  // Its end. KOReader cannot place a highlight without it.
   int32_t page = -1;                  // Book-wide reference page. -1: worked out from pctMicro.

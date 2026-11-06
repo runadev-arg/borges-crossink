@@ -45,7 +45,7 @@ enum class CatalogResult : uint8_t { Ok, Offline, Cancelled, NeedsRelink, Server
 enum class DownloadResult : uint8_t {
   Done,
   AlreadyPresent,
-  Interrupted,   // .part kept: the next call resumes it.
+  Interrupted,  // .part kept: the next call resumes it.
   Cancelled,
   NeedsRelink,
   ServerError,

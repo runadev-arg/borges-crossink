@@ -41,7 +41,11 @@ uint8_t warningsFor(bool hasRemotePct, uint32_t remotePct, bool hasLocalPct, uin
 inline bool showsDate(TimePrecision p) { return p == TimePrecision::Exact || p == TimePrecision::Anchored; }
 
 // UI copy, in Spanish, UTF-8.
-constexpr const char* kCopyTitle = "\xC2\xBF" "D\xC3\xB3" "nde quer\xC3\xA9" "s seguir leyendo?";
+constexpr const char* kCopyTitle =
+    "\xC2\xBF"
+    "D\xC3\xB3"
+    "nde quer\xC3\xA9"
+    "s seguir leyendo?";
 constexpr const char* kCopyGoThere = "Ir a esa posici\xC3\xB3n";
 constexpr const char* kCopyStayHere = "Seguir aqu\xC3\xAD";
 constexpr const char* kCopyHereLabel = "En este lector";

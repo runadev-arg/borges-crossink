@@ -50,7 +50,19 @@ struct Position {
   }
 };
 
-enum class SyncStage : uint8_t { None, Capabilities, Focus, Pull, Drain, Commit, Suggestion, Rotate, Health, Pairing, Catalog };
+enum class SyncStage : uint8_t {
+  None,
+  Capabilities,
+  Focus,
+  Pull,
+  Drain,
+  Commit,
+  Suggestion,
+  Rotate,
+  Health,
+  Pairing,
+  Catalog
+};
 
 // Why the last session stopped, in a form the Borges screen can show. Never holds a
 // token: code and detail only come from error bodies and local constants.

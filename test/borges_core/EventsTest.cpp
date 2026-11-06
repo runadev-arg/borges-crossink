@@ -131,12 +131,14 @@ TEST(Events, AHighlightCarriesBothEndsSoItCrossesIntoKoreader) {
   detail.xpointer = "/body/p[3]/text().10";
   detail.xpointerEnd = "/body/p[3]/text().15";
   uint8_t syncId[16] = {0};
-  auto doc = parse(render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
+  auto doc = parse(
+      render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
   EXPECT_EQ(doc["payload"]["xpointer"], "/body/p[3]/text().10");
   EXPECT_EQ(doc["payload"]["position"]["pos0"], "/body/p[3]/text().10");
   EXPECT_EQ(doc["payload"]["position"]["pos1"], "/body/p[3]/text().15");
   detail.xpointerEnd = nullptr;
-  auto single = parse(render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
+  auto single = parse(
+      render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
   EXPECT_TRUE(single["payload"]["position"].isUnbound());
 }
 
@@ -147,7 +149,8 @@ TEST(Events, ThePageIsTheBookWideOneWorkedOutFromThePercent) {
   detail.hasPct = true;
   detail.pctMicro = 37500000;  // 37.5% of 200.
   uint8_t syncId[16] = {0};
-  auto doc = parse(render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
+  auto doc = parse(
+      render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
   EXPECT_EQ(doc["payload"]["page"], 75);
   EXPECT_EQ(events::referencePage(0, 200), 1);
   EXPECT_EQ(events::referencePage(100000000, 200), 200);
@@ -163,7 +166,9 @@ TEST(Events, ABookmarkAlwaysHasAPageAndText) {
   detail.hasPct = true;
   detail.pctMicro = 10000000;
   uint8_t syncId[16] = {0};
-  auto doc = parse(render([&](JsonWriter& w) { EXPECT_TRUE(events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId)); }));
+  auto doc = parse(render([&](JsonWriter& w) {
+    EXPECT_TRUE(events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId));
+  }));
   EXPECT_EQ(doc["payload"]["page"], 20);
   EXPECT_EQ(doc["payload"]["text"], "Bookmark - page 20");
 }
@@ -174,13 +179,15 @@ TEST(Events, TextIsNormalizedAsKoreaderDoes) {
   detail.text = "uno\r\ndos\rtres\n\"cuatro\"";
   detail.page = 1;
   uint8_t syncId[16] = {0};
-  auto doc = parse(render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
+  auto doc = parse(
+      render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
   EXPECT_EQ(doc["payload"]["text"], "uno\ndos\ntres\n\"cuatro\"");
 }
 
 TEST(Events, DeleteCarriesTheRevisionItLastSaw) {
   uint8_t syncId[16] = {0};
-  auto doc = parse(render([&](JsonWriter& w) { events::writeAnnotationDeleted(w, Device::bookRef(), exactTime(), false, syncId, 7); }));
+  auto doc = parse(render(
+      [&](JsonWriter& w) { events::writeAnnotationDeleted(w, Device::bookRef(), exactTime(), false, syncId, 7); }));
   EXPECT_EQ(doc["payload"]["base_revision"], "7");
 }
 
@@ -191,11 +198,13 @@ TEST(Events, BookmarksUseTheirOwnEventTypes) {
   detail.text = "marca";
   detail.page = 2;
   uint8_t syncId[16] = {0};
-  auto doc = parse(render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
+  auto doc = parse(
+      render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
   EXPECT_EQ(doc["event_type"], "bookmark.upserted");
   EXPECT_EQ(doc["payload"]["drawer"], "bookmark");
   EXPECT_EQ(doc["payload"]["kind"], "bookmark");
-  auto del = parse(render([&](JsonWriter& w) { events::writeAnnotationDeleted(w, Device::bookRef(), exactTime(), true, syncId, 0); }));
+  auto del = parse(render(
+      [&](JsonWriter& w) { events::writeAnnotationDeleted(w, Device::bookRef(), exactTime(), true, syncId, 0); }));
   EXPECT_EQ(del["event_type"], "bookmark.deleted");
 }
 
@@ -207,9 +216,11 @@ TEST(Events, AnnotationsCarryABaseRevisionAsKOReaderDoes) {
   detail.text = "t";
   detail.page = 1;
   uint8_t syncId[16] = {1};
-  auto created = parse(render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
+  auto created = parse(
+      render([&](JsonWriter& w) { events::writeAnnotation(w, Device::bookRef(), exactTime(), key, detail, syncId); }));
   EXPECT_STREQ(created["payload"]["base_revision"] | "", "0");
-  auto deleted = parse(render([&](JsonWriter& w) { events::writeAnnotationDeleted(w, Device::bookRef(), exactTime(), false, syncId, 0); }));
+  auto deleted = parse(render(
+      [&](JsonWriter& w) { events::writeAnnotationDeleted(w, Device::bookRef(), exactTime(), false, syncId, 0); }));
   EXPECT_STREQ(deleted["payload"]["base_revision"] | "", "0");
 }
 
@@ -246,7 +257,8 @@ TEST(Events, SyncIdIsDerivedFromTheKeyAndStable) {
 
 TEST(Events, PageStatsCarryWhatTheDashboardAndTheDocumentNeed) {
   const PageStatRow rows[2] = {{1793800000u, 10, 60}, {1793800060u, 11, 90}};
-  auto doc = parse(render([&](JsonWriter& w) { events::writePageStats(w, Device::bookRef(), TimePrecision::Exact, rows, 2, 3); }));
+  auto doc = parse(
+      render([&](JsonWriter& w) { events::writePageStats(w, Device::bookRef(), TimePrecision::Exact, rows, 2, 3); }));
   EXPECT_EQ(doc["event_type"], "page_stat.recorded");
   EXPECT_EQ(doc["aggregate_type"], "reading_statistics");
   EXPECT_EQ(doc["aggregate_id"], std::string("page-stats:") + kMd5A + ":1793800000:1793800060:3");
@@ -368,8 +380,9 @@ class Source : public IByteSource {
 }  // namespace
 
 TEST(RemoteEvents, ParsesTheServerShape) {
-  Source source(remoteProgress(45, kOtherId, kMd5A, 60.5, "/body/p[60].0",
-                               std::string("{\"suggestion\":{\"id\":\"") + "40000000-0000-4000-8000-000000000001" + "\"},\"local\":null}"));
+  Source source(remoteProgress(
+      45, kOtherId, kMd5A, 60.5, "/body/p[60].0",
+      std::string("{\"suggestion\":{\"id\":\"") + "40000000-0000-4000-8000-000000000001" + "\"},\"local\":null}"));
   JsonScanner scan(source);
   auto e = std::make_unique<RemoteEvent>();
   ASSERT_TRUE(parseRemoteEvent(scan, *e));

@@ -35,7 +35,8 @@ TEST_F(DesignRule, Rule01_SpoolNeverBuffer_NoResponseSizeCapToWedgeOn) {
     events += remoteProgress(seq, kOtherId, kMd5B, 1.0) + std::string(2000, ' ');
   }
   d.http.chunk = 2048;
-  d.http.script.push_back(jsonReply(200, "{\"protocol_version\":2,\"events\":[" + events + "],\"cursor\":\"1500\",\"has_more\":false}"));
+  d.http.script.push_back(
+      jsonReply(200, "{\"protocol_version\":2,\"events\":[" + events + "],\"cursor\":\"1500\",\"has_more\":false}"));
   const SessionReport report = manual();
   EXPECT_EQ(report.outcome, SessionOutcome::Ok);
   EXPECT_EQ(d.store->state().cursor, 1500u);
@@ -45,7 +46,8 @@ TEST_F(DesignRule, Rule01_SpoolNeverBuffer_OversizedEventSkippedWithCursorAdvanc
   d.server.delivered = 1u << 30;  // These replies are scripted, past the model server.
   std::string poison = remoteProgress(11, kOtherId, kMd5B, 99);
   poison.insert(poison.size() - 1, ",\"padding\":\"" + std::string(d.config.eventParseBudget, 'p') + "\"");
-  d.http.script.push_back(jsonReply(200, "{\"protocol_version\":2,\"events\":[" + poison + "],\"cursor\":\"11\",\"has_more\":false}"));
+  d.http.script.push_back(
+      jsonReply(200, "{\"protocol_version\":2,\"events\":[" + poison + "],\"cursor\":\"11\",\"has_more\":false}"));
   const SessionReport report = manual();
   EXPECT_EQ(report.outcome, SessionOutcome::Ok);
   EXPECT_EQ(report.eventsSkipped, 1);
@@ -78,7 +80,8 @@ TEST_F(DesignRule, Rule02_OneConnectionPerSession_ReconnectsExactlyOnce) {
 
 // 3. Request bodies are bounded.
 TEST_F(DesignRule, Rule03_RequestBodiesAreBounded_ByBytesAndEvents) {
-  for (int i = 0; i < 60; ++i) ASSERT_EQ(d.appendRaw("e" + std::to_string(i), nullptr, kMd5A, 500), Outbox::AppendResult::Ok);
+  for (int i = 0; i < 60; ++i)
+    ASSERT_EQ(d.appendRaw("e" + std::to_string(i), nullptr, kMd5A, 500), Outbox::AppendResult::Ok);
   EXPECT_EQ(manual().outcome, SessionOutcome::Ok);
   size_t exchanges = 0;
   for (const auto& r : d.http.log) {
@@ -352,7 +355,8 @@ TEST_F(DesignRule, Rule09_PullBeforePush_FourPagesThenTheRestNextSession) {
 
 // 10. Cursor discipline.
 TEST_F(DesignRule, Rule10_CursorDiscipline_PersistAppliedThenSendNew) {
-  for (uint64_t seq = 10; seq < 14; ++seq) d.server.addFeedEvent(seq, remoteProgress(seq, kOtherId, kMd5B, static_cast<double>(seq)));
+  for (uint64_t seq = 10; seq < 14; ++seq)
+    d.server.addFeedEvent(seq, remoteProgress(seq, kOtherId, kMd5B, static_cast<double>(seq)));
   d.config.pullLimit = 2;
   d.boot();
   std::vector<uint64_t> sentCursors;
@@ -394,7 +398,8 @@ TEST_F(DesignRule, Rule10_CursorDiscipline_LastPageIsCommitted) {
 TEST_F(DesignRule, Rule10_CursorDiscipline_RespectsRegressionAndNotDelivered) {
   d.server.addFeedEvent(10, remoteProgress(10, kOtherId, kMd5B, 1));
   d.http.handler = [this](const RecordedRequest& r) {
-    if (r.path == "/api/sync/v2/cursor/commit") return apiError(409, "cursor_regression", "{\"committedCursor\":\"50\"}");
+    if (r.path == "/api/sync/v2/cursor/commit")
+      return apiError(409, "cursor_regression", "{\"committedCursor\":\"50\"}");
     return d.server.handle(r);
   };
   EXPECT_EQ(manual().outcome, SessionOutcome::Ok);
@@ -404,7 +409,8 @@ TEST_F(DesignRule, Rule10_CursorDiscipline_RespectsRegressionAndNotDelivered) {
   fresh.boot();
   fresh.server.addFeedEvent(10, remoteProgress(10, kOtherId, kMd5B, 1));
   fresh.http.handler = [&fresh](const RecordedRequest& r) {
-    if (r.path == "/api/sync/v2/cursor/commit") return apiError(409, "cursor_not_delivered", "{\"deliveredCursor\":\"3\"}");
+    if (r.path == "/api/sync/v2/cursor/commit")
+      return apiError(409, "cursor_not_delivered", "{\"deliveredCursor\":\"3\"}");
     return fresh.server.handle(r);
   };
   EXPECT_EQ(fresh.engine->runManualSession(nullptr, nullptr, nullptr).outcome, SessionOutcome::Ok);
@@ -439,7 +445,9 @@ TEST_F(DesignRule, Rule11_SequenceRepair_PersistedKeepsIdsAndOrderNeverDiscards)
 
 // 12. Failure is diagnosable.
 TEST_F(DesignRule, Rule12_FailureIsDiagnosable_StageCodeDetailAndRequestIdPersist) {
-  Reply reply = jsonReply(503, "{\"error\":{\"code\":\"sync_service_unavailable\",\"message\":\"Borges is resting\",\"retryable\":true},\"request_id\":\"body-id\"}");
+  Reply reply = jsonReply(503,
+                          "{\"error\":{\"code\":\"sync_service_unavailable\",\"message\":\"Borges is "
+                          "resting\",\"retryable\":true},\"request_id\":\"body-id\"}");
   reply.requestId = "header-id";
   d.http.script.push_back(reply);
   manual();
@@ -487,7 +495,8 @@ TEST_F(DesignRule, Rule13_WifiAlwaysOff_CorePart_ConnectionClosedOnEveryPath) {
       {"success", [](Device&) {}},
       {"http error", [](Device& dev) { dev.http.script.push_back(apiError(500, "boom")); }},
       {"unauthorized", [](Device& dev) { dev.http.script.push_back(apiError(401, "invalid_credentials")); }},
-      {"transport", [](Device& dev) {
+      {"transport",
+       [](Device& dev) {
          dev.http.script.push_back(dropped());
          dev.http.script.push_back(dropped());
        }},
@@ -525,7 +534,8 @@ TEST_F(DesignRule, Rule14_Cancellable_InsideTheStream) {
     events += remoteProgress(seq, kOtherId, kMd5B, 1);
   }
   d.http.chunk = 256;
-  d.http.script.push_back(jsonReply(200, "{\"protocol_version\":2,\"events\":[" + events + "],\"cursor\":\"199\",\"has_more\":false}"));
+  d.http.script.push_back(
+      jsonReply(200, "{\"protocol_version\":2,\"events\":[" + events + "],\"cursor\":\"199\",\"has_more\":false}"));
   d.http.advancePerRequestMs = 0;
   struct Countdown : public ICancel {
     int left;

@@ -27,10 +27,13 @@ constexpr uint16_t kQueueKeptFromStats = 32;
 constexpr uint8_t kLinkSkips = 5;
 constexpr size_t kPullBodyBytes = 512;  // protocol, cursor, focus book, limit and the client block.
 
-bool isSequenceConflict(const ApiResult& r) { return r.status == 409 && strcmp(r.code, "client_sequence_conflict") == 0; }
+bool isSequenceConflict(const ApiResult& r) {
+  return r.status == 409 && strcmp(r.code, "client_sequence_conflict") == 0;
+}
 
 bool isCursorRecoverable(const ApiResult& r) {
-  return r.status == 409 && (strcmp(r.code, "cursor_not_delivered") == 0 || strcmp(r.code, "cursor_ahead_of_server") == 0);
+  return r.status == 409 &&
+         (strcmp(r.code, "cursor_not_delivered") == 0 || strcmp(r.code, "cursor_ahead_of_server") == 0);
 }
 
 // Answers that say "this event, as it stands, will never be accepted". With a batch
@@ -111,7 +114,13 @@ struct SyncEngine::PageInfo {
 
 SyncEngine::SyncEngine(Store& store, Outbox& outbox, IFs& fs, IHttp& http, IClock& clock, IRandom& random,
                        ICancel& cancel, const EngineConfig& config)
-    : store_(store), outbox_(outbox), fs_(fs), clock_(clock), random_(random), api_(fs, http, clock, cancel), config_(config) {
+    : store_(store),
+      outbox_(outbox),
+      fs_(fs),
+      clock_(clock),
+      random_(random),
+      api_(fs, http, clock, cancel),
+      config_(config) {
   if (config_.maxEventsPerBatch > kMaxBatchEvents) config_.maxEventsPerBatch = kMaxBatchEvents;
   if (config_.maxEventsPerBatch == 0) config_.maxEventsPerBatch = 1;
 }
@@ -241,8 +250,8 @@ void SyncEngine::recordProtocolError(SyncStage stage, const char* code, const Ap
   setDiag(stage, code, "Unexpected server response", r);
   SyncState& s = store_.state();
   if (s.failures < 250) ++s.failures;
-  s.nextAttemptEpoch = backoff::nextAttempt(clock_.wallNow(), backoff::delaySec(static_cast<uint8_t>(s.failures - 1), random_),
-                                            false, 0);
+  s.nextAttemptEpoch = backoff::nextAttempt(clock_.wallNow(),
+                                            backoff::delaySec(static_cast<uint8_t>(s.failures - 1), random_), false, 0);
   store_.saveState();
 }
 
@@ -377,7 +386,8 @@ SessionReport SyncEngine::runPositionsSession(const BookRef& book, const Positio
   if (!startSession(SessionKind::Manual, report)) return report;
 
   char path[160];
-  snprintf(path, sizeof(path), "/api/sync/v2/progress/positions?book_identifier_kind=koreader_partial_md5&book_identifier_value=%s",
+  snprintf(path, sizeof(path),
+           "/api/sync/v2/progress/positions?book_identifier_kind=koreader_partial_md5&book_identifier_value=%s",
            book.id.hex);
   const ApiResult r = api_.call("GET", path, nullptr, 0);
   if (r.kind != ApiKind::Ok) {
@@ -764,7 +774,8 @@ bool SyncEngine::applyRemote(SessionReport& report) {
     // What is kept is the revision of the ones this device published: deleting one that
     // was edited on the web needs it, or the server sees a stale delete and opens a conflict.
     uint8_t syncId[16];
-    if (e.annotationRevision && uuidParse(e.syncId, syncId) && !store_.noteAnnotationRevision(book, syncId, e.annotationRevision)) {
+    if (e.annotationRevision && uuidParse(e.syncId, syncId) &&
+        !store_.noteAnnotationRevision(book, syncId, e.annotationRevision)) {
       return false;
     }
     ++report.eventsApplied;
@@ -802,7 +813,8 @@ bool SyncEngine::applyRemote(SessionReport& report) {
   return true;
 }
 
-bool SyncEngine::applyPage(File& f, const PageInfo& page, SyncStage stage, const ApiResult& result, SessionReport& report) {
+bool SyncEngine::applyPage(File& f, const PageInfo& page, SyncStage stage, const ApiResult& result,
+                           SessionReport& report) {
   FileByteSource source(f);
   JsonScanner scan(source);
   if (page.hasEvents) {
@@ -945,7 +957,8 @@ bool SyncEngine::pullPages(SessionReport& report) {
     ++pageIndex;
     if (!page.hasMore) break;
     // A page that moves nothing would spin to the page limit for no reason.
-    if (page.cursor == requested && report.eventsApplied == appliedBefore && report.eventsSkipped == skippedBefore) break;
+    if (page.cursor == requested && report.eventsApplied == appliedBefore && report.eventsSkipped == skippedBefore)
+      break;
   }
   return true;
 }
@@ -1402,7 +1415,8 @@ void SyncEngine::maybeRotate(SessionReport& report) {
   const ApiResult r = api_.call("POST", kRotatePath, reinterpret_cast<const uint8_t*>(kEmpty), 2);
   if (r.kind != ApiKind::Ok) {
     scrubFile(fs_, kSpoolPath);  // A cut answer can still hold the token.
-    if (r.kind == ApiKind::HttpError && (r.status == 401 || r.status == 403)) recordFailure(SyncStage::Rotate, r, report);
+    if (r.kind == ApiKind::HttpError && (r.status == 401 || r.status == 403))
+      recordFailure(SyncStage::Rotate, r, report);
     return;
   }
   File f(fs_, kSpoolPath, IFs::Mode::Read);
@@ -1470,7 +1484,8 @@ bool SyncEngine::appendEvent(EventKind kind, const BookId& book, const char* bod
   return outbox_.append(kind, book.md5, body, len, replace, nullptr, nullptr) == Outbox::AppendResult::Ok;
 }
 
-bool SyncEngine::enqueueProgress(const BookId& book, const EventTime& time, const Position& position, bool explicitJump) {
+bool SyncEngine::enqueueProgress(const BookId& book, const EventTime& time, const Position& position,
+                                 bool explicitJump) {
   // A place this device does not know is not a place to publish: percentage 0 would
   // become the head and send the other readers to the first page.
   if (!position.hasPct) return true;

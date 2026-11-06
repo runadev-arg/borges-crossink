@@ -44,7 +44,7 @@ struct EngineConfig {
   uint8_t maxEventsPerBatch = 20;
   uint8_t maxPullPages = 4;
   uint8_t pullLimit = 20;
-  uint8_t maxHeldChecks = 3;  // Focus checks for held books per session.
+  uint8_t maxHeldChecks = 3;         // Focus checks for held books per session.
   uint8_t maxAnnotationEvents = 32;  // Queued per finalize; the rest wait for the next one.
   uint32_t eventParseBudget = 12 * 1024;
   uint32_t openBudgetMs = 12000;
@@ -87,13 +87,13 @@ struct SessionReport {
   bool sequenceRepaired = false;
   uint8_t pagesPulled = 0;
   uint16_t eventsApplied = 0;
-  uint16_t eventsSkipped = 0;   // Over the parse budget. The cursor still advanced.
-  uint16_t eventsSent = 0;      // Sent in exchanges, retries included.
+  uint16_t eventsSkipped = 0;  // Over the parse budget. The cursor still advanced.
+  uint16_t eventsSent = 0;     // Sent in exchanges, retries included.
   uint16_t eventsAcked = 0;
   uint16_t eventsRejected = 0;
   uint16_t eventsQuarantined = 0;
-  size_t depth = 0;             // Left in the outbox.
-  size_t held = 0;              // Of those, held back by an unresolved check.
+  size_t depth = 0;  // Left in the outbox.
+  size_t held = 0;   // Of those, held back by an unresolved check.
 };
 
 // What the prompt needs. No remote page number on purpose: it means nothing on this
@@ -130,8 +130,8 @@ class IClipSource {
 struct FinalizeInput {
   BookRef book;
   Position position;
-  bool paged = false;              // A real page turn happened since it was last finalized.
-  WallTime lastTurn;               // Time of the last real page turn.
+  bool paged = false;  // A real page turn happened since it was last finalized.
+  WallTime lastTurn;   // Time of the last real page turn.
   bool hasLastTurnMonotonic = false;
   uint64_t lastTurnMonotonicMs = 0;
   const SessionSummary* session = nullptr;
@@ -141,7 +141,7 @@ struct FinalizeInput {
 };
 
 struct FinalizeResult {
-  bool ok = false;           // False: try again at the next finalize, nothing was lost.
+  bool ok = false;  // False: try again at the next finalize, nothing was lost.
   bool progressQueued = false;
   bool sessionQueued = false;
   uint16_t annotationsCreated = 0;

@@ -390,7 +390,8 @@ bool BorgesResumeActivity::applyJump() {
   KOReaderPosition target;
   target.xpath = request.xpointer;
   target.percentage = request.fraction;
-  CrossPointPosition mapped = ProgressMapper::toCrossPoint(epub, target, hasLocal ? progress.spineIndex : -1, pageCount);
+  CrossPointPosition mapped =
+      ProgressMapper::toCrossPoint(epub, target, hasLocal ? progress.spineIndex : -1, pageCount);
   if (mapped.valid && mapped.hasVisibleTextOffset) {
     // With a layout on disk the page is known now. Without one the reader finds it from the saved
     // offset once it has laid the chapter out, so a book just downloaded opens at the same place.

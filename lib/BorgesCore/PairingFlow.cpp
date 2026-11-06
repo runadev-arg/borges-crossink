@@ -28,7 +28,13 @@ void makeExternalId(const uint8_t mac[6], char out[20]) {
 
 PairingFlow::PairingFlow(Store& store, Outbox& outbox, IFs& fs, IHttp& http, IClock& clock, IRandom& random,
                          ICancel& cancel, const PairingConfig& config)
-    : store_(store), outbox_(outbox), fs_(fs), clock_(clock), random_(random), api_(fs, http, clock, cancel), config_(config) {}
+    : store_(store),
+      outbox_(outbox),
+      fs_(fs),
+      clock_(clock),
+      random_(random),
+      api_(fs, http, clock, cancel),
+      config_(config) {}
 
 void PairingFlow::buildQrUrl() {
   const Credentials& c = store_.creds();

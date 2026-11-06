@@ -35,7 +35,8 @@ bool structurallyValid(const std::string& text) {
 }  // namespace
 
 TEST(JsonStream, WalksKnownFieldsAndSkipsTheRest) {
-  StringSource source(R"( { "a" : "text", "ignored": {"x":[1,2,{"y":null}]}, "n": 42, "b": true, "arr": ["p", "q"] } )");
+  StringSource source(
+      R"( { "a" : "text", "ignored": {"x":[1,2,{"y":null}]}, "n": 42, "b": true, "arr": ["p", "q"] } )");
   JsonScanner scan(source);
   ASSERT_TRUE(scan.enterObject());
   char key[16];
@@ -97,12 +98,12 @@ TEST(JsonStream, InvalidUtf8NeverReachesATitleOrANote) {
     return std::string(out);
   };
   const std::string fffd = "\xEF\xBF\xBD";
-  EXPECT_EQ(read("a\xFFz"), "a" + fffd + "z");                         // Never a lead byte.
-  EXPECT_EQ(read("a\xC3z"), "a" + fffd + "z");                         // Lead with no continuation.
-  EXPECT_EQ(read("\xC0\xAF"), fffd + fffd);                            // Overlong slash.
-  EXPECT_EQ(read("\xED\xA0\x80"), fffd + fffd + fffd);                 // Encoded surrogate.
-  EXPECT_EQ(read("\xF4\x90\x80\x80"), fffd + fffd + fffd + fffd);      // Above U+10FFFF.
-  EXPECT_EQ(read("\xE2\x82"), fffd);                                   // Cut by the closing quote.
+  EXPECT_EQ(read("a\xFFz"), "a" + fffd + "z");                              // Never a lead byte.
+  EXPECT_EQ(read("a\xC3z"), "a" + fffd + "z");                              // Lead with no continuation.
+  EXPECT_EQ(read("\xC0\xAF"), fffd + fffd);                                 // Overlong slash.
+  EXPECT_EQ(read("\xED\xA0\x80"), fffd + fffd + fffd);                      // Encoded surrogate.
+  EXPECT_EQ(read("\xF4\x90\x80\x80"), fffd + fffd + fffd + fffd);           // Above U+10FFFF.
+  EXPECT_EQ(read("\xE2\x82"), fffd);                                        // Cut by the closing quote.
   EXPECT_EQ(read("\xC3\xA9\xF0\x9F\x98\x80"), "\xC3\xA9\xF0\x9F\x98\x80");  // Real text is untouched.
 }
 

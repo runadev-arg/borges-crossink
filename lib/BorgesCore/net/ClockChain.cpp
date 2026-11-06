@@ -54,7 +54,8 @@ ClockPlan clockPlanFor(const uint32_t budgetMs) {
   return ClockPlan{{{ClockSource::HttpDate, 2500}, {ClockSource::HttpsDate, 5000}, {ClockSource::Sntp, kSntpMaxMs}}};
 }
 
-bool repairClock(IClock& clock, const ClockTrust& trust, const uint32_t budgetMs, IClockSources& sources, ICancel& cancel) {
+bool repairClock(IClock& clock, const ClockTrust& trust, const uint32_t budgetMs, IClockSources& sources,
+                 ICancel& cancel) {
   const uint64_t deadline = clock.monotonicMs() + budgetMs;
   const ClockPlan plan = clockPlanFor(budgetMs);
   for (const ClockStep& step : plan.steps) {

@@ -19,7 +19,7 @@ enum class ApiKind : uint8_t {
   Transport,  // No complete response, after the one reconnect.
   Cancelled,
   Budget,
-  LocalIo,    // The spool could not be written.
+  LocalIo,  // The spool could not be written.
 };
 
 struct ApiResult {

@@ -78,8 +78,8 @@ bool NvsSecretBox::seal(const uint8_t* plain, const size_t len, uint8_t* out) {
   GcmKey key;
   if (!key.ready()) return false;
   random_.fill(out, kNonceBytes);
-  return wc_AesGcmEncrypt(key.get(), out + kNonceBytes, plain, len, out, kNonceBytes, out + kNonceBytes + len, kTagBytes,
-                          nullptr, 0) == 0;
+  return wc_AesGcmEncrypt(key.get(), out + kNonceBytes, plain, len, out, kNonceBytes, out + kNonceBytes + len,
+                          kTagBytes, nullptr, 0) == 0;
 }
 
 bool NvsSecretBox::open(const uint8_t* sealed, const size_t len, uint8_t* out) {

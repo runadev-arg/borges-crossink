@@ -16,7 +16,7 @@ namespace borges {
 
 struct PairingConfig {
   const char* platform = "crossink-x4";
-  const char* externalId = "";       // makeExternalId()
+  const char* externalId = "";  // makeExternalId()
   const char* deviceName = "Xteink X4";
   const char* firmwareVersion = "";
   const char* clientVersion = "";

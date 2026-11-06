@@ -22,8 +22,8 @@ struct PageStatRow {
 class PageStatBuffer {
  public:
   static constexpr uint8_t kCapacity = 96;
-  static constexpr int64_t kMinSeconds = 5;     // A page flipped past was not read.
-  static constexpr int64_t kMaxSeconds = 600;   // The dashboard's cap per row. A nap is not reading.
+  static constexpr int64_t kMinSeconds = 5;    // A page flipped past was not read.
+  static constexpr int64_t kMaxSeconds = 600;  // The dashboard's cap per row. A nap is not reading.
 
   // The reader left page after having entered it at enteredEpoch. Any position change counts.
   void onLeave(int32_t page, int64_t enteredEpoch, int64_t nowEpoch) {

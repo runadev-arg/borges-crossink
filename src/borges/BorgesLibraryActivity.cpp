@@ -512,7 +512,8 @@ void BorgesLibraryActivity::renderList() {
   }
   if (s_->hasNote_.load()) {
     const int noteY = area.y + area.height - noteHeightFor(renderer) + kLineGap;
-    const std::string note = renderer.truncatedText(SMALL_FONT_ID, I18N.get(s_->note_.load()), area.width - padding * 2);
+    const std::string note =
+        renderer.truncatedText(SMALL_FONT_ID, I18N.get(s_->note_.load()), area.width - padding * 2);
     renderer.drawText(SMALL_FONT_ID, area.x + padding, noteY, note.c_str());
   }
 }
@@ -529,7 +530,7 @@ void BorgesLibraryActivity::renderDownload() {
   y += kBlockGap * 2;
 
   if (view_ == View::Downloading) {
-    const char* what = cancelling_ ? tr(STR_BORGES_CANCELLING)
+    const char* what = cancelling_  ? tr(STR_BORGES_CANCELLING)
                        : linkShown_ ? tr(STR_BORGES_LIB_DOWNLOADING)
                                     : tr(STR_BORGES_CONNECTING_WIFI);
     y = drawWrapped(renderer, UI_10_FONT_ID, area.x, y, area.width, what, 1);
@@ -575,7 +576,7 @@ void BorgesLibraryActivity::render(RenderLock&&) {
       Rect area = listArea(renderer);
       area.x += kSideMargin;
       area.width -= kSideMargin * 2;
-      const char* what = cancelling_ ? tr(STR_BORGES_CANCELLING)
+      const char* what = cancelling_  ? tr(STR_BORGES_CANCELLING)
                          : linkShown_ ? tr(STR_BORGES_LIB_LOADING)
                                       : tr(STR_BORGES_CONNECTING_WIFI);
       drawWrappedCentered(renderer, area, UI_10_FONT_ID, area.y + area.height / 3, what, 2);

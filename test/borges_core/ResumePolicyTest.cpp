@@ -44,18 +44,20 @@ TEST(ResumePolicy, DecisionTable) {
          l.hasFinalized = true;
        },
        Verdict::Ask},
-      {"from this device", false, [](RemoteEvent& e, BookLedger&) { copyText(e.originId, sizeof(e.originId), kSelfId); }, Verdict::Own},
+      {"from this device", false,
+       [](RemoteEvent& e, BookLedger&) { copyText(e.originId, sizeof(e.originId), kSelfId); }, Verdict::Own},
       {"answered: not asked again, whatever was read since", false,
-       [](RemoteEvent& e, BookLedger& l) { l.remember(resume::fingerprint(e)); },
-       Verdict::AlreadyChosen},
+       [](RemoteEvent& e, BookLedger& l) { l.remember(resume::fingerprint(e)); }, Verdict::AlreadyChosen},
       {"new event at the same spot asks again", false,
        [](RemoteEvent& e, BookLedger& l) {
          l.remember(resume::fingerprint(e));
          copyText(e.eventId, sizeof(e.eventId), "evt-2");
        },
        Verdict::Ask},
-      {"wrong book", false, [](RemoteEvent& e, BookLedger&) { copyText(e.bookValue, sizeof(e.bookValue), kMd5B); }, Verdict::Invalid},
-      {"wrong identifier kind", false, [](RemoteEvent& e, BookLedger&) { copyText(e.bookKind, sizeof(e.bookKind), "sha256"); }, Verdict::Invalid},
+      {"wrong book", false, [](RemoteEvent& e, BookLedger&) { copyText(e.bookValue, sizeof(e.bookValue), kMd5B); },
+       Verdict::Invalid},
+      {"wrong identifier kind", false,
+       [](RemoteEvent& e, BookLedger&) { copyText(e.bookKind, sizeof(e.bookKind), "sha256"); }, Verdict::Invalid},
       {"missing event_id", false,
        [](RemoteEvent& e, BookLedger&) {
          e.hasEventId = false;
@@ -171,7 +173,11 @@ TEST(ResumePolicy, SpanishWarningSelection) {
 }
 
 TEST(ResumePolicy, PromptCopyIsTheDesignsWording) {
-  EXPECT_STREQ(resume::kCopyTitle, "\xC2\xBF" "D\xC3\xB3" "nde quer\xC3\xA9" "s seguir leyendo?");
+  EXPECT_STREQ(resume::kCopyTitle,
+               "\xC2\xBF"
+               "D\xC3\xB3"
+               "nde quer\xC3\xA9"
+               "s seguir leyendo?");
   EXPECT_STREQ(resume::kCopyGoThere, "Ir a esa posici\xC3\xB3n");
   EXPECT_STREQ(resume::kCopyStayHere, "Seguir aqu\xC3\xAD");
   EXPECT_STREQ(resume::kCopyHereLabel, "En este lector");

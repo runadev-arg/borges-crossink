@@ -13,16 +13,20 @@ std::string md5Of(const std::string& content) {
   return id.hex;
 }
 
-std::string book(const std::string& id, const std::string& md5, const std::string& title, const std::string& filename = "libro.epub",
-                 long size = 1000) {
-  return "{\"id\":\"" + id + "\",\"document_id\":\"d\",\"sha256\":\"" + std::string(64, 'a') + "\",\"koreader_partial_md5\":\"" + md5 +
-         "\",\"original_filename\":\"" + filename + "\",\"format\":\"epub\",\"title\":\"" + title +
-         "\",\"author\":\"Borges\",\"status\":\"ready\",\"file_size\":" + std::to_string(size) + ",\"download_url\":\"/x\"}";
+std::string book(const std::string& id, const std::string& md5, const std::string& title,
+                 const std::string& filename = "libro.epub", long size = 1000) {
+  return "{\"id\":\"" + id + "\",\"document_id\":\"d\",\"sha256\":\"" + std::string(64, 'a') +
+         "\",\"koreader_partial_md5\":\"" + md5 + "\",\"original_filename\":\"" + filename +
+         "\",\"format\":\"epub\",\"title\":\"" + title +
+         "\",\"author\":\"Borges\",\"status\":\"ready\",\"file_size\":" + std::to_string(size) +
+         ",\"download_url\":\"/x\"}";
 }
 
 std::string page(const std::string& books, int number = 1, bool hasNext = false, bool hasPrevious = false) {
-  return "{\"books\":[" + books + "],\"page\":" + std::to_string(number) + ",\"page_size\":20,\"has_next\":" + (hasNext ? "true" : "false") +
-         ",\"has_previous\":" + (hasPrevious ? "true" : "false") + ",\"hidden_missing_files\":0,\"reconciliation\":{\"strategy\":\"additive\"}}";
+  return "{\"books\":[" + books + "],\"page\":" + std::to_string(number) +
+         ",\"page_size\":20,\"has_next\":" + (hasNext ? "true" : "false") +
+         ",\"has_previous\":" + (hasPrevious ? "true" : "false") +
+         ",\"hidden_missing_files\":0,\"reconciliation\":{\"strategy\":\"additive\"}}";
 }
 
 class Collect : public ICatalogVisitor {
@@ -53,7 +57,8 @@ class CatalogTest : public testing::Test {
 }  // namespace
 
 TEST_F(CatalogTest, FetchesParsesAndCaches) {
-  d.http.script.push_back(jsonReply(200, page(book("b1", kMd5A, "Ficciones") + "," + book("b2", kMd5B, "El Aleph", "aleph.epub", 2000), 1, true)));
+  d.http.script.push_back(jsonReply(
+      200, page(book("b1", kMd5A, "Ficciones") + "," + book("b2", kMd5B, "El Aleph", "aleph.epub", 2000), 1, true)));
   CatalogPage info;
   ASSERT_EQ(catalog->fetchPage(1, 20, info), CatalogResult::Ok);
   EXPECT_EQ(info.count, 2);
@@ -117,7 +122,8 @@ TEST_F(CatalogTest, HostileEntriesAreDroppedAndTheRestSurvive) {
       "{}",
       "{\"id\":7,\"koreader_partial_md5\":8,\"title\":9}",
       "{\"id\":\"b7\",\"koreader_partial_md5\":\"" + std::string(kMd5A) + "\",\"file_size\":\"big\"}",
-      "{\"id\":\"b8\",\"koreader_partial_md5\":\"" + std::string(kMd5A) + "\",\"file_size\":100,\"status\":\"processing\"}",
+      "{\"id\":\"b8\",\"koreader_partial_md5\":\"" + std::string(kMd5A) +
+          "\",\"file_size\":100,\"status\":\"processing\"}",
       "{\"id\":\"b9\",\"koreader_partial_md5\":\"" + std::string(kMd5A) + "\",\"file_size\":100,\"sha256\":\"short\"}",
   };
   for (const std::string& h : hostile) books += "," + h;

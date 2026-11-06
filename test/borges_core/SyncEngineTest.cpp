@@ -171,7 +171,9 @@ TEST_F(SyncEngineTest, MissingAcksKeepTheEventAndReportIt) {
   ASSERT_EQ(d.appendRaw("uno"), Outbox::AppendResult::Ok);
   d.http.handler = [this](const RecordedRequest& r) {
     if (r.path == "/api/sync/v2/exchange") {
-      return jsonReply(200, "{\"protocol_version\":2,\"acknowledgements\":[],\"pull\":{\"events\":[],\"cursor\":\"0\",\"has_more\":false}}");
+      return jsonReply(200,
+                       "{\"protocol_version\":2,\"acknowledgements\":[],\"pull\":{\"events\":[],\"cursor\":\"0\",\"has_"
+                       "more\":false}}");
     }
     return d.server.handle(r);
   };
@@ -187,7 +189,8 @@ TEST_F(SyncEngineTest, AckWithAnotherSequenceIsNotTrusted) {
   d.http.handler = [this, id](const RecordedRequest& r) {
     if (r.path == "/api/sync/v2/exchange") {
       return jsonReply(200, "{\"protocol_version\":2,\"acknowledgements\":[{\"client_event_id\":\"" + id +
-                                "\",\"client_sequence\":\"999\",\"status\":\"accepted\"}],\"pull\":{\"events\":[],\"cursor\":\"0\",\"has_more\":false}}");
+                                "\",\"client_sequence\":\"999\",\"status\":\"accepted\"}],\"pull\":{\"events\":[],"
+                                "\"cursor\":\"0\",\"has_more\":false}}");
     }
     return d.server.handle(r);
   };
@@ -203,7 +206,8 @@ TEST_F(SyncEngineTest, UnknownAckStatusIsNotTrusted) {
   d.http.handler = [this, id](const RecordedRequest& r) {
     if (r.path == "/api/sync/v2/exchange") {
       return jsonReply(200, "{\"protocol_version\":2,\"acknowledgements\":[{\"client_event_id\":\"" + id +
-                                "\",\"client_sequence\":\"1\",\"status\":\"maybe\"}],\"pull\":{\"events\":[],\"cursor\":\"0\",\"has_more\":false}}");
+                                "\",\"client_sequence\":\"1\",\"status\":\"maybe\"}],\"pull\":{\"events\":[],"
+                                "\"cursor\":\"0\",\"has_more\":false}}");
     }
     return d.server.handle(r);
   };
@@ -238,7 +242,8 @@ TEST_F(SyncEngineTest, ValidationFailureAboutTheRequestDoesNotTouchTheQueue) {
   ASSERT_EQ(d.appendRaw("b"), Outbox::AppendResult::Ok);
   d.http.handler = [this](const RecordedRequest& r) {
     if (r.path == "/api/sync/v2/exchange") {
-      return apiError(422, "validation_failed", "[{\"code\":\"invalid_client_version\",\"path\":\"client.firmware_version\"}]");
+      return apiError(422, "validation_failed",
+                      "[{\"code\":\"invalid_client_version\",\"path\":\"client.firmware_version\"}]");
     }
     return d.server.handle(r);
   };
@@ -368,10 +373,13 @@ TEST_F(SyncEngineTest, ConflictWithoutProofChangesNothing) {
       "{\"next_client_sequence\":\"9\",\"unrecorded_events\":[]}",
       "{\"unrecorded_events\":[{\"client_event_id\":\"" + a + "\",\"client_sequence\":\"1\"}]}",
       // Not something we sent.
-      "{\"next_client_sequence\":\"9\",\"unrecorded_events\":[{\"client_event_id\":\"30000000-0000-4000-8000-000000000009\",\"client_sequence\":\"1\"}]}",
+      "{\"next_client_sequence\":\"9\",\"unrecorded_events\":[{\"client_event_id\":\"30000000-0000-4000-8000-"
+      "000000000009\",\"client_sequence\":\"1\"}]}",
       // Our id under a number we did not send.
-      "{\"next_client_sequence\":\"9\",\"unrecorded_events\":[{\"client_event_id\":\"" + a + "\",\"client_sequence\":\"2\"}]}",
-      "{\"next_client_sequence\":\"nine\",\"unrecorded_events\":[{\"client_event_id\":\"" + a + "\",\"client_sequence\":\"1\"}]}",
+      "{\"next_client_sequence\":\"9\",\"unrecorded_events\":[{\"client_event_id\":\"" + a +
+          "\",\"client_sequence\":\"2\"}]}",
+      "{\"next_client_sequence\":\"nine\",\"unrecorded_events\":[{\"client_event_id\":\"" + a +
+          "\",\"client_sequence\":\"1\"}]}",
   };
   for (const std::string& proof : proofs) {
     d.http.log.clear();
@@ -453,7 +461,8 @@ TEST_F(SyncEngineTest, NotDeliveredNeverMovesTheCursorForward) {
   d.store->state().cursor = 10;
   ASSERT_TRUE(d.store->saveState());
   d.http.handler = [](const RecordedRequest& r) {
-    if (r.path == "/api/sync/v2/pull") return apiError(409, "cursor_not_delivered", "{\"cursor\":\"10\",\"deliveredCursor\":\"500\"}");
+    if (r.path == "/api/sync/v2/pull")
+      return apiError(409, "cursor_not_delivered", "{\"cursor\":\"10\",\"deliveredCursor\":\"500\"}");
     return jsonReply(200, "{}");
   };
   const SessionReport report = manual();
@@ -464,7 +473,8 @@ TEST_F(SyncEngineTest, NotDeliveredNeverMovesTheCursorForward) {
 TEST_F(SyncEngineTest, CommitNotDeliveredMovesBackToDelivered) {
   d.server.addFeedEvent(10, remoteProgress(10, kOtherId, kMd5B, 33));
   d.http.handler = [this](const RecordedRequest& r) {
-    if (r.path == "/api/sync/v2/cursor/commit") return apiError(409, "cursor_not_delivered", "{\"cursor\":\"10\",\"deliveredCursor\":\"4\"}");
+    if (r.path == "/api/sync/v2/cursor/commit")
+      return apiError(409, "cursor_not_delivered", "{\"cursor\":\"10\",\"deliveredCursor\":\"4\"}");
     return d.server.handle(r);
   };
   const SessionReport report = manual();
@@ -517,7 +527,8 @@ TEST_F(SyncEngineTest, HasMoreWithoutProgressDoesNotSpin) {
 
 TEST_F(SyncEngineTest, EmptyPageCanStillAdvanceTheCursor) {
   d.server.delivered = 1u << 30;  // These replies are scripted, past the model server.
-  d.http.script.push_back(jsonReply(200, "{\"protocol_version\":2,\"events\":[],\"cursor\":\"77\",\"high_watermark\":\"77\",\"has_more\":false}"));
+  d.http.script.push_back(jsonReply(
+      200, "{\"protocol_version\":2,\"events\":[],\"cursor\":\"77\",\"high_watermark\":\"77\",\"has_more\":false}"));
   EXPECT_EQ(manual().outcome, SessionOutcome::Ok);
   EXPECT_EQ(d.store->state().cursor, 77u);
 }
@@ -597,8 +608,9 @@ TEST_F(SyncEngineTest, AServerTimeOutOfBoundsMovesNeitherTheClockNorTheAnchor) {
   d.clock.setWall(0, TimePrecision::Unknown);
   d.clock.setCalls = 0;
   d.store->state().anchorEpoch = kNow - 100;
-  d.http.script.push_back(jsonReply(200, "{\"protocol_version\":2,\"events\":[],\"cursor\":\"0\",\"has_more\":false,"
-                                         "\"server_time\":\"1999-01-01T00:00:00.000Z\"}"));
+  d.http.script.push_back(jsonReply(200,
+                                    "{\"protocol_version\":2,\"events\":[],\"cursor\":\"0\",\"has_more\":false,"
+                                    "\"server_time\":\"1999-01-01T00:00:00.000Z\"}"));
   manual();
   EXPECT_EQ(d.clock.setCalls, 0) << "not even from the server: a date out of bounds is not a date";
   EXPECT_EQ(d.store->state().anchorEpoch, kNow - 100);
@@ -839,7 +851,8 @@ TEST_F(SyncEngineTest, MalformedPullChangesNothingAndBlocksTheDrain) {
 
 TEST_F(SyncEngineTest, MalformedPageAppliesNoneOfItsEvents) {
   const std::string good = remoteProgress(10, kOtherId, kMd5B, 33);
-  d.http.script.push_back(jsonReply(200, "{\"protocol_version\":2,\"events\":[" + good + ",{\"a\":tru}],\"cursor\":\"10\"}"));
+  d.http.script.push_back(
+      jsonReply(200, "{\"protocol_version\":2,\"events\":[" + good + ",{\"a\":tru}],\"cursor\":\"10\"}"));
   EXPECT_EQ(manual().outcome, SessionOutcome::ProtocolError);
   RemoteHead head;
   EXPECT_FALSE(d.engine->remoteHead(Device::book(kMd5B), head));
@@ -869,7 +882,8 @@ TEST_F(SyncEngineTest, DeepNestingInAnEventIsNotAPoisonPage) {
   d.server.delivered = 1u << 30;  // These replies are scripted, past the model server.
   std::string poison = remoteProgress(11, kOtherId, kMd5B, 99);
   poison.insert(poison.size() - 1, ",\"deep\":" + std::string(100000, '[') + std::string(100000, ']'));
-  d.http.script.push_back(jsonReply(200, "{\"protocol_version\":2,\"events\":[" + poison + "],\"cursor\":\"11\",\"has_more\":false}"));
+  d.http.script.push_back(
+      jsonReply(200, "{\"protocol_version\":2,\"events\":[" + poison + "],\"cursor\":\"11\",\"has_more\":false}"));
   const SessionReport report = manual();
   EXPECT_EQ(report.outcome, SessionOutcome::Ok);
   EXPECT_EQ(report.eventsSkipped, 1);
@@ -880,11 +894,19 @@ TEST_F(SyncEngineTest, HostileEventsAdvanceTheCursorAndLeaveNothingBehind) {
   d.server.delivered = 1u << 30;  // These replies are scripted, past the model server.
   const std::string events =
       "[5,\"x\",null,[],{},"
-      "{\"server_sequence\":\"10\",\"event_type\":\"progress.changed\",\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"../../etc/passwd\"}},"
-      "{\"server_sequence\":\"11\",\"event_type\":\"progress.changed\",\"book_identifier\":{\"kind\":\"sha256\",\"value\":\"" + std::string(kMd5A) + "\"}},"
-      "{\"server_sequence\":\"12\",\"event_type\":\"made.up\",\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"" + std::string(kMd5A) + "\"}},"
+      "{\"server_sequence\":\"10\",\"event_type\":\"progress.changed\",\"book_identifier\":{\"kind\":\"koreader_"
+      "partial_md5\",\"value\":\"../../etc/passwd\"}},"
+      "{\"server_sequence\":\"11\",\"event_type\":\"progress.changed\",\"book_identifier\":{\"kind\":\"sha256\","
+      "\"value\":\"" +
+      std::string(kMd5A) +
+      "\"}},"
+      "{\"server_sequence\":\"12\",\"event_type\":\"made.up\",\"book_identifier\":{\"kind\":\"koreader_partial_md5\","
+      "\"value\":\"" +
+      std::string(kMd5A) +
+      "\"}},"
       "{\"server_sequence\":\"not-a-number\",\"event_type\":\"progress.changed\"}]";
-  d.http.script.push_back(jsonReply(200, "{\"protocol_version\":2,\"events\":" + events + ",\"cursor\":\"12\",\"has_more\":false}"));
+  d.http.script.push_back(
+      jsonReply(200, "{\"protocol_version\":2,\"events\":" + events + ",\"cursor\":\"12\",\"has_more\":false}"));
   const SessionReport report = manual();
   EXPECT_EQ(report.outcome, SessionOutcome::Ok);
   EXPECT_EQ(d.store->state().cursor, 12u);
@@ -915,8 +937,9 @@ TEST_F(SyncEngineTest, OwnReplayedEventsDoNotTouchTheHeadCache) {
 }
 
 TEST_F(SyncEngineTest, HeadCacheKeepsTheNewestWhenPagesReplay) {
-  d.http.script.push_back(jsonReply(200, "{\"protocol_version\":2,\"events\":[" + remoteProgress(20, kOtherId, kMd5B, 20) + "," +
-                                             remoteProgress(10, kOtherId, kMd5B, 10) + "],\"cursor\":\"20\",\"has_more\":false}"));
+  d.http.script.push_back(
+      jsonReply(200, "{\"protocol_version\":2,\"events\":[" + remoteProgress(20, kOtherId, kMd5B, 20) + "," +
+                         remoteProgress(10, kOtherId, kMd5B, 10) + "],\"cursor\":\"20\",\"has_more\":false}"));
   manual();
   RemoteHead head;
   ASSERT_TRUE(d.engine->remoteHead(Device::book(kMd5B), head));
@@ -927,12 +950,14 @@ TEST_F(SyncEngineTest, HeadCacheKeepsTheNewestWhenPagesReplay) {
 // --- Inbound annotations ----------------------------------------------------------
 
 namespace {
-std::string remoteAnnotation(uint64_t seq, const std::string& origin, const std::string& type, const std::string& text) {
+std::string remoteAnnotation(uint64_t seq, const std::string& origin, const std::string& type,
+                             const std::string& text) {
   return "{\"event_id\":\"evt-" + std::to_string(seq) + "\",\"server_sequence\":\"" + std::to_string(seq) +
          "\",\"origin_device\":{\"id\":\"" + origin + "\",\"name\":\"Kobo\"},\"event_type\":\"" + type +
          "\",\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"" + std::string(kMd5A) +
          "\"},\"payload\":{\"sync_id\":\"50000000-0000-4000-8000-000000000001\",\"text\":\"" + text +
-         "\",\"chapter\":\"Uno\",\"note\":\"nota\",\"page\":7},\"directive\":\"apply_remote\",\"directive_metadata\":{}}";
+         "\",\"chapter\":\"Uno\",\"note\":\"nota\",\"page\":7},\"directive\":\"apply_remote\",\"directive_metadata\":{}"
+         "}";
 }
 
 }  // namespace
@@ -1080,9 +1105,12 @@ TEST_F(SyncEngineTest, WarningsReachTheDecision) {
 TEST_F(SyncEngineTest, InvalidFocusIsAReportedErrorWithNoPrompt) {
   const std::vector<std::string> invalid = {
       focusEventJson(kOtherId, kMd5B, 50),  // Wrong book.
-      "{\"server_sequence\":\"5\",\"origin_device\":{\"id\":\"x\"},\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"" +
-          std::string(kMd5A) + "\"},\"payload\":{\"percentage\":5},\"directive_metadata\":{\"reading_head\":true}}",  // No event_id.
-      "{\"event_id\":\"e\",\"origin_device\":{\"id\":\"x\"},\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"" +
+      "{\"server_sequence\":\"5\",\"origin_device\":{\"id\":\"x\"},\"book_identifier\":{\"kind\":\"koreader_partial_"
+      "md5\",\"value\":\"" +
+          std::string(kMd5A) +
+          "\"},\"payload\":{\"percentage\":5},\"directive_metadata\":{\"reading_head\":true}}",  // No event_id.
+      "{\"event_id\":\"e\",\"origin_device\":{\"id\":\"x\"},\"book_identifier\":{\"kind\":\"koreader_partial_md5\","
+      "\"value\":\"" +
           std::string(kMd5A) + "\"},\"payload\":{\"percentage\":5},\"directive_metadata\":{}}",  // No reading_head.
       "{\"event_id\":\"e\",\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"" + std::string(kMd5A) +
           "\"},\"payload\":{\"percentage\":5},\"directive_metadata\":{\"reading_head\":true}}",  // No origin.
@@ -1293,7 +1321,8 @@ TEST_F(SyncEngineTest, OfflineChoiceIsDurableAndGoesOutNextSession) {
 TEST_F(SyncEngineTest, PendingSuggestionIsResolvedWithTheChoice) {
   const std::string suggestion = "40000000-0000-4000-8000-000000000001";
   // A replayed pull brought an open suggestion for this book.
-  d.server.addFeedEvent(10, remoteProgress(10, kOtherId, kMd5A, 60, "", "{\"suggestion\":{\"id\":\"" + suggestion + "\"}}"));
+  d.server.addFeedEvent(
+      10, remoteProgress(10, kOtherId, kMd5A, 60, "", "{\"suggestion\":{\"id\":\"" + suggestion + "\"}}"));
   ASSERT_EQ(manual().outcome, SessionOutcome::Ok);
 
   d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
@@ -1310,7 +1339,8 @@ TEST_F(SyncEngineTest, PendingSuggestionIsResolvedWithTheChoice) {
 
 TEST_F(SyncEngineTest, SuggestionSurvivesAFailedResolveAndIsDismissedOnStay) {
   const std::string suggestion = "40000000-0000-4000-8000-000000000002";
-  d.server.addFeedEvent(10, remoteProgress(10, kOtherId, kMd5A, 60, "", "{\"suggestion\":{\"id\":\"" + suggestion + "\"}}"));
+  d.server.addFeedEvent(
+      10, remoteProgress(10, kOtherId, kMd5A, 60, "", "{\"suggestion\":{\"id\":\"" + suggestion + "\"}}"));
   ASSERT_EQ(manual().outcome, SessionOutcome::Ok);
   d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
   ResumeDecision decision;
@@ -1425,7 +1455,9 @@ TEST_F(SyncEngineTest, RotatesAfterRenewAfterAndKeepsTheNewToken) {
   d.store->creds().renewAfterEpoch = kNow - 10;
   d.http.handler = [this](const RecordedRequest& r) {
     if (r.path == "/api/devices/self/credentials/rotate") {
-      return jsonReply(200, "{\"credential\":{\"token\":\"toto_NEW\",\"expires_at\":\"2027-06-01T00:00:00.000Z\"},\"grace_seconds\":300}");
+      return jsonReply(200,
+                       "{\"credential\":{\"token\":\"toto_NEW\",\"expires_at\":\"2027-06-01T00:00:00.000Z\"},\"grace_"
+                       "seconds\":300}");
     }
     return d.server.handle(r);
   };
@@ -1507,7 +1539,8 @@ TEST_F(SyncEngineTest, CancelAtEachStepLosesNothing) {
     probe.server.addFeedEvent(10, remoteProgress(10, kOtherId, kMd5B, 33));
     probe.server.focusEvent = "null";
     ResumeDecision decision;
-    ASSERT_EQ(probe.engine->runOpenSession(Device::bookRef(), Device::position(1), decision).outcome, SessionOutcome::Ok);
+    ASSERT_EQ(probe.engine->runOpenSession(Device::bookRef(), Device::position(1), decision).outcome,
+              SessionOutcome::Ok);
     total = probe.http.log.size();
   }
   ASSERT_GE(total, 4u);
@@ -1516,7 +1549,8 @@ TEST_F(SyncEngineTest, CancelAtEachStepLosesNothing) {
     Device dev;
     dev.boot();
     std::vector<std::string> ids(25);
-    for (int i = 0; i < 25; ++i) ASSERT_EQ(dev.appendRaw("e" + std::to_string(i), &ids[static_cast<size_t>(i)]), Outbox::AppendResult::Ok);
+    for (int i = 0; i < 25; ++i)
+      ASSERT_EQ(dev.appendRaw("e" + std::to_string(i), &ids[static_cast<size_t>(i)]), Outbox::AppendResult::Ok);
     dev.server.addFeedEvent(10, remoteProgress(10, kOtherId, kMd5B, 33));
     dev.server.focusEvent = "null";
     size_t countAtCancel = 0;
@@ -1540,7 +1574,8 @@ TEST_F(SyncEngineTest, CancelAtEachStepLosesNothing) {
     // Next session finishes everything, with the same ids.
     dev.http.beforeRequest = nullptr;
     dev.cancel.flag = false;
-    EXPECT_EQ(dev.engine->runManualSession(nullptr, nullptr, nullptr).outcome, SessionOutcome::Ok) << "cancelAt=" << cancelAt;
+    EXPECT_EQ(dev.engine->runManualSession(nullptr, nullptr, nullptr).outcome, SessionOutcome::Ok)
+        << "cancelAt=" << cancelAt;
     EXPECT_EQ(dev.outbox->depth(), 0u);
     for (const std::string& id : ids) EXPECT_EQ(dev.server.byId.count(id), 1u) << "cancelAt=" << cancelAt;
     EXPECT_EQ(dev.server.recorded.size(), ids.size());

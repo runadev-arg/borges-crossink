@@ -45,16 +45,16 @@ class JsonScanner {
 
   JsonType peek();  // Skips whitespace; does not consume the value.
 
-  bool enterObject();                        // False (nothing consumed) if not an object.
-  bool nextMember(char* key, size_t cap);    // True when positioned at a member value.
-  bool enterArray();                         // False (nothing consumed) if not an array.
-  bool nextElement();                        // True when positioned at an element.
+  bool enterObject();                      // False (nothing consumed) if not an object.
+  bool nextMember(char* key, size_t cap);  // True when positioned at a member value.
+  bool enterArray();                       // False (nothing consumed) if not an array.
+  bool nextElement();                      // True when positioned at an element.
 
   // Each of these consumes the value in every case. False means "not usable".
   bool readString(char* out, size_t cap, bool* truncated = nullptr);
-  bool readSequence(uint64_t& out);       // Decimal string, per the wire rule for 64-bit integers.
-  bool readInt(int64_t& out);             // JSON integer.
-  bool readPercentMicro(uint32_t& out);   // JSON number within 0..100, as millionths.
+  bool readSequence(uint64_t& out);      // Decimal string, per the wire rule for 64-bit integers.
+  bool readInt(int64_t& out);            // JSON integer.
+  bool readPercentMicro(uint32_t& out);  // JSON number within 0..100, as millionths.
   bool readBool(bool& out);
   bool skipValue();  // Validates structure. Depth only costs a counter.
 

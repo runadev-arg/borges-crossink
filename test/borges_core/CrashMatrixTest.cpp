@@ -29,8 +29,8 @@ class CycleRun {
   explicit CycleRun(TornMode mode) { d.fs.setTornMode(mode); }
 
   Device d;
-  std::vector<std::string> durableIds;    // Append returned Ok.
-  std::set<std::string> ackedDurably;     // Not in the queue anymore after a reboot.
+  std::vector<std::string> durableIds;  // Append returned Ok.
+  std::set<std::string> ackedDurably;   // Not in the queue anymore after a reboot.
   std::map<std::string, std::string> seqOfId;
   std::map<std::string, std::string> idOfSeq;
   std::vector<std::string> violations;
@@ -162,7 +162,8 @@ void checkInvariants(const CycleRun& run, const std::string& context) {
   // No unacked event lost once durable.
   for (const std::string& id : run.durableIds) EXPECT_EQ(run.d.server.byId.count(id), 1u) << context << " lost " << id;
   // Every text made it, even those whose append crashed and was redone under a new id.
-  for (int i = 0; i < 8; ++i) EXPECT_TRUE(run.d.server.hasText("event-" + std::to_string(i))) << context << " event-" << i;
+  for (int i = 0; i < 8; ++i)
+    EXPECT_TRUE(run.d.server.hasText("event-" + std::to_string(i))) << context << " event-" << i;
 }
 
 uint64_t countOps() {
@@ -207,7 +208,8 @@ TEST(CrashMatrix, SequenceRepairIsAllOrNothing) {
       d.boot();
       for (int i = 1; i <= 5; ++i) d.server.usedSeq.insert(std::to_string(i));
       std::vector<std::string> ids(3);
-      for (int i = 0; i < 3; ++i) ASSERT_EQ(d.appendRaw("r" + std::to_string(i), &ids[static_cast<size_t>(i)]), Outbox::AppendResult::Ok);
+      for (int i = 0; i < 3; ++i)
+        ASSERT_EQ(d.appendRaw("r" + std::to_string(i), &ids[static_cast<size_t>(i)]), Outbox::AppendResult::Ok);
       d.fs.killAtOp(d.fs.ops() + kill);
       d.engine->runManualSession(nullptr, nullptr, nullptr);
       const bool crashed = d.fs.dead();
@@ -220,8 +222,10 @@ TEST(CrashMatrix, SequenceRepairIsAllOrNothing) {
       ASSERT_EQ(d.server.recorded.size(), 3u) << "kill=" << kill;
       // Order preserved.
       for (size_t i = 0; i < 3; ++i) EXPECT_EQ(d.server.recorded[i].id, ids[i]) << "kill=" << kill;
-      EXPECT_LT(strtoull(d.server.recorded[0].seq.c_str(), nullptr, 10), strtoull(d.server.recorded[1].seq.c_str(), nullptr, 10));
-      EXPECT_LT(strtoull(d.server.recorded[1].seq.c_str(), nullptr, 10), strtoull(d.server.recorded[2].seq.c_str(), nullptr, 10));
+      EXPECT_LT(strtoull(d.server.recorded[0].seq.c_str(), nullptr, 10),
+                strtoull(d.server.recorded[1].seq.c_str(), nullptr, 10));
+      EXPECT_LT(strtoull(d.server.recorded[1].seq.c_str(), nullptr, 10),
+                strtoull(d.server.recorded[2].seq.c_str(), nullptr, 10));
       if (!crashed) break;
     }
   }
@@ -237,11 +241,14 @@ TEST(CrashMatrix, CursorNeverPassesWhatWasApplied) {
       d.config.pullLimit = 2;
       d.boot();
       for (uint64_t seq = 10; seq < 16; ++seq) {
-        const std::string event =
-            "{\"event_id\":\"evt-" + std::to_string(seq) + "\",\"server_sequence\":\"" + std::to_string(seq) +
-            "\",\"origin_device\":{\"id\":\"" + kOtherId + "\"},\"event_type\":\"progress.changed\","
-            "\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"" + kMd5A + "\"},"
-            "\"payload\":{\"percentage\":" + std::to_string(seq) + "},\"directive\":\"suggest_resume\",\"directive_metadata\":{}}";
+        const std::string event = "{\"event_id\":\"evt-" + std::to_string(seq) + "\",\"server_sequence\":\"" +
+                                  std::to_string(seq) + "\",\"origin_device\":{\"id\":\"" + kOtherId +
+                                  "\"},\"event_type\":\"progress.changed\","
+                                  "\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"" +
+                                  kMd5A +
+                                  "\"},"
+                                  "\"payload\":{\"percentage\":" +
+                                  std::to_string(seq) + "},\"directive\":\"suggest_resume\",\"directive_metadata\":{}}";
         d.server.addFeedEvent(seq, event);
       }
       d.fs.killAtOp(d.fs.ops() + kill);

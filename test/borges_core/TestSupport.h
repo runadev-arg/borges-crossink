@@ -46,9 +46,9 @@ using borges::WallTime;
 // ---------------------------------------------------------------------------------
 
 enum class TornMode {
-  Drop,   // Unflushed bytes are gone.
-  Half,   // The first half of the unflushed bytes reached the disk.
-  Keep,   // All of them reached the disk even though flush never returned.
+  Drop,  // Unflushed bytes are gone.
+  Half,  // The first half of the unflushed bytes reached the disk.
+  Keep,  // All of them reached the disk even though flush never returned.
 };
 
 class MemFs : public IFs {
@@ -477,13 +477,13 @@ class FakeServer {
   std::vector<RecordedEvent> recorded;
   std::map<std::string, size_t> byId;
   std::set<std::string> usedSeq;
-  std::vector<std::string> feed;           // Raw JSON of events for this device, in server order.
+  std::vector<std::string> feed;  // Raw JSON of events for this device, in server order.
   std::vector<uint64_t> feedSeq;
   uint64_t nextServerSeq = 100;
   uint64_t delivered = 0;
   uint64_t committed = 0;
   std::string focusEvent = "null";
-  std::set<std::string> rejectText;        // Events whose payload.text is this get rejected.
+  std::set<std::string> rejectText;  // Events whose payload.text is this get rejected.
   int duplicates = 0;
   std::vector<std::string> violations;
   std::function<void(const std::string& id)> onEventSeen;
@@ -515,12 +515,13 @@ class FakeServer {
   }
 
   static Reply capabilities() {
-    return jsonReply(200,
-                     "{\"protocol_version\":2,\"supported_protocol_versions\":[2],\"event_versions\":{"
-                     "\"progress.changed\":[1],\"session.started\":[1],\"session.ended\":[1],\"page_stat.recorded\":[1],"
-                     "\"annotation.created\":[1],\"annotation.updated\":[1],\"annotation.deleted\":[1],"
-                     "\"bookmark.upserted\":[1],\"bookmark.deleted\":[1],\"device.library_reported\":[1]},"
-                     "\"limits\":{\"push_events\":100},\"cursor\":{\"encoding\":\"decimal_string\"}}");
+    return jsonReply(
+        200,
+        "{\"protocol_version\":2,\"supported_protocol_versions\":[2],\"event_versions\":{"
+        "\"progress.changed\":[1],\"session.started\":[1],\"session.ended\":[1],\"page_stat.recorded\":[1],"
+        "\"annotation.created\":[1],\"annotation.updated\":[1],\"annotation.deleted\":[1],"
+        "\"bookmark.upserted\":[1],\"bookmark.deleted\":[1],\"device.library_reported\":[1]},"
+        "\"limits\":{\"push_events\":100},\"cursor\":{\"encoding\":\"decimal_string\"}}");
   }
 
   std::string pageJson(uint64_t cursor, size_t limit) {
@@ -560,8 +561,9 @@ class FakeServer {
                                 "\",\"has_more\":false,\"server_time\":\"2026-11-05T12:00:00.000Z\"}");
     }
     if (cursor > delivered && cursor > 0) {
-      return apiError(409, "cursor_not_delivered",
-                      "{\"cursor\":\"" + std::to_string(cursor) + "\",\"deliveredCursor\":\"" + std::to_string(delivered) + "\"}");
+      return apiError(
+          409, "cursor_not_delivered",
+          "{\"cursor\":\"" + std::to_string(cursor) + "\",\"deliveredCursor\":\"" + std::to_string(delivered) + "\"}");
     }
     if (cursor > committed) committed = cursor;
     return jsonReply(200, "{\"protocol_version\":2," + pageJson(cursor, doc["limit"] | pageLimit) +
@@ -573,12 +575,14 @@ class FakeServer {
     if (deserializeJson(doc, req.body)) return apiError(422, "validation_failed");
     const uint64_t cursor = strtoull(doc["cursor"] | "0", nullptr, 10);
     if (cursor < committed) {
-      return apiError(409, "cursor_regression",
-                      "{\"cursor\":\"" + std::to_string(cursor) + "\",\"committedCursor\":\"" + std::to_string(committed) + "\"}");
+      return apiError(
+          409, "cursor_regression",
+          "{\"cursor\":\"" + std::to_string(cursor) + "\",\"committedCursor\":\"" + std::to_string(committed) + "\"}");
     }
     if (cursor > delivered) {
-      return apiError(409, "cursor_not_delivered",
-                      "{\"cursor\":\"" + std::to_string(cursor) + "\",\"deliveredCursor\":\"" + std::to_string(delivered) + "\"}");
+      return apiError(
+          409, "cursor_not_delivered",
+          "{\"cursor\":\"" + std::to_string(cursor) + "\",\"deliveredCursor\":\"" + std::to_string(delivered) + "\"}");
     }
     committed = cursor;
     return jsonReply(200, "{\"protocol_version\":2,\"cursor\":\"" + std::to_string(cursor) + "\"}");
@@ -609,7 +613,8 @@ class FakeServer {
     }
     if (conflict) {
       return apiError(409, "client_sequence_conflict",
-                      "{\"next_client_sequence\":\"" + std::to_string(maxSeq + 1) + "\",\"unrecorded_events\":[" + unrecorded + "]}");
+                      "{\"next_client_sequence\":\"" + std::to_string(maxSeq + 1) + "\",\"unrecorded_events\":[" +
+                          unrecorded + "]}");
     }
 
     std::string acks = "[";
@@ -680,12 +685,16 @@ inline std::string remoteProgress(uint64_t seq, const std::string& origin, const
   std::string xp = xpointer.empty() ? "null" : "\"" + xpointer + "\"";
   std::string meta = extraMeta.empty() ? "{}" : extraMeta;
   return "{\"event_id\":\"evt-" + std::to_string(seq) + "\",\"server_sequence\":\"" + std::to_string(seq) +
-         "\",\"origin_device\":{\"id\":\"" + origin + "\",\"name\":\"Kobo\",\"platform\":\"kobo\"},"
+         "\",\"origin_device\":{\"id\":\"" + origin +
+         "\",\"name\":\"Kobo\",\"platform\":\"kobo\"},"
          "\"client_event_id\":\"30000000-0000-4000-8000-000000000001\",\"client_sequence\":\"1\",\"event_version\":1,"
          "\"event_type\":\"progress.changed\",\"aggregate_type\":\"reading_progress\",\"aggregate_id\":\"x\","
-         "\"document_id\":null,\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"" + md5 + "\"},"
+         "\"document_id\":null,\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"" +
+         md5 +
+         "\"},"
          "\"occurred_at\":\"2026-11-05T10:00:00.000Z\",\"time_precision\":\"exact\",\"monotonic_ms\":null,"
-         "\"payload\":{\"percentage\":" + std::to_string(pct) + ",\"current_page\":10,\"total_pages\":100,\"xpointer\":" + xp +
+         "\"payload\":{\"percentage\":" +
+         std::to_string(pct) + ",\"current_page\":10,\"total_pages\":100,\"xpointer\":" + xp +
          ",\"explicit_jump\":false},\"received_at\":\"2026-11-05T10:00:01.000Z\",\"directive\":\"" + directive +
          "\",\"directive_metadata\":" + meta + "}";
 }
@@ -695,14 +704,24 @@ inline std::string focusEventJson(const std::string& origin, const std::string& 
                                   const std::string& eventId = "evt-500", const std::string& xpointer = "/body/p[9].0",
                                   const std::string& precision = "exact") {
   std::string xp = xpointer.empty() ? "null" : "\"" + xpointer + "\"";
-  return "{\"event_id\":\"" + eventId + "\",\"server_sequence\":\"500\",\"event_type\":\"progress.changed\",\"event_version\":1,"
-         "\"document_id\":null,\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"" + md5 + "\"},"
-         "\"origin_device\":{\"id\":\"" + origin + "\",\"name\":\"Kobo Clara\",\"platform\":\"kobo\"},"
-         "\"occurred_at\":\"2026-11-05T10:00:00.000Z\",\"time_precision\":\"" + precision + "\","
-         "\"payload\":{\"percentage\":" + std::to_string(pct) + ",\"current_page\":10,\"total_pages\":100,\"xpointer\":" + xp +
-         ",\"explicit_jump\":false,\"event_id\":\"" + eventId + "\",\"device_id\":\"" + origin + "\"},"
+  return "{\"event_id\":\"" + eventId +
+         "\",\"server_sequence\":\"500\",\"event_type\":\"progress.changed\",\"event_version\":1,"
+         "\"document_id\":null,\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"" +
+         md5 +
+         "\"},"
+         "\"origin_device\":{\"id\":\"" +
+         origin +
+         "\",\"name\":\"Kobo Clara\",\"platform\":\"kobo\"},"
+         "\"occurred_at\":\"2026-11-05T10:00:00.000Z\",\"time_precision\":\"" +
+         precision +
+         "\","
+         "\"payload\":{\"percentage\":" +
+         std::to_string(pct) + ",\"current_page\":10,\"total_pages\":100,\"xpointer\":" + xp +
+         ",\"explicit_jump\":false,\"event_id\":\"" + eventId + "\",\"device_id\":\"" + origin +
+         "\"},"
          "\"directive\":\"suggest_resume\",\"directive_metadata\":{\"reading_head\":true,\"source_is_stale\":false,"
-         "\"source\":{\"percentage\":" + std::to_string(pct) + "}}}";
+         "\"source\":{\"percentage\":" +
+         std::to_string(pct) + "}}}";
 }
 
 // ---------------------------------------------------------------------------------
@@ -808,8 +827,9 @@ struct Device {
     std::string body = "\"event_version\":1,\"event_type\":\"" + typeName +
                        "\",\"aggregate_type\":\"annotation\",\"aggregate_id\":\"a\",\"document_id\":null,"
                        "\"book_identifier\":{\"kind\":\"koreader_partial_md5\",\"value\":\"" +
-                       std::string(md5) + "\"},\"occurred_at\":null,\"time_precision\":\"unknown\",\"payload\":{\"text\":\"" +
-                       paddedText + "\",\"filler\":\"" + filler + "\"}";
+                       std::string(md5) +
+                       "\"},\"occurred_at\":null,\"time_precision\":\"unknown\",\"payload\":{\"text\":\"" + paddedText +
+                       "\",\"filler\":\"" + filler + "\"}";
     uint8_t raw[16];
     const auto result = outbox->append(kind, id.md5, body.data(), body.size(), replace, raw, nullptr);
     if (result == borges::Outbox::AppendResult::Ok && idOut) {

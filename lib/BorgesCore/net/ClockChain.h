@@ -38,9 +38,9 @@ enum class ClockSource : uint8_t { Sntp, HttpDate, HttpsDate };
 // and a value that would rewind the device is refused: the certificate check is what a
 // wrong clock would weaken.
 struct ClockTrust {
-  int64_t anchorEpoch = 0;     // Last server_time seen, 0 if never.
-  int64_t buildEpoch = 0;      // This firmware cannot run before it was built.
-  bool allowLongGap = false;   // A person asked: a reader left in a drawer for over a year recovers.
+  int64_t anchorEpoch = 0;    // Last server_time seen, 0 if never.
+  int64_t buildEpoch = 0;     // This firmware cannot run before it was built.
+  bool allowLongGap = false;  // A person asked: a reader left in a drawer for over a year recovers.
 };
 constexpr int64_t kMaxClockGapSec = 366 * 24 * 3600;
 bool repairAcceptable(int64_t epoch, const ClockTrust& trust);
