@@ -300,7 +300,6 @@ SessionReport SyncEngine::finish(SessionReport report, SessionKind kind) {
 
   SyncState& s = store_.state();
   if (report.outcome == SessionOutcome::Ok) {
-    if (kind != SessionKind::Open) maybeRotate(report);
     s.failures = 0;
     s.nextAttemptEpoch = 0;
     s.needsRelink = false;
@@ -314,6 +313,8 @@ SessionReport SyncEngine::finish(SessionReport report, SessionKind kind) {
   return report;
 }
 
+    // Last: what it finds wrong with the credential must survive the clearing above.
+    if (kind != SessionKind::Open) maybeRotate(report);
 // Pull before push (rule 9): if the pull fails, drain does not run, or stale progress
 // would become the latest write.
 void SyncEngine::pullAndDrain(SessionReport& report) {
@@ -1412,7 +1413,9 @@ void SyncEngine::maybeRotate(SessionReport& report) {
   if ((!byRenew && !byExpiry) || !api_.canContinue()) return;
 
   static constexpr char kEmpty[] = "{}";
-  const ApiResult r = api_.call("POST", kRotatePath, reinterpret_cast<const uint8_t*>(kEmpty), 2);
+  // Once only: the server rotates a credential one time. An answer lost on the way cannot be asked
+  // for again, and asking gets credential_already_rotated.
+  const ApiResult r = api_.callOnce("POST", kRotatePath, reinterpret_cast<const uint8_t*>(kEmpty), 2);
   if (r.kind != ApiKind::Ok) {
     scrubFile(fs_, kSpoolPath);  // A cut answer can still hold the token.
     if (r.kind == ApiKind::HttpError && (r.status == 401 || r.status == 403))
@@ -1450,6 +1453,19 @@ void SyncEngine::maybeRotate(SessionReport& report) {
   if (scan.failed() || !token[0] || truncated) return;
   copyText(c.token, sizeof(c.token), token);
   memset(token, 0, sizeof(token));
+    } else if (r.kind == ApiKind::HttpError && r.status == 409 && strcmp(r.code, "credential_already_rotated") == 0) {
+      // The token that replaced this one was lost with an answer. This one still works for its
+      // grace, then the server stops taking it, and only pairing again recovers from that. Said
+      // now, while nothing is lost, rather than as a surprise later. Stops asking: it cannot help.
+      c.renewAfterEpoch = 0;
+      c.expiresAtEpoch = 0;
+      store_.saveCredentials();
+      SyncState& s = store_.state();
+      s.needsRelink = true;
+      setDiag(SyncStage::Rotate, r.code, r.message, r);
+      store_.saveState();
+      report.outcome = SessionOutcome::NeedsRelink;
+    }
   c.expiresAtEpoch = expires;
   c.renewAfterEpoch = 0;
   store_.saveCredentials();
@@ -1468,8 +1484,19 @@ DisconnectResult SyncEngine::disconnect(bool online) {
     w.objectEnd();
     const ApiResult r = api_.call("POST", kRotatePath, reinterpret_cast<const uint8_t*>(body), w.size());
     // Already refused is just as dead.
-    invalidated = r.kind == ApiKind::Ok || (r.kind == ApiKind::HttpError && (r.status == 401 || r.status == 403));
-    scrubFile(fs_, kSpoolPath);
+    invalidated = ignored.outcome == SessionOutcome::NeedsRelink;
+    if (!invalidated) {
+      api_.beginSession(kDisconnectBudgetMs);
+      char body[64];
+      JsonWriter w(body, sizeof(body));
+      w.objectBegin();
+      w.kvInt("expires_in_seconds", kShortestCredentialTtlSec);
+      w.kvInt("grace_seconds", 0);
+      w.objectEnd();
+      const ApiResult r = api_.callOnce("POST", kRotatePath, reinterpret_cast<const uint8_t*>(body), w.size());
+      invalidated = r.kind == ApiKind::Ok || (r.kind == ApiKind::HttpError && (r.status == 401 || r.status == 403));
+      scrubFile(fs_, kSpoolPath);
+    }
     api_.endSession();
   }
   if (!store_.forgetCredential()) return DisconnectResult::LocalError;

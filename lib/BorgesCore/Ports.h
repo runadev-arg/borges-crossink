@@ -106,6 +106,8 @@ class ISecretBox {
  public:
   static constexpr size_t kOverhead = 28;  // nonce(12) + tag(16)
   virtual ~ISecretBox() = default;
+  // Called before anything else, with the radio off: a key that does not exist yet is made here.
+  virtual void prepare() {}
   virtual bool seal(const uint8_t* plain, size_t len, uint8_t* out) = 0;   // out holds len + kOverhead.
   virtual bool open(const uint8_t* sealed, size_t len, uint8_t* out) = 0;  // out holds len - kOverhead.
 };

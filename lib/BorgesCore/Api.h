@@ -54,6 +54,9 @@ class Api {
   // extraHeaders may be null. On Ok the body is in spoolPath().
   ApiResult call(const char* method, const char* path, const uint8_t* body, size_t bodyLen,
                  const HttpHeader* extraHeaders = nullptr, uint8_t extraCount = 0);
+  // For what the server does only once and answers only once: a claim, a rotation. No reconnect,
+  // because repeating it cannot bring back the answer it lost.
+  ApiResult callOnce(const char* method, const char* path, const uint8_t* body, size_t bodyLen);
   // Same, but delivers the body to sink (for a file download) and does not decode errors.
   ApiResult callTo(const char* method, const char* path, IHttpSink& sink, const HttpHeader* extraHeaders,
                    uint8_t extraCount);
@@ -71,6 +74,8 @@ class Api {
     Api& api_;
   };
 
+  ApiResult request(const char* method, const char* path, const uint8_t* body, size_t bodyLen,
+                    const HttpHeader* extraHeaders, uint8_t extraCount, bool mayRepeat);
   void perform(const char* method, const char* path, const uint8_t* body, size_t bodyLen, IHttpSink& sink,
                const HttpHeader* extraHeaders, uint8_t extraCount, HttpResponse& out);
   void decodeError(ApiResult& result);

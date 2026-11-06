@@ -1651,6 +1651,36 @@ TEST_F(SyncEngineTest, EachKindGetsItsOwnBudget) {
 }
 
 // --- Bookkeeping ------------------------------------------------------------------
+TEST_F(SyncEngineTest, ALostRotationAnswerIsNotAskedForAgainInTheSameBreath) {
+  d.store->creds().renewAfterEpoch = kNow - 10;
+  d.http.handler = [this](const RecordedRequest& r) {
+    if (r.path == "/api/devices/self/credentials/rotate") return dropped();
+    return d.server.handle(r);
+  };
+  EXPECT_EQ(manual().outcome, SessionOutcome::Ok);
+  EXPECT_EQ(d.http.countPath("/api/devices/self/credentials/rotate"), 1u) << "the server rotates once";
+  EXPECT_STREQ(d.store->creds().token, "toto_SECRET_TOKEN_VALUE");
+}
+
+TEST_F(SyncEngineTest, ARotationThatWasAlreadySpentAsksToPairAgain) {
+  // The answer that carried the new token never arrived. The old one works until its grace ends,
+  // and nothing recovers it after that: better said now than discovered then.
+  d.store->creds().renewAfterEpoch = kNow - 10;
+  d.http.handler = [this](const RecordedRequest& r) {
+    if (r.path == "/api/devices/self/credentials/rotate") return apiError(409, "credential_already_rotated");
+    return d.server.handle(r);
+  };
+  EXPECT_EQ(manual().outcome, SessionOutcome::NeedsRelink);
+  EXPECT_TRUE(d.store->state().needsRelink);
+  EXPECT_STREQ(d.store->state().diag.code, "credential_already_rotated");
+  EXPECT_EQ(d.engine->gate(SessionKind::Open), Gate::NeedsRelink);
+  EXPECT_STREQ(d.store->creds().token, "toto_SECRET_TOKEN_VALUE") << "still good while it lasts";
+  d.http.log.clear();
+  d.store->state().needsRelink = false;
+  manual();
+  EXPECT_EQ(d.http.countPath("/api/devices/self/credentials/rotate"), 0u) << "asking again cannot help";
+}
+
 
 TEST_F(SyncEngineTest, StatusAndDiagnosticsAreStructured) {
   ASSERT_EQ(d.appendRaw("a"), Outbox::AppendResult::Ok);

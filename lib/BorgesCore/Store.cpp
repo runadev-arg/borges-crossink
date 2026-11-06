@@ -5,6 +5,7 @@
 
 #include "Codec.h"
 #include "JsonStream.h"
+#include "Spool.h"
 
 namespace borges {
 
@@ -157,10 +158,16 @@ void Store::obfuscate(char* text, size_t len) const {
 }
 
 bool Store::begin() {
+  // Now, not at the first seal: that happens with the radio up, where the entropy source a new
+  // key is drawn from is not available.
+  box_.prepare();
   fs_.mkdir("/.crosspoint");
   if (!fs_.mkdir(kBorgesDir)) return false;
   fs_.mkdir(kOutboxDir);
   fs_.mkdir("/.crosspoint/borges/spool");
+  // A rotation or a claim scrubs its answer when it has read it. Power lost in between leaves a
+  // token in the clear, and this is the first thing that runs after that.
+  scrubFile(fs_, kSpoolPath);
   fs_.mkdir("/.crosspoint/borges/books");
   fs_.mkdir("/.crosspoint/borges/ann");
   fs_.mkdir("/.crosspoint/borges/catalog");
@@ -226,6 +233,8 @@ bool Store::begin() {
   if (stateFile_.ioError()) return false;
 
   if (migrate) {
+    // That token sat on the card readable by anyone with the MAC, so it does not stay in use.
+    if (creds_.token[0]) creds_.renewAfterEpoch = 1;
     // A failure here is retried at the next begin: the old record is still the newest.
     writeCredentials(true);
   } else if (!haveCreds) {
@@ -294,7 +303,11 @@ bool Store::readCredentialsV2(ByteReader& r) {
   return true;
 }
 
-bool Store::saveCredentials() { return writeCredentials(false); }
+bool Store::saveCredentials() {
+  const bool ok = writeCredentials(false);
+  if (ok) syncMarkers();
+  return ok;
+}
 
 bool Store::writeCredentials(bool exclusive) {
   uint8_t buf[1024];
@@ -614,7 +627,10 @@ bool Store::importLegacy() {
     if (!fs_.exists(path)) return false;
   }
   const bool imported = decodeLegacy(path);
-  saveCredentials();
+  // Still readable on the card, and the old firmware's folder is never written. The next session
+  // that can vouch for its clock replaces it, which also ends going back without pairing again.
+  if (imported) creds_.renewAfterEpoch = 1;
+  writeCredentials(false);
   return imported;
 }
 

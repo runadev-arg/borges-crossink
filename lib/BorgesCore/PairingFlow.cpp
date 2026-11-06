@@ -293,7 +293,7 @@ void PairingFlow::claim() {
   w.kv("request_id", p.requestId);
   w.kv("device_nonce", p.nonce);
   w.objectEnd();
-  const ApiResult r = api_.call("POST", kClaimPath, reinterpret_cast<const uint8_t*>(body), w.size());
+  const ApiResult r = api_.callOnce("POST", kClaimPath, reinterpret_cast<const uint8_t*>(body), w.size());
   if (r.kind != ApiKind::Ok) {
     scrubFile(fs_, kSpoolPath);  // A cut answer can still hold the token.
     note(r, r.kind == ApiKind::Transport ? "transport" : "pairing_claim_failed");

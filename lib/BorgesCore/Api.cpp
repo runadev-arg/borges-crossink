@@ -106,6 +106,15 @@ ApiResult Api::callTo(const char* method, const char* path, IHttpSink& sink, con
 
 ApiResult Api::call(const char* method, const char* path, const uint8_t* body, size_t bodyLen,
                     const HttpHeader* extraHeaders, uint8_t extraCount) {
+  return request(method, path, body, bodyLen, extraHeaders, extraCount, true);
+}
+
+ApiResult Api::callOnce(const char* method, const char* path, const uint8_t* body, size_t bodyLen) {
+  return request(method, path, body, bodyLen, nullptr, 0, false);
+}
+
+ApiResult Api::request(const char* method, const char* path, const uint8_t* body, size_t bodyLen,
+                       const HttpHeader* extraHeaders, uint8_t extraCount, const bool mayRepeat) {
   ApiResult result;
   for (int attempt = 0;; ++attempt) {
     if (cancelled()) {
@@ -140,9 +149,9 @@ ApiResult Api::call(const char* method, const char* path, const uint8_t* body, s
         result.kind = ApiKind::Budget;
         return result;
       }
-      // A dropped socket earns one reconnect per session. Every request here is
-      // safe to repeat: events carry immutable ids and pulls carry the same cursor.
-      if (attempt == 0 && !reconnectUsed_) {
+      // A dropped socket earns one reconnect per session. Events carry immutable ids and pulls
+      // carry the same cursor, so those are safe to repeat. What is not says so.
+      if (mayRepeat && attempt == 0 && !reconnectUsed_) {
         reconnectUsed_ = true;
         http_.disconnect();
         continue;
