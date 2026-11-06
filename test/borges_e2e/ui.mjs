@@ -24,7 +24,8 @@ export async function bootToHome(d, opts = {}) {
 async function homeFocusY(d) {
   const screen = await d.pixels();
   for (let y = 50; y < 730; y += 4) {
-    if (screen.inkFraction(444, y, 456, y + 4) > 0.1) return y;
+    // The focus bar is a dither (0.25 here). The book card's bottom edge leaves 0.15 at y 238 in every state.
+    if (screen.inkFraction(444, y, 456, y + 4) > 0.2) return y;
   }
   return -1;
 }
