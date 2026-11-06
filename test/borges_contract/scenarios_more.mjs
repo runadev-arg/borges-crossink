@@ -626,15 +626,14 @@ async function annotations(h, t) {
   t.eq((await finalize(remaining)).finalize.annotations_deleted, 1, "and it can be deleted once more");
   t.eq((await fw.once("sleep-session")).report.events_rejected, 0, "accepted");
 
-  // Inbound: what KOReader writes moves the firmware's cursor and leaves nothing on its card.
+  // Inbound: what KOReader writes moves the firmware's cursor. Scenario 17 has what it becomes.
   const inboundSync = KoreaderSim.annotationSyncId(a.md5, { kind: "highlight", xpointer: xp(600), pos1: xp(601) });
   kr.enqueueAnnotation({ book: a.md5, bookInfo: bookInfo(a), text: "Desde KOReader ñ 📖", note: "nota de allá", chapter: "Capítulo 9", page: 60, xpointer: xp(600), pos1: xp(601), timeMs: 1790000001000 });
   const krUp = await kr.syncAll();
   t.eq(krUp.acks[0].status, "accepted", "KOReader's annotation accepted");
   t.eq((await fw.once("manual-session")).report.outcome, "ok", "the firmware pulls it");
   t.eq((await fw.once("status")).cursor, await watermark(h, account.id), "and its cursor goes past it");
-  const onCard = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? onCard(path.join(dir, e.name)) : [path.join(dir, e.name)]));
-  t.ok(!onCard(fw.borgesDir()).some((f) => !f.endsWith("resp.json") && fs.readFileSync(f).includes("Desde KOReader")), "nothing of it is kept on the card");
+  t.eq((await fw.once("inbound", bookArgs(a))).highlights.map((x) => x.text), ["Desde KOReader ñ 📖"], "and lists it");
   kr.enqueueAnnotationDelete({ book: a.md5, bookInfo: bookInfo(a), syncId: inboundSync });
   const krDel = await kr.syncAll();
   t.eq(krDel.acks[0].status, "accepted", `KOReader's delete accepted: ${krDel.acks[0].rejection_code}`);

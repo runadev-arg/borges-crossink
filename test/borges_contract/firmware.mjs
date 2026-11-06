@@ -151,6 +151,18 @@ export class Firmware {
     }
   }
 
+  cardFiles(dir = this.sd) {
+    return fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? this.cardFiles(path.join(dir, e.name)) : [path.join(dir, e.name)]));
+  }
+
+  cardHolds(needle) {
+    return this.cardFiles().filter((f) => fs.readFileSync(f).includes(needle));
+  }
+
+  fileSize(file) {
+    return fs.statSync(file).size;
+  }
+
   // Clips as the reader has them on disk. See TsvClips in borges_cli.cpp.
   writeClips(rows, fileName = "clips.tsv") {
     const esc = (v) => String(v ?? "").replace(/\\/g, "\\\\").replace(/\t/g, "\\t").replace(/\n/g, "\\n");

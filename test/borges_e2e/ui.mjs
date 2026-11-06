@@ -266,12 +266,13 @@ export async function choose(d, { stay = false } = {}) {
 // and its icon, filled, is how the harness knows the press was not lost to a repaint.
 const LOCATION_TAB = [310, 150, 350, 185];
 
-export async function openLocationTab(d) {
+export async function openLocationTab(d, { portrait = true } = {}) {
   const mark = d.mark();
   await d.press("CONFIRM");
   await d.waitLog(/Entering activity: \w*Drawer/, { since: mark });
   await d.waitStable(300);
   await d.tap("RIGHT", { settleMs: 200 });
+  if (!portrait) return;
   const filled = (await d.pixels()).darkFraction(...LOCATION_TAB);
   if (filled < 0.5) throw new Error(`the drawer is not on its location tab (${filled.toFixed(2)})`);
 }
@@ -290,7 +291,7 @@ async function toggleBookmarkRow(d) {
 
 // Rows: Add/Remove Bookmark, [View Bookmarks, Clear], Create Clipping, [View Clippings],
 // Sync now, Go to where another reader left off, [Undo], Nearby..., and the first Down only takes the focus to the first row.
-export function locationRows({ hasBookmarks = false, hasClippings = false, hasUndo = false } = {}) {
+export function locationRows({ hasBookmarks = false, hasClippings = false, hasUndo = false, hasInbound = false } = {}) {
   let i = 0;
   const rows = { bookmark: i++ };
   if (hasBookmarks) {
@@ -299,6 +300,7 @@ export function locationRows({ hasBookmarks = false, hasClippings = false, hasUn
   }
   rows.clip = i++;
   if (hasClippings) rows.viewClippings = i++;
+  if (hasInbound) rows.inbound = i++;
   rows.sync = i++;
   rows.otherDevice = i++;
   if (hasUndo) rows.undo = i++;

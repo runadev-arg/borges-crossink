@@ -10,6 +10,7 @@ import { Device } from "./device.mjs";
 import { E2eServer, E2E_ROOT } from "./server.mjs";
 import { SCENARIOS } from "./scenarios.mjs";
 import { MORE_SCENARIOS } from "./scenarios_more.mjs";
+import { INBOUND_SCENARIOS } from "./scenarios_inbound.mjs";
 
 const ARTIFACTS = "D:\\CrossInkBorges\\artifacts\\e2e";
 const args = process.argv.slice(2);
@@ -69,7 +70,7 @@ async function main() {
   for (const dir of [shotsRoot, devicesRoot]) removeQuietly(dir);
   await harness.start();
   console.log(`Local throwaway stack up: database ${harness.dbInfo.database} on ${harness.dbInfo.host}:${harness.dbInfo.port}, server on port ${harness.serverPort}`);
-  for (const scenario of [...SCENARIOS, ...MORE_SCENARIOS]) {
+  for (const scenario of [...SCENARIOS, ...MORE_SCENARIOS, ...INBOUND_SCENARIOS]) {
     if (only && !only.includes(String(scenario.id))) continue;
     const t = new Checks();
     const devices = [];

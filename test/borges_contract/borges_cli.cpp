@@ -946,6 +946,8 @@ class Device {
       body = download(a);
     } else if (cmd == "on-sd") {
       body = onSd(a);
+    } else if (cmd == "inbound") {
+      body = inbound(a);
     } else if (cmd == "remote-head") {
       body = remoteHead(a);
     } else if (cmd == "undo") {
@@ -1316,6 +1318,59 @@ class Device {
     CatalogEntry entry;
     if (!findCached(a, entry)) return "\"result\":\"not_in_cache\"";
     return std::string("\"on_sd\":") + boolText(catalogObject().isOnSd(entry, arg(a, "dir", "/books").c_str()));
+  }
+
+  // What the list on the device would show. clips: this reader's own, as for a finalize.
+  class TsvPassages : public IOwnPassages {
+   public:
+    explicit TsvPassages(TsvClips& clips) {
+      size_t count = 0;
+      if (!clips.count(count)) return;
+      for (size_t i = 0; i < count; ++i) {
+        ClipKey key;
+        ClipDetail detail;
+        if (clips.key(i, key) && !key.bookmark && clips.detail(i, detail)) {
+          own_.push_back({passageHash(detail.text), static_cast<int32_t>(key.spine)});
+        }
+      }
+    }
+    bool isOwn(uint64_t passage, int32_t spine) override {
+      for (const auto& o : own_) {
+        if (o.first == passage && (spine < 0 || o.second == spine)) return true;
+      }
+      return false;
+    }
+
+   private:
+    std::vector<std::pair<uint64_t, int32_t>> own_;
+  };
+
+  std::string inbound(const Args& a) {
+    const BookRef book = bookRef(a);
+    std::unique_ptr<TsvClips> clips;
+    std::unique_ptr<TsvPassages> own;
+    if (hasArg(a, "clips")) {
+      clips = std::make_unique<TsvClips>(arg(a, "clips"));
+      own = std::make_unique<TsvPassages>(*clips);
+    }
+    InboundList list(fs_);
+    const uint16_t epoch = store_.state().accountEpoch;
+    const bool ok = list.load(book.id, epoch, own.get());
+    std::ostringstream o;
+    o << "\"read\":" << boolText(ok) << ",\"has_any\":" << boolText(InboundList::hasAny(fs_, book.id, epoch, own.get()))
+      << ",\"partial\":" << boolText(list.partial()) << ",\"highlights\":[";
+    auto h = std::make_unique<InboundHighlight>();
+    for (uint16_t i = 0; i < list.count(); ++i) {
+      if (!list.read(i, *h)) continue;
+      char sync[37];
+      uuidFormat(h->syncId, sync);
+      o << (i ? "," : "") << "{\"sync_id\":" << esc(sync) << ",\"server_seq\":\"" << h->serverSeq << "\",\"revision\":" << h->revision
+        << ",\"truncated\":" << boolText(h->truncated) << ",\"has_pct\":" << boolText(h->hasPct) << ",\"pct_micro\":" << h->pctMicro
+        << ",\"time\":" << h->timeEpoch << ",\"xpointer\":" << esc(h->xpointer) << ",\"chapter\":" << esc(h->chapter)
+        << ",\"device\":" << esc(h->device) << ",\"text\":" << esc(h->text) << "}";
+    }
+    o << "]";
+    return o.str();
   }
 
   std::string remoteHead(const Args& a) {
