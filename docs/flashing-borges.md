@@ -41,7 +41,7 @@ cambia por uno nuevo en la primera sincronización.
 ## Camino 1: por tarjeta SD (sin PC conectada)
 
 1. Copiá `firmware-x3-x4-v<versión>.bin` a la raíz de la tarjeta.
-2. En el lector: **Ajustes > Sistema > Actualizar firmware por tarjeta SD** (si está en inglés,
+2. En el lector: **Ajustes > Sistema > Actualizar firmware por tarj. SD** (si está en inglés,
    *SD Card Firmware Update*).
 3. Elegí el archivo y confirmá. Al terminar, reinicia solo.
 
