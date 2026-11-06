@@ -19,14 +19,17 @@ class Epub {
     if (i < 0 || i >= getSpineItemsCount()) return {};
     return {"c" + std::to_string(i)};
   }
-  bool readItemContentsToStream(const std::string& h, Print& out, size_t chunk, bool = false) const {
+  static inline size_t bytesFed = 0;
+  bool readItemContentsToStream(const std::string& h, Print& out, size_t chunk, bool allowEarlyStop = false) const {
     for (int i = 0; i < getSpineItemsCount(); i++) {
       if (h != getSpineItem(i).href) continue;
       auto& c = spine[i];
       size_t o = 0;
       while (o < c.size()) {
         size_t n = std::min(chunk, c.size() - o);
-        out.write((const uint8_t*)c.data() + o, n);
+        bytesFed += n;
+        // As ZipFile: a short write ends the stream, a success only if the caller allows it.
+        if (out.write((const uint8_t*)c.data() + o, n) != n) return allowEarlyStop;
         o += n;
       }
       return true;

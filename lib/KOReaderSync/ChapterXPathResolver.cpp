@@ -1,5 +1,6 @@
 #include "ChapterXPathResolver.h"
 
+#include <Arduino.h>
 #include <Epub/htmlEntities.h>
 #include <Epub/parsers/VisibleOffsetRules.h>
 #include <Logging.h>
@@ -17,6 +18,9 @@
 #include <string>
 
 namespace {
+
+uint32_t sDeadlineMs = 0;
+bool sDeadlineHit = false;
 
 // ---------------------------------------------------------------------------------------------
 // crengine's element table (crengine/include/fb2def.h). An element it does not know is inline
@@ -262,7 +266,14 @@ class CreWalker final : public Print {
   size_t write(uint8_t c) override { return write(&c, 1); }
 
   size_t write(const uint8_t* buffer, size_t size) override {
-    if (!parser_ || !parseOk_ || stopped_) return size;
+    // A short write is what ends the chapter's inflate. Answering "all taken" keeps a walker that
+    // already has its answer reading megabytes it will not look at.
+    if (!parser_ || !parseOk_ || stopped_) return 0;
+    if (sDeadlineMs != 0 && static_cast<int32_t>(millis() - sDeadlineMs) >= 0) {
+      sDeadlineHit = true;
+      parseOk_ = false;
+      return 0;
+    }
     if (XML_Parse(parser_, reinterpret_cast<const char*>(buffer), static_cast<int>(size), XML_FALSE) != XML_STATUS_OK) {
       const enum XML_Error error = XML_GetErrorCode(parser_);
       if (error != XML_ERROR_ABORTED) {
@@ -1382,7 +1393,7 @@ class ScopedCss {
 
 bool stream(const std::shared_ptr<Epub>& epub, const int spineIndex, CreWalker& walker) {
   const auto href = epub->getSpineItem(spineIndex).href;
-  if (href.empty() || !epub->readItemContentsToStream(href, walker, 1024)) return false;
+  if (href.empty() || !epub->readItemContentsToStream(href, walker, 1024, /*allowEarlyStop=*/true)) return false;
   walker.finish();
   return true;
 }
@@ -1424,6 +1435,13 @@ std::string emitElement(const std::shared_ptr<Epub>& epub, const int spineIndex,
   return walker->xpointer();
 }
 }  // namespace
+
+void ChapterXPathResolver::setDeadline(const uint32_t atMillis) {
+  sDeadlineMs = atMillis;
+  sDeadlineHit = false;
+}
+
+bool ChapterXPathResolver::deadlineHit() { return sDeadlineHit; }
 
 bool ChapterXPathResolver::locateText(const std::shared_ptr<Epub>& epub, const int spineIndex, const char* text,
                                       const uint32_t anchorOffset, const uint16_t expectedWord, TextRange& out) {

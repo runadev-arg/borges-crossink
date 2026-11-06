@@ -17,6 +17,12 @@
  */
 class ChapterXPathResolver {
  public:
+  // Past this (millis()), walks stop at once and count as having found nothing, with deadlineHit()
+  // saying why: a false that says nothing about the text. 0 clears it. For the exit of a reader, where
+  // a chapter of megabytes would otherwise hold the screen for as long as it takes.
+  static void setDeadline(uint32_t atMillis);
+  static bool deadlineHit();
+
   struct Resolved {
     uint32_t visibleOffset = 0;   // Zero-based, in the firmware's coordinate
     uint32_t totalVisible = 0;    // Length of the spine item in that coordinate

@@ -87,7 +87,7 @@ $pageLines = @()
 foreach ($dir in Get-ChildItem $corpus -Directory) {
   $lines = & $xpdiff $dir.FullName $oracle $work $Points
   foreach ($l in $lines) {
-    if ($l -match '^  (pages|clips) ') { $pageLines += "$($dir.Name)$l"; continue }
+    if ($l -match '^  (pages|clips|earlystop) ') { $pageLines += "$($dir.Name)$l"; continue }
     if ($l -notmatch "`t") { Write-Output $l; continue }
     $f = $l -split "`t"
     if ($f.Count -lt 18) { Write-Output $l; continue }
@@ -105,5 +105,35 @@ $sum = { param($n) ($rows | Measure-Object $n -Sum).Sum }
 $pageLines
 "Round trips $(& $sum RoundTrips)  bad $(& $sum RoundTripBad)"
 "Host peak heap $(($rows | Measure-Object PeakHeap -Maximum).Maximum) B, peak stack $(($rows | Measure-Object PeakStack -Maximum).Maximum) B"
-$bad = (& $sum K2DNotFound) + (& $sum K2DWrong) + (& $sum D2KEmpty) + (& $sum D2KWrong) + (& $sum RoundTripBad)
-if ($bad) { exit 1 }
+
+# What the verdict rests on. limit_* are made to sit past what the mapper promises (entities with no
+# definition, nesting past its depth, a second body), and each differs from crengine on purpose: they
+# are watched for getting worse, not for being zero. Everything else has to agree exactly.
+#
+# "Other text" is where crengine's text at a range differs from what the reader's page shows, beyond
+# spacing. What is sent is crengine's, so this is not a wrong highlight. Known: limit_entities, and one
+# chapter of hostile_cases (spine 19) built from non-ASCII controls and spaces. Any more is a finding.
+$badOf = { param($r) $r.K2DNotFound + $r.K2DWrong + $r.D2KEmpty + $r.D2KWrong + $r.RoundTripBad }
+$limitRows = @($rows | Where-Object { $_.Book -like 'limit_*' })
+$realRows = @($rows | Where-Object { $_.Book -notlike 'limit_*' })
+$realBad = 0
+foreach ($r in $realRows) { $realBad += & $badOf $r }
+$limitBad = 0
+foreach ($r in $limitRows) { $limitBad += & $badOf $r }
+$knownLimitBad = 202
+$knownOtherText = 88
+$otherText = 0
+$earlyStopChecked = 0
+$earlyStopSeen = 0
+foreach ($l in $pageLines) {
+  if ($l -match 'otherText=(\d+)') { $otherText += [int]$Matches[1] }
+  if ($l -match 'earlystop checked=(\d+) stopped=(\d+)') {
+    $earlyStopChecked += [int]$Matches[1]
+    $earlyStopSeen += [int]$Matches[2]
+  }
+}
+"Corpus: $($realRows.Count) books, mismatches $realBad. Known limits: $($limitRows.Count) fixtures, mismatches $limitBad (ceiling $knownLimitBad). Other text $otherText (ceiling $knownOtherText). Early stop: $earlyStopSeen of $earlyStopChecked big chapters stopped early."
+if ($rows.Count -eq 0) { "No book went through: nothing was compared."; exit 1 }
+if ($earlyStopSeen -eq 0) { "No chapter stopped early."; exit 1 }
+if ($realBad -or $limitBad -gt $knownLimitBad -or $otherText -gt $knownOtherText) { exit 1 }
+exit 0

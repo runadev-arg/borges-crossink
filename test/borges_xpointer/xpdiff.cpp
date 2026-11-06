@@ -474,6 +474,23 @@ int main(int argc, char** argv) {
     if (!getenv("XPDIFF_NO_CSS")) epub->loadCss(sheets);
   }
 
+  // A walker with its answer stops reading: the exit of a reader cannot afford the whole chapter.
+  // Not always possible, since the form of an xpointer depends on whether a later sibling exists: a
+  // chapter that is one <div> is read to its end to say so. So what counts is that some chapters do
+  // stop early, which they never did while the walker told the inflater it took everything.
+  {
+    size_t checked = 0;
+    size_t stopped = 0;
+    for (int i = 0; i < static_cast<int>(spine.size()); ++i) {
+      if (spine[i].size() < 16 * 1024) continue;
+      Epub::bytesFed = 0;
+      if (ChapterXPathResolver::findXPathForVisibleTextOffset(epub, i, 0).empty()) continue;
+      ++checked;
+      if (Epub::bytesFed <= spine[i].size() / 2) ++stopped;
+    }
+    printf("  earlystop checked=%zu stopped=%zu\n", checked, stopped);
+  }
+
   std::vector<std::unique_ptr<FwScan>> scans;
   for (const auto& s : spine) {
     scans.push_back(std::make_unique<FwScan>());
