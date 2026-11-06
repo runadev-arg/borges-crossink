@@ -93,6 +93,8 @@ int32_t referencePage(uint32_t pctMicro, int32_t totalPages) {
   return page < 1 ? 1 : static_cast<int32_t>(page);
 }
 
+bool hasNoText(const ClipKey& key, const ClipDetail& d) { return !key.bookmark && !hasNonSpace(d.text); }
+
 bool writeAnnotation(JsonWriter& w, const BookRef& book, const EventTime& time, const ClipKey& key, const ClipDetail& d,
                      const uint8_t syncId[16]) {
   const int32_t page = d.page >= 0 ? d.page : d.hasPct ? referencePage(d.pctMicro, book.totalPages) : -1;

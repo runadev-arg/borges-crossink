@@ -1567,6 +1567,7 @@ bool SyncEngine::enqueuePageStats(const FinalizeInput& input, FinalizeResult& re
   if (input.lastTurn.precision < TimePrecision::Anchored) {
     buffer.clear();
     return true;
+  result.sessionFailed = false;
   }
   uint8_t done = 0;
   uint8_t chunk = 0;
@@ -1588,6 +1589,7 @@ bool SyncEngine::enqueuePageStats(const FinalizeInput& input, FinalizeResult& re
     char* body = new (std::nothrow) char[counter.size()];
     ok = body != nullptr;
     if (body) {
+  result.sessionFailed = !queued;
       JsonWriter w(body, counter.size());
       events::writePageStats(w, input.book, input.lastTurn.precision, rows, count, chunk);
       ok = appendEvent(EventKind::PageStats, input.book.id, body, w.size(), false);
@@ -1708,7 +1710,13 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
     events::deriveSyncId(input.book.id, key, syncId);
     JsonWriter counter(nullptr, 0);
     if (!events::writeAnnotation(counter, input.book, time, key, detail, syncId)) {
-      // It can never be valid (no text or no locator). Record it so it stops coming back.
+      // Nothing locates it yet: the book closed before a page settled, so there are no page counts
+      // to place it with. That is about this exit, and the next one can send it.
+      if (!events::hasNoText(key, detail)) {
+        result.annotationsPending = true;
+        continue;
+      }
+      // A highlight of no text can never be valid. Record it so it stops coming back.
       next[nextCount].key = ledgerKey;
       memcpy(next[nextCount].syncId, syncId, 16);
       next[nextCount].bookmark = key.bookmark ? 1 : 0;

@@ -145,6 +145,7 @@ struct FinalizeResult {
   bool progressQueued = false;
   bool sessionQueued = false;
   uint16_t annotationsCreated = 0;
+  bool sessionFailed = false;  // There was a valid session and it did not reach the queue.
   uint16_t annotationsDeleted = 0;
   bool annotationsPending = false;  // Limit reached; the rest go at the next finalize.
   uint8_t pageStatEvents = 0;
