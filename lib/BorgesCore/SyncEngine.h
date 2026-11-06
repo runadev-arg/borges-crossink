@@ -202,6 +202,15 @@ class SyncEngine {
   FinalizeResult finalizeBook(const FinalizeInput& input);
 
   // Session entry points. Each owns the budget for its kind.
+  // Local, no network. A book first opened under this account after it took over the card: what is
+  // there now was made under another one, so it is recorded as seen and never sent. Called when
+  // the book opens, before anything can be highlighted, so what comes later is this account's.
+  // No-op when the ledger is this account's. False: could not read or write, try at the finalize.
+  bool seedClipsIfForeign(const BookId& book, IClipSource& clips);
+
+  // "Search at open" went off: nothing will ever answer these, so they stop waiting.
+  void releaseHolds();
+
   SessionReport runOpenSession(const BookRef& book, const Position& local, ResumeDecision& out);
   SessionReport runSleepSession();
   // Asked for from the drawer. An offer of another device's place, answered like any prompt:
@@ -284,6 +293,7 @@ class SyncEngine {
   Outbox& outbox_;
   IFs& fs_;
   IClock& clock_;
+  bool seedClips(const BookId& book, IClipSource& clips);
   IRandom& random_;
   Api api_;
   EngineConfig config_;

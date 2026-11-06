@@ -31,6 +31,15 @@ constexpr const char* kSpoolPath = "/.crosspoint/borges/spool/resp.json";
 constexpr const char* kDefaultBaseUrl = "https://borges.runadev.com";
 constexpr const char* kLegacyCredentialPath = "/.borges/borges.json";
 constexpr const char* kLegacyCredentialPathOld = "/.borges/toto.json";
+// Says "this card holds a credential" to the screens that only need that, without opening the
+// store. begin() repairs it either way, so a card from before it exists loses nothing.
+constexpr const char* kPairedMarkerPath = "/.crosspoint/borges/paired";
+// This card has changed hands at least once: clippings need checking against the new account.
+constexpr const char* kAccountMovedMarkerPath = "/.crosspoint/borges/account-moved";
+// The first epoch that can only mean the account changed. 0 is a card that never had one and 1
+// is what an older firmware gave its first pairing, so neither says anything about whose data
+// this is.
+constexpr uint16_t kFirstMovedEpoch = 2;
 
 struct PendingPairing {
   char requestId[40] = {0};
@@ -140,11 +149,21 @@ struct BookLedger {
   bool hasChoice(uint64_t fingerprint) const;
 };
 
+constexpr uint8_t kAnnBookmark = 1;
+// On the card when this account adopted it, and never sent: a local delete has nothing to say.
+constexpr uint8_t kAnnSeeded = 2;
+
 struct AnnotationRecord {
   uint64_t key;
   uint8_t syncId[16];
-  uint8_t bookmark;
+  uint8_t bookmark;   // kAnnBookmark | kAnnSeeded.
   uint32_t revision;  // Newest revision seen from another device. 0: only ever touched here.
+};
+
+// What the server already knows a clipping by.
+struct KnownAnnotation {
+  uint64_t key;
+  uint8_t syncId[16];
 };
 
 class Store {
@@ -170,9 +189,10 @@ class Store {
   bool saveState();
 
   // A pairing resolved to this account, by id when the server sent one and by username
-  // otherwise. Anything but proof of the same account moves the epoch and empties the
-  // queue, the cursor and the holds: that data may belong to someone else, and none of it
-  // can go up under this login. The same account keeps everything.
+  // otherwise. Proof of another account moves the epoch and empties the queue, the cursor and
+  // the holds: that data belongs to someone else, and none of it can go up under this login.
+  // With no way to compare (an imported credential knows neither) nothing proves it changed, and
+  // the queue stays. The same account keeps everything.
   bool adoptAccount(const char* accountId, const char* accountName, Outbox& outbox);
   // Forgets the credential, with no copy left in either slot of the record. Keeps which
   // account it was (re-pairing it keeps the queue) and the sequence counter.
@@ -183,9 +203,13 @@ class Store {
   bool saveBook(const BookLedger& ledger);
 
   // Allocates exactly what is needed. Returns false on IO error or lack of memory.
-  // *records must be released with delete[].
-  bool loadAnnotations(const BookId& id, AnnotationRecord** records, uint16_t* count);
+  // *records must be released with delete[]. *foreign, when asked: the account changed since this
+  // book's ledger was written, or it never had one, so what is on the card proves nothing about
+  // what this account has seen.
+  bool loadAnnotations(const BookId& id, AnnotationRecord** records, uint16_t* count, bool* foreign = nullptr);
   bool saveAnnotations(const BookId& id, const AnnotationRecord* records, uint16_t count);
+  // Records these as known to the server, skipping any key already there. Idempotent.
+  bool addKnownAnnotations(const BookId& id, const KnownAnnotation* known, size_t count, bool bookmark);
   // Someone else changed this annotation. A clipping this device never published is not its
   // business, so that costs no write. False only on IO.
   bool noteAnnotationRevision(const BookId& id, const uint8_t syncId[16], uint64_t revision);
@@ -200,6 +224,7 @@ class Store {
   bool decodeLegacy(const char* path);
   void obfuscate(char* text, size_t len) const;
   bool writeCredentials(bool exclusive);
+  void syncMarkers();
   bool readCredentialsV1(ByteReader& r);
   bool readCredentialsV2(ByteReader& r);
 

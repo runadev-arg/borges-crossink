@@ -605,7 +605,12 @@ bool SyncEngine::focus(const BookId& book, const Position* local, ResumeDecision
     // This device's own head, and nothing local to read from: a card moved between readers,
     // or a store that lost its place. Opening at page 1 and publishing that would overwrite
     // the head, so it is offered like anyone else's.
-    if (verdict == resume::Verdict::Own && local && !local->hasPct) verdict = resume::Verdict::Ask;
+    // The same goes for a place this account did not leave: the same device, but the page on the
+    // card is from whoever had it since. Asked once, as anything else.
+    if (verdict == resume::Verdict::Own && local && !ledger.hasChoice(resume::fingerprint(event)) &&
+        (!local->hasPct || (store_.state().accountEpoch >= kFirstMovedEpoch && !ledger.hasFinalized))) {
+      verdict = resume::Verdict::Ask;
+    }
   } else {
     verdict = resume::evaluate(nullptr, book, store_.creds().deviceId, ledger);
   }
@@ -1476,13 +1481,8 @@ DisconnectResult SyncEngine::disconnect(bool online) {
   SessionReport ignored;
   if (online && startSession(SessionKind::Manual, ignored)) {
     api_.beginSession(kDisconnectBudgetMs);
-    char body[64];
-    JsonWriter w(body, sizeof(body));
-    w.objectBegin();
-    w.kvInt("expires_in_seconds", kShortestCredentialTtlSec);
-    w.kvInt("grace_seconds", 0);
-    w.objectEnd();
-    const ApiResult r = api_.call("POST", kRotatePath, reinterpret_cast<const uint8_t*>(body), w.size());
+    if (checkHeldBooks(nullptr, ignored)) pullAndDrain(ignored);
+    flushLedger();
     // Already refused is just as dead.
     invalidated = ignored.outcome == SessionOutcome::NeedsRelink;
     if (!invalidated) {
@@ -1503,6 +1503,9 @@ DisconnectResult SyncEngine::disconnect(bool online) {
   return invalidated ? DisconnectResult::ServerInvalidated : DisconnectResult::StillValidOnServer;
 }
 
+    // Last chance for what is queued: once the credential is gone, it can only go up by pairing
+    // this same account again. Failing here costs nothing: the queue stays, and the credential is
+    // still forgotten below.
 // ---------------------------------------------------------------------------------
 // Finalize
 // ---------------------------------------------------------------------------------
@@ -1662,9 +1665,16 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
 
   AnnotationRecord* stored = nullptr;
   uint16_t storedCount = 0;
-  if (!store_.loadAnnotations(input.book.id, &stored, &storedCount)) return false;
+  bool foreign = false;
+  if (!store_.loadAnnotations(input.book.id, &stored, &storedCount, &foreign)) return false;
+  if (foreign) {
+    // What is on the card went there under another account. The opening of the book is what
+    // normally deals with this, so reaching it here means that could not run.
+    delete[] stored;
+    return seedClips(input.book.id, *input.clips);
+  }
 
-  // Working copy: what the ledger will say. Bit 0 of `bookmark` marks "seen on disk".
+  // Working copy: what the ledger will say.
   const size_t room = static_cast<size_t>(storedCount) + clipCount;
   AnnotationRecord* next = new (std::nothrow) AnnotationRecord[room ? room : 1];
   uint8_t* seen = new (std::nothrow) uint8_t[storedCount ? storedCount : 1];
@@ -1689,7 +1699,8 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
     }
     const uint64_t ledgerKey = events::clipLedgerKey(input.book.id, key);
     bool known = false;
-    for (uint16_t j = 0; j < storedCount && !known; ++j) {
+    // All of them: a ledger with the same key twice must not read as one of them deleted.
+    for (uint16_t j = 0; j < storedCount; ++j) {
       if (stored[j].key == ledgerKey) {
         seen[j] = 1;
         known = true;
@@ -1719,7 +1730,7 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
       // A highlight of no text can never be valid. Record it so it stops coming back.
       next[nextCount].key = ledgerKey;
       memcpy(next[nextCount].syncId, syncId, 16);
-      next[nextCount].bookmark = key.bookmark ? 1 : 0;
+      next[nextCount].bookmark = key.bookmark ? kAnnBookmark : 0;
       next[nextCount].revision = 0;
       ++nextCount;
       changed = true;
@@ -1740,7 +1751,7 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
     }
     next[nextCount].key = ledgerKey;
     memcpy(next[nextCount].syncId, syncId, 16);
-    next[nextCount].bookmark = key.bookmark ? 1 : 0;
+    next[nextCount].bookmark = key.bookmark ? kAnnBookmark : 0;
     next[nextCount].revision = 0;
     ++nextCount;
     ++published;
@@ -1760,7 +1771,7 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
           continue;
         }
         JsonWriter counter(nullptr, 0);
-        const bool bookmark = next[j].bookmark != 0;
+        const bool bookmark = (next[j].bookmark & kAnnBookmark) != 0;
         events::writeAnnotationDeleted(counter, input.book, time, bookmark, next[j].syncId, next[j].revision);
         char* body = new (std::nothrow) char[counter.size()];
         if (!body) {
@@ -1782,6 +1793,18 @@ bool SyncEngine::finalizeClips(const FinalizeInput& input, const EventTime& time
         changed = true;
         continue;
       }
+        // Never sent under this account: the server has nothing to delete, and being told would
+        // read as a conflict at best.
+        if (next[j].bookmark & kAnnSeeded) {
+          changed = true;
+          continue;
+        }
+        bool repeated = false;
+        for (uint16_t k = 0; k < j && !repeated; ++k) repeated = stored[k].key == stored[j].key;
+        if (repeated) {
+          changed = true;
+          continue;
+        }
       next[kept++] = next[j];
     }
     nextCount = kept;
@@ -1822,6 +1845,46 @@ bool SyncEngine::lastFinalized(const BookId& book, Position& out) {
 bool SyncEngine::remoteHead(const BookId& book, RemoteHead& out) {
   if (!scratch_ && !begin()) return false;
   ledgerLoaded_ = false;
+bool SyncEngine::seedClipsIfForeign(const BookId& book, IClipSource& clips) {
+  AnnotationRecord* stored = nullptr;
+  uint16_t storedCount = 0;
+  bool foreign = false;
+  if (!store_.loadAnnotations(book, &stored, &storedCount, &foreign)) return false;
+  delete[] stored;
+  return !foreign || seedClips(book, clips);
+}
+
+// Every one of them known and none sent. Saved even when empty: that is what says this book's
+// clippings are now this account's, so the next one made is published.
+bool SyncEngine::seedClips(const BookId& book, IClipSource& clips) {
+  size_t count = 0;
+  if (!clips.count(count)) return false;
+  if (count > Store::kMaxAnnotations) count = Store::kMaxAnnotations;
+  auto* next = new (std::nothrow) AnnotationRecord[count ? count : 1];
+  if (!next) return false;
+  uint16_t total = 0;
+  bool ok = true;
+  for (size_t i = 0; i < count; ++i) {
+    ClipKey key;
+    if (!clips.key(i, key)) {
+      ok = false;
+      break;
+    }
+    const uint64_t ledgerKey = events::clipLedgerKey(book, key);
+    bool already = false;
+    for (uint16_t j = 0; j < total && !already; ++j) already = next[j].key == ledgerKey;
+    if (already) continue;
+    next[total] = AnnotationRecord{};
+    next[total].key = ledgerKey;
+    events::deriveSyncId(book, key, next[total].syncId);
+    next[total].bookmark = static_cast<uint8_t>(kAnnSeeded | (key.bookmark ? kAnnBookmark : 0));
+    ++total;
+  }
+  ok = ok && store_.saveAnnotations(book, next, total);
+  delete[] next;
+  return ok;
+}
+
   if (!store_.loadBook(book, scratch_->ledger) || !scratch_->ledger.head.valid) return false;
   out = scratch_->ledger.head;
   return true;

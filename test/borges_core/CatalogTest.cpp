@@ -265,6 +265,7 @@ TEST_F(CatalogTest, TheCacheOfAnotherAccountIsNotShown) {
   CatalogPage info;
   ASSERT_EQ(catalog->fetchPage(1, 20, info), CatalogResult::Ok);
   ASSERT_EQ(cached().size(), 1u);
+  copyText(d.store->creds().accountId, sizeof(d.store->creds().accountId), "mine");
   ASSERT_TRUE(d.store->adoptAccount("another", "otra", *d.outbox));
   Collect c;
   EXPECT_FALSE(catalog->loadPage(1, info, c));

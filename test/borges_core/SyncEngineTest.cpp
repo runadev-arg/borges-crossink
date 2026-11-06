@@ -720,15 +720,18 @@ TEST_F(SyncEngineTest, ASleepWithNothingToSendDoesNotSpendALinkSkip) {
 }
 
 TEST_F(SyncEngineTest, DisconnectOnlineRotatesAwayTheTokenAndKeepsNothingOfTheNewOne) {
-  ASSERT_EQ(d.appendRaw("sin enviar"), Outbox::AppendResult::Ok);
-  d.http.handler = nullptr;
-  d.http.script.push_back(jsonReply(200, "{\"credential\":{\"token\":\"toto_THROWN_AWAY\"},\"grace_seconds\":0}"));
+  d.http.handler = [this](const RecordedRequest& r) {
+    if (r.path == "/api/devices/self/credentials/rotate") {
+      return jsonReply(200, "{\"credential\":{\"token\":\"toto_THROWN_AWAY\"},\"grace_seconds\":0}");
+    }
+    return d.server.handle(r);
+  };
   EXPECT_EQ(d.engine->disconnect(true), DisconnectResult::ServerInvalidated);
-  ASSERT_EQ(d.http.log.size(), 1u);
-  EXPECT_EQ(d.http.log[0].path, "/api/devices/self/credentials/rotate");
-  EXPECT_EQ(d.http.log[0].headers.at("Authorization"), "Bearer toto_SECRET_TOKEN_VALUE");
+  const RecordedRequest& rotate = d.http.log.back();
+  EXPECT_EQ(rotate.path, "/api/devices/self/credentials/rotate");
+  EXPECT_EQ(rotate.headers.at("Authorization"), "Bearer toto_SECRET_TOKEN_VALUE");
   JsonDocument doc;
-  ASSERT_FALSE(deserializeJson(doc, d.http.log[0].body));
+  ASSERT_FALSE(deserializeJson(doc, rotate.body));
   EXPECT_EQ(doc["expires_in_seconds"], 60);
   EXPECT_EQ(doc["grace_seconds"], 0);
   EXPECT_FALSE(d.store->creds().paired());
@@ -746,6 +749,33 @@ TEST_F(SyncEngineTest, DisconnectOfflineSaysTheServerStillHasIt) {
 
 TEST_F(SyncEngineTest, DisconnectWithTheServerUnreachableSaysTheServerStillHasIt) {
   d.http.handler = nullptr;
+}
+
+TEST_F(SyncEngineTest, DisconnectSendsWhatIsQueuedWhileItStillCan) {
+  ASSERT_EQ(d.appendRaw("sin enviar"), Outbox::AppendResult::Ok);
+  d.http.handler = [this](const RecordedRequest& r) {
+    if (r.path == "/api/devices/self/credentials/rotate") {
+      return jsonReply(200, "{\"credential\":{\"token\":\"toto_THROWN_AWAY\"},\"grace_seconds\":0}");
+    }
+    return d.server.handle(r);
+  };
+  EXPECT_EQ(d.engine->disconnect(true), DisconnectResult::ServerInvalidated);
+  EXPECT_TRUE(d.server.hasText("sin enviar"));
+  EXPECT_EQ(d.outbox->depth(), 0u);
+  EXPECT_EQ(d.http.log.back().path, "/api/devices/self/credentials/rotate") << "the credential goes last";
+}
+
+TEST_F(SyncEngineTest, DisconnectThatCouldNotSendKeepsTheQueueAndStillForgets) {
+  ASSERT_EQ(d.appendRaw("sin enviar"), Outbox::AppendResult::Ok);
+  d.http.handler = [this](const RecordedRequest& r) {
+    if (r.path == "/api/sync/v2/pull") return apiError(503, "sync_service_unavailable");
+    if (r.path == "/api/devices/self/credentials/rotate") {
+      return jsonReply(200, "{\"credential\":{\"token\":\"toto_THROWN_AWAY\"},\"grace_seconds\":0}");
+    }
+    return d.server.handle(r);
+  };
+  EXPECT_EQ(d.engine->disconnect(true), DisconnectResult::ServerInvalidated);
+  EXPECT_FALSE(d.store->creds().paired());
   d.http.script.push_back(dropped());
   d.http.script.push_back(dropped());
   EXPECT_EQ(d.engine->disconnect(true), DisconnectResult::StillValidOnServer);
@@ -1064,6 +1094,49 @@ TEST_F(SyncEngineTest, FocusOtherAsksAndHoldsBackProgress) {
   EXPECT_STREQ(decision.occurredAt, "2026-11-05T10:00:00.000Z");
   EXPECT_EQ(decision.warnings, 0);
   // The prompt does not wait on history, and nothing went up.
+TEST_F(SyncEngineTest, OwnHeadIsOfferedWhenThePlaceHereIsFromAnotherAccount) {
+  // The owner's reader, borrowed: the same device id, and a page on the card somebody else left.
+  copyText(d.store->creds().accountId, sizeof(d.store->creds().accountId), "owner");
+  ASSERT_TRUE(d.store->adoptAccount("kid", nullptr, *d.outbox));
+  ASSERT_TRUE(d.store->adoptAccount("owner", nullptr, *d.outbox));
+  d.server.focusEvent = focusEventJson(kSelfId, kMd5A, 50);
+  ResumeDecision decision;
+  EXPECT_EQ(open(decision, 95).outcome, SessionOutcome::AwaitingChoice);
+  EXPECT_TRUE(decision.ask);
+  EXPECT_EQ(decision.remotePct, 50000000u);
+
+  // Answered: from here the place is this account's, and its own head says nothing new.
+  const Position here = Device::position(95);
+  d.engine->applyChoice(decision, ResumeChoice::StayHere, here, here);
+  d.server.focusEvent = focusEventJson(kSelfId, kMd5A, 50, "evt-501");
+  ResumeDecision again;
+  EXPECT_EQ(open(again, 95).outcome, SessionOutcome::Ok);
+  EXPECT_FALSE(again.ask);
+}
+
+TEST_F(SyncEngineTest, OwnHeadStaysSilentWhenTheCardNeverChangedHands) {
+  d.server.focusEvent = focusEventJson(kSelfId, kMd5A, 50);
+  ResumeDecision decision;
+  EXPECT_EQ(open(decision, 95).outcome, SessionOutcome::Ok);
+  EXPECT_FALSE(decision.ask);
+}
+
+TEST_F(SyncEngineTest, AnOpenWithNothingToSendLeavesHistoryForLater) {
+  // After flashing the cursor starts at 0: 80 old events would take the whole of the open's budget.
+  for (uint64_t i = 1; i <= 80; ++i) d.server.addFeedEvent(i, remoteProgress(i, kOtherId, kMd5B, 3));
+  ResumeDecision decision;
+  EXPECT_EQ(open(decision).outcome, SessionOutcome::Ok);
+  EXPECT_EQ(d.http.countPath("/api/sync/v2/pull"), 1u) << "the focus check, and nothing after it";
+  EXPECT_EQ(d.store->state().cursor, 0u);
+
+  // Something to send is a reason to talk: pull before push, as always.
+  d.http.log.clear();
+  ASSERT_EQ(d.appendRaw("uno"), Outbox::AppendResult::Ok);
+  EXPECT_EQ(open(decision).outcome, SessionOutcome::Ok);
+  EXPECT_GT(d.http.countPath("/api/sync/v2/pull"), 1u);
+  EXPECT_TRUE(d.server.hasText("uno"));
+}
+
   EXPECT_EQ(d.http.log.size(), 1u);
   EXPECT_EQ(report.held, 1u);
   EXPECT_FALSE(d.server.hasText("mine"));

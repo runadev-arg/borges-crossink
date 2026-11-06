@@ -18,6 +18,7 @@ class FakeClips : public IClipSource {
   bool failCount = false;
   long failKeyAt = -1;
   long failDetailAt = -1;
+  int details = 0;
   bool count(size_t& out) override {
     if (failCount) return false;
     out = clips.size();
@@ -29,6 +30,7 @@ class FakeClips : public IClipSource {
     return true;
   }
   bool detail(size_t index, ClipDetail& out) override {
+    ++details;
     if (static_cast<long>(index) == failDetailAt) return false;
     out.text = clips[index].text.c_str();
     out.xpointer = clips[index].xpointer.empty() ? nullptr : clips[index].xpointer.c_str();
@@ -307,7 +309,199 @@ TEST_F(FinalizeTest, SessionIsEmittedOnlyWithinTheRules) {
   EXPECT_FALSE(d.engine->finalizeBook(input).sessionQueued);
 }
 
+TEST_F(FinalizeTest, ATooShortVisitIsNotASessionThatFailed) {
+  // A failing clipping says nothing about it: "not queued" and "could not queue" are different, and
+  // only the second is worth keeping for later.
+  SessionSummary visit;
+  visit.started = WallTime{kNow - 30, TimePrecision::Exact};
+  visit.ended = WallTime{kNow, TimePrecision::Exact};
+  FakeClips clips;
+  clips.clips.push_back(clip(1, 1, "uno"));
+  clips.failDetailAt = 0;
+  FinalizeInput input = d.finalizeInput(30);
+  input.session = &visit;
+  input.clips = &clips;
+  const FinalizeResult result = d.engine->finalizeBook(input);
+  EXPECT_FALSE(result.ok);
+  EXPECT_FALSE(result.sessionQueued);
+  EXPECT_FALSE(result.sessionFailed);
+}
+
+TEST_F(FinalizeTest, ASessionThatCouldNotBeQueuedSaysSo) {
+  SessionSummary good;
+  good.started = WallTime{kNow - 600, TimePrecision::Exact};
+  good.ended = WallTime{kNow, TimePrecision::Exact};
+  d.fs.failWritesTo(std::string(kOutboxDir) + "/outbox.1.log");
+  FinalizeInput input = d.finalizeInput(30);
+  input.paged = false;
+  input.session = &good;
+  const FinalizeResult result = d.engine->finalizeBook(input);
+  EXPECT_FALSE(result.ok);
+  EXPECT_TRUE(result.sessionFailed);
+}
+
 // --- Highlights --------------------------------------------------------------------
+
+class AccountChangeClips : public FinalizeTest {
+ protected:
+  void SetUp() override {
+    FinalizeTest::SetUp();
+    copyText(d.store->creds().accountId, sizeof(d.store->creds().accountId), "account-a");
+  }
+  FakeClips clips;
+  size_t finalizeAndSend() {
+    FinalizeInput input = d.finalizeInput(10);
+    input.paged = false;
+    input.clips = &clips;
+    EXPECT_TRUE(d.engine->finalizeBook(input).ok);
+    d.engine->runManualSession(nullptr, nullptr, nullptr);
+    return d.server.recorded.size();
+  }
+};
+
+TEST_F(AccountChangeClips, WhatIsOnTheCardDoesNotGoUpUnderTheNewAccount) {
+  clips.clips.push_back(clip(1, 1, "de A"));
+  clips.clips.push_back(clip(1, 2, "marca de A", true));
+  ASSERT_EQ(finalizeAndSend(), 2u);
+  d.server.recorded.clear();
+  d.server.byId.clear();
+
+  ASSERT_TRUE(d.store->adoptAccount("account-b", nullptr, *d.outbox));
+  EXPECT_EQ(finalizeAndSend(), 0u);
+  EXPECT_EQ(clips.details, 2) << "and nothing was even resolved for it";
+
+  // Made from here on, it is this account's.
+  clips.clips.push_back(clip(1, 3, "de B"));
+  EXPECT_EQ(finalizeAndSend(), 1u);
+  EXPECT_TRUE(d.server.hasText("de B"));
+}
+
+TEST_F(AccountChangeClips, ABookNeverFinalizedBeforeHasNoLedgerAndIsSeededAllTheSame) {
+  clips.clips.push_back(clip(1, 1, "de A, nunca enviado"));
+  ASSERT_TRUE(d.store->adoptAccount("account-b", nullptr, *d.outbox));
+  EXPECT_EQ(finalizeAndSend(), 0u);
+}
+
+TEST_F(AccountChangeClips, GoingBackPublishesNothingAgainAndBringsNothingOfTheOther) {
+  clips.clips.push_back(clip(1, 1, "de A"));
+  ASSERT_EQ(finalizeAndSend(), 1u);
+  ASSERT_TRUE(d.store->adoptAccount("account-b", nullptr, *d.outbox));
+  ASSERT_EQ(finalizeAndSend(), 1u);
+  clips.clips.push_back(clip(1, 2, "de B"));
+  ASSERT_EQ(finalizeAndSend(), 2u);
+  d.server.recorded.clear();
+  d.server.byId.clear();
+
+  // A's highlight may have been deleted on the web meanwhile: sending it again would bring it back
+  // as a conflict. B's is not A's business.
+  ASSERT_TRUE(d.store->adoptAccount("account-a", nullptr, *d.outbox));
+  EXPECT_EQ(finalizeAndSend(), 0u);
+}
+
+TEST_F(AccountChangeClips, DeletingWhatWasNeverSentTellsTheServerNothing) {
+  clips.clips.push_back(clip(1, 1, "de A"));
+  ASSERT_TRUE(d.store->adoptAccount("account-b", nullptr, *d.outbox));
+  ASSERT_EQ(finalizeAndSend(), 0u);
+  clips.clips.clear();
+  EXPECT_EQ(finalizeAndSend(), 0u);
+  AnnotationRecord* records = nullptr;
+  uint16_t count = 9;
+  ASSERT_TRUE(d.store->loadAnnotations(Device::book(), &records, &count));
+  EXPECT_EQ(count, 0);
+  delete[] records;
+}
+
+TEST_F(AccountChangeClips, SeedingAtTheOpenIsWhatLetsTheFirstSessionPublish) {
+  clips.clips.push_back(clip(1, 1, "de A"));
+  ASSERT_TRUE(d.store->adoptAccount("account-b", nullptr, *d.outbox));
+  ASSERT_TRUE(d.engine->seedClipsIfForeign(Device::book(), clips));
+  clips.clips.push_back(clip(1, 2, "hecho en esta lectura"));
+  EXPECT_EQ(finalizeAndSend(), 1u);
+  EXPECT_TRUE(d.server.hasText("hecho en esta lectura"));
+  // And it only ever happens once per account.
+  clips.clips.push_back(clip(1, 3, "otro"));
+  ASSERT_TRUE(d.engine->seedClipsIfForeign(Device::book(), clips));
+  EXPECT_EQ(finalizeAndSend(), 2u);
+}
+
+TEST_F(AccountChangeClips, AnEmptyBookCountsAsSeeded) {
+  ASSERT_TRUE(d.store->adoptAccount("account-b", nullptr, *d.outbox));
+  ASSERT_TRUE(d.engine->seedClipsIfForeign(Device::book(), clips));
+  clips.clips.push_back(clip(1, 1, "el primero"));
+  EXPECT_EQ(finalizeAndSend(), 1u);
+}
+
+TEST_F(FinalizeTest, TheFirstAccountOfACardPublishesWhatIsThere) {
+  // Pairing for the first time is not taking over from anybody: these are the person's own.
+  FakeClips clips;
+  clips.clips.push_back(clip(1, 1, "de antes de vincular"));
+  ASSERT_TRUE(d.store->adoptAccount("account-a", "ana", *d.outbox));
+  EXPECT_LT(d.store->state().accountEpoch, kFirstMovedEpoch);
+  FinalizeInput input = d.finalizeInput(10);
+  input.paged = false;
+  input.clips = &clips;
+  EXPECT_EQ(d.engine->finalizeBook(input).annotationsCreated, 1);
+}
+
+TEST_F(FinalizeTest, TheSameKeyTwiceInTheLedgerIsNotOneOfThemDeleted) {
+  FakeClip mark = clip(1, 1, "marca", true);
+  KnownAnnotation known;
+  known.key = events::clipLedgerKey(Device::book(), mark.key);
+  events::deriveSyncId(Device::book(), mark.key, known.syncId);
+  AnnotationRecord twice[2] = {};
+  for (AnnotationRecord& r : twice) {
+    r.key = known.key;
+    memcpy(r.syncId, known.syncId, 16);
+    r.bookmark = kAnnBookmark;
+  }
+  ASSERT_TRUE(d.store->saveAnnotations(Device::book(), twice, 2));
+  FakeClips clips;
+  clips.clips.push_back(mark);
+  FinalizeInput input = d.finalizeInput(10);
+  input.paged = false;
+  input.clips = &clips;
+  const FinalizeResult result = d.engine->finalizeBook(input);
+  EXPECT_EQ(result.annotationsDeleted, 0) << "it is right there";
+
+  // Gone for real: one delete, not two.
+  clips.clips.clear();
+  EXPECT_EQ(d.engine->finalizeBook(input).annotationsDeleted, 1);
+}
+
+TEST_F(FinalizeTest, AClipThatNothingLocatesYetIsNotMarkedAsSent) {
+  // The book closed before a page settled: no page counts, and no xpointer for this one.
+  FakeClips clips;
+  FakeClip unplaced = clip(1, 1, "sin lugar");
+  unplaced.xpointer.clear();
+  unplaced.page = -1;
+  clips.clips.push_back(unplaced);
+  FinalizeInput input = d.finalizeInput(10);
+  input.paged = false;
+  input.clips = &clips;
+  input.book.totalPages = -1;
+  FinalizeResult result = d.engine->finalizeBook(input);
+  EXPECT_TRUE(result.ok);
+  EXPECT_TRUE(result.annotationsPending);
+  EXPECT_EQ(result.annotationsCreated, 0);
+  EXPECT_EQ(d.outbox->depth(), 0u);
+
+  // The next exit knows.
+  clips.clips[0].page = 12;
+  result = d.engine->finalizeBook(input);
+  EXPECT_EQ(result.annotationsCreated, 1);
+}
+
+TEST_F(FinalizeTest, AHighlightOfNothingIsRecordedAndStopsComingBack) {
+  FakeClips clips;
+  clips.clips.push_back(clip(1, 1, "   "));
+  FinalizeInput input = d.finalizeInput(10);
+  input.paged = false;
+  input.clips = &clips;
+  EXPECT_EQ(d.engine->finalizeBook(input).annotationsCreated, 0);
+  const int before = clips.details;
+  EXPECT_FALSE(d.engine->finalizeBook(input).annotationsPending);
+  EXPECT_EQ(clips.details, before) << "already known";
+}
 
 TEST_F(FinalizeTest, MoreClippingsThanTheLedgerHoldsNeverReadAsDeleted) {
   // Past the limit the ledger cannot know them, and their absence from the read proves nothing.

@@ -240,7 +240,24 @@ bool Store::begin() {
   } else if (!haveCreds) {
     importLegacy();
   }
+  syncMarkers();
   return true;
+}
+
+void Store::syncMarkers() {
+  const bool paired = creds_.paired();
+  if (paired != fs_.exists(kPairedMarkerPath)) {
+    if (paired) {
+      File f(fs_, kPairedMarkerPath, IFs::Mode::WriteTrunc);
+      f.flush();
+    } else {
+      fs_.remove(kPairedMarkerPath);
+    }
+  }
+  if (state_.accountEpoch >= kFirstMovedEpoch && !fs_.exists(kAccountMovedMarkerPath)) {
+    File f(fs_, kAccountMovedMarkerPath, IFs::Mode::WriteTrunc);
+    f.flush();
+  }
 }
 
 // Format 1. The base URL it holds is read past, never believed.
@@ -382,24 +399,26 @@ bool Store::adoptAccount(const char* accountId, const char* accountName, Outbox&
   const char* name = accountName ? accountName : "";
   // An id is compared with an id: a record from before the server sent one only has the
   // username, and that must not read as somebody else. A credential imported from the
-  // previous firmware knows neither, and then nothing proves it is the same account.
-  bool same = false;
+  // previous firmware knows neither, and nothing proves another account: the queue it holds
+  // is most likely this person's, re-pairing the same reader.
+  bool moved = false;
   if (creds_.accountId[0] && id[0]) {
-    same = strcmp(creds_.accountId, id) == 0;
+    moved = strcmp(creds_.accountId, id) != 0;
   } else if (creds_.accountName[0] && name[0]) {
-    same = strcmp(creds_.accountName, name) == 0;
+    moved = strcmp(creds_.accountName, name) != 0;
   }
-  if (!same) {
+  if (moved) {
     if (!outbox.isOpen() && !outbox.open()) return false;
     if (!outbox.reset()) return false;
     const uint16_t epoch = state_.accountEpoch;
     const int64_t anchor = state_.anchorEpoch;
     state_ = SyncState{};
-    state_.accountEpoch = static_cast<uint16_t>(epoch + 1);
+    state_.accountEpoch = static_cast<uint16_t>(epoch + 1 < kFirstMovedEpoch ? kFirstMovedEpoch : epoch + 1);
     state_.anchorEpoch = anchor;  // The clock is not the account's.
     if (!saveState()) return false;
     creds_.accountId[0] = '\0';
     creds_.accountName[0] = '\0';
+    syncMarkers();
   }
   if (id[0]) copyText(creds_.accountId, sizeof(creds_.accountId), id);
   if (name[0]) copyText(creds_.accountName, sizeof(creds_.accountName), name);
@@ -412,7 +431,9 @@ bool Store::forgetCredential() {
   creds_.expiresAtEpoch = 0;
   creds_.renewAfterEpoch = 0;
   creds_.pairing = PendingPairing{};
-  return writeCredentials(true);
+  const bool ok = writeCredentials(true);
+  if (ok) syncMarkers();
+  return ok;
 }
 
 void Store::bookPath(const char* subdir, const BookId& id, char* out) const {
@@ -518,9 +539,10 @@ bool Store::saveBook(const BookLedger& l) {
   return ok;
 }
 
-bool Store::loadAnnotations(const BookId& id, AnnotationRecord** records, uint16_t* count) {
+bool Store::loadAnnotations(const BookId& id, AnnotationRecord** records, uint16_t* count, bool* foreign) {
   *records = nullptr;
   *count = 0;
+  bool current = false;
   char path[AtomicFile::kMaxPath];
   bookPath("ann", id, path);
   annFile_.setPath(path);
@@ -545,7 +567,11 @@ bool Store::loadAnnotations(const BookId& id, AnnotationRecord** records, uint16
       if (r.u8() == kAnnVersion) {
         epoch = r.u16();
         n = r.u16();
-        if (epoch != state_.accountEpoch || n > kMaxAnnotations || r.remaining() != n * kAnnRecordBytes) n = 0;
+        if (epoch != state_.accountEpoch || n > kMaxAnnotations || r.remaining() != n * kAnnRecordBytes) {
+          n = 0;
+        } else {
+          current = true;
+        }
       }
     }
   }
@@ -568,6 +594,7 @@ bool Store::loadAnnotations(const BookId& id, AnnotationRecord** records, uint16
   delete[] buf;
   *records = out;
   *count = n;
+  if (foreign) *foreign = !current && state_.accountEpoch >= kFirstMovedEpoch;
   return true;
 }
 
@@ -591,6 +618,34 @@ bool Store::saveAnnotations(const BookId& id, const AnnotationRecord* records, u
   }
   const bool ok = w.ok() && saveShardRecord(annFile_, path, buf, w.size());
   delete[] buf;
+  return ok;
+}
+
+bool Store::addKnownAnnotations(const BookId& id, const KnownAnnotation* known, const size_t count,
+                                const bool bookmark) {
+  AnnotationRecord* stored = nullptr;
+  uint16_t storedCount = 0;
+  if (!loadAnnotations(id, &stored, &storedCount)) return false;
+  auto* next = new (std::nothrow) AnnotationRecord[storedCount + count + 1];
+  if (!next) {
+    delete[] stored;
+    return false;
+  }
+  if (storedCount) memcpy(next, stored, sizeof(AnnotationRecord) * storedCount);
+  delete[] stored;
+  size_t total = storedCount;
+  for (size_t i = 0; i < count && total < kMaxAnnotations; ++i) {
+    bool already = false;
+    for (size_t j = 0; j < total && !already; ++j) already = next[j].key == known[i].key;
+    if (already) continue;
+    next[total] = AnnotationRecord{};
+    next[total].key = known[i].key;
+    memcpy(next[total].syncId, known[i].syncId, 16);
+    next[total].bookmark = bookmark ? kAnnBookmark : 0;
+    ++total;
+  }
+  const bool ok = total == storedCount || saveAnnotations(id, next, static_cast<uint16_t>(total));
+  delete[] next;
   return ok;
 }
 

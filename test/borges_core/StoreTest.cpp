@@ -412,6 +412,7 @@ TEST(Store, AccountChangeEmptiesQueueAndCursorButKeepsSequence) {
 
   // Same account: nothing changes.
   ASSERT_TRUE(d.store->adoptAccount("account-a", nullptr, *d.outbox));
+  EXPECT_EQ(d.store->state().accountEpoch, 0);
   EXPECT_EQ(d.outbox->depth(), 1u);
   EXPECT_EQ(d.store->state().cursor, 55u);
 
@@ -423,6 +424,151 @@ TEST(Store, AccountChangeEmptiesQueueAndCursorButKeepsSequence) {
   EXPECT_EQ(d.outbox->nextSequence(), 2u);
   ASSERT_TRUE(d.store->loadBook(Device::book(), l));
   EXPECT_FALSE(l.hasUndo);
+}
+
+TEST(Store, FirstEverAccountChangesNothingAndTheNextOneIsAMove) {
+  Device d;
+  d.boot();
+  ASSERT_EQ(d.appendRaw("mine"), Outbox::AppendResult::Ok);
+  ASSERT_TRUE(d.store->adoptAccount("account-a", "ana", *d.outbox));
+  EXPECT_EQ(d.outbox->depth(), 1u);
+  EXPECT_EQ(d.store->state().accountEpoch, 0);
+  EXPECT_FALSE(d.fs.has(kAccountMovedMarkerPath));
+  ASSERT_TRUE(d.store->adoptAccount("account-b", "bea", *d.outbox));
+  EXPECT_EQ(d.outbox->depth(), 0u);
+  EXPECT_GE(d.store->state().accountEpoch, kFirstMovedEpoch);
+  EXPECT_TRUE(d.fs.has(kAccountMovedMarkerPath));
+}
+
+TEST(Store, ReceivingAnAccountWithNoWayToCompareKeepsTheQueue) {
+  // A credential imported from the old firmware, paired again by the same person.
+  Device d;
+  d.boot();
+  ASSERT_EQ(d.appendRaw("mine"), Outbox::AppendResult::Ok);
+  ASSERT_TRUE(d.store->adoptAccount("", "", *d.outbox));
+  EXPECT_EQ(d.outbox->depth(), 1u);
+  ASSERT_TRUE(d.store->adoptAccount("account-a", nullptr, *d.outbox));
+  EXPECT_EQ(d.outbox->depth(), 1u);
+  EXPECT_STREQ(d.store->creds().accountId, "account-a");
+}
+
+TEST(Store, TheEpochOfAnOlderFirmwareIsNotAMove) {
+  // It gave 1 to its first pairing, whoever that was. Only a later change says anything.
+  Device d;
+  d.boot();
+  d.store->state().accountEpoch = 1;
+  AnnotationRecord* records = nullptr;
+  uint16_t count = 0;
+  bool foreign = true;
+  ASSERT_TRUE(d.store->loadAnnotations(Device::book(), &records, &count, &foreign));
+  delete[] records;
+  EXPECT_FALSE(foreign);
+  d.store->state().accountEpoch = kFirstMovedEpoch;
+  ASSERT_TRUE(d.store->loadAnnotations(Device::book(), &records, &count, &foreign));
+  delete[] records;
+  EXPECT_TRUE(foreign);
+  // A card that moved under an older firmware is told about too.
+  d.boot();
+  d.store->state().accountEpoch = kFirstMovedEpoch;
+  ASSERT_TRUE(d.store->saveState());
+  d.boot();
+  EXPECT_TRUE(d.fs.has(kAccountMovedMarkerPath));
+}
+
+TEST(Store, KnownAnnotationsAreAddedOnceWithNoRevisionAndNoSeededMark) {
+  Device d;
+  d.boot();
+  KnownAnnotation known[2];
+  memset(known, 0, sizeof(known));
+  known[0].key = 5;
+  known[0].syncId[0] = 0xAA;
+  known[1] = known[0];
+  ASSERT_TRUE(d.store->addKnownAnnotations(Device::book(), known, 2, true));
+  // A second import, say after the cache went away, does not duplicate anything.
+  ASSERT_TRUE(d.store->addKnownAnnotations(Device::book(), known, 1, true));
+  AnnotationRecord* records = nullptr;
+  uint16_t count = 0;
+  ASSERT_TRUE(d.store->loadAnnotations(Device::book(), &records, &count));
+  ASSERT_EQ(count, 1);
+  EXPECT_EQ(records[0].key, 5u);
+  EXPECT_EQ(records[0].revision, 0u);
+  EXPECT_EQ(records[0].bookmark, kAnnBookmark);
+  delete[] records;
+}
+
+TEST(Store, PairedMarkerFollowsTheCredential) {
+  Device d;
+  d.boot(false);
+  EXPECT_FALSE(d.fs.has(kPairedMarkerPath));
+  copyText(d.store->creds().deviceId, sizeof(d.store->creds().deviceId), kSelfId);
+  copyText(d.store->creds().token, sizeof(d.store->creds().token), "toto_X");
+  ASSERT_TRUE(d.store->saveCredentials());
+  EXPECT_TRUE(d.fs.has(kPairedMarkerPath));
+  ASSERT_TRUE(d.store->forgetCredential());
+  EXPECT_FALSE(d.fs.has(kPairedMarkerPath));
+}
+
+TEST(Store, PairedMarkerIsRepairedWhenTheStoreOpens) {
+  // A card from before the marker, and one left inconsistent by a power cut.
+  Device d;
+  d.boot();
+  d.fs.remove(kPairedMarkerPath);
+  d.boot();
+  EXPECT_TRUE(d.fs.has(kPairedMarkerPath));
+  ASSERT_TRUE(d.store->forgetCredential());
+  d.fs.put(kPairedMarkerPath, "");
+  d.boot(false);
+  EXPECT_FALSE(d.fs.has(kPairedMarkerPath));
+}
+
+TEST(Store, AnAnswerLeftInTheSpoolByAPowerCutDoesNotOutliveTheBoot) {
+  Device d;
+  d.boot();
+  d.fs.put(kSpoolPath, "{\"credential\":{\"token\":\"toto_IN_THE_CLEAR\"}}");
+  d.boot();
+  EXPECT_EQ(d.fs.content(kSpoolPath).find("toto_IN_THE_CLEAR"), std::string::npos);
+}
+
+namespace {
+// Counts what the store asks of the key, in order.
+class WatchingBox : public ISecretBox {
+ public:
+  explicit WatchingBox(ISecretBox& inner) : inner_(inner) {}
+  void prepare() override { prepared = true; }
+  bool seal(const uint8_t* plain, size_t len, uint8_t* out) override {
+    sealedBeforePrepare = sealedBeforePrepare || !prepared;
+    return inner_.seal(plain, len, out);
+  }
+  bool open(const uint8_t* sealed, size_t len, uint8_t* out) override { return inner_.open(sealed, len, out); }
+  bool prepared = false;
+  bool sealedBeforePrepare = false;
+
+ private:
+  ISecretBox& inner_;
+};
+}  // namespace
+
+TEST(Store, TheKeyIsPreparedBeforeAnythingNeedsIt) {
+  // The first seal happens during pairing, with the radio up. A key made then cannot use the
+  // bootloader's entropy source, which fights the radio for the ADC.
+  MemFs fs;
+  fs.put(kLegacyCredentialPath, std::string("{\"deviceId\":\"") + kSelfId + "\",\"token\":\"plain_token\"}");
+  WatchingBox box(testBox());
+  Store store(fs, testKey(), 6, box);
+  ASSERT_TRUE(store.begin());
+  EXPECT_TRUE(box.prepared);
+  EXPECT_FALSE(box.sealedBeforePrepare);
+}
+
+TEST(LegacyImport, AnImportedCredentialIsRotatedAtTheFirstChance) {
+  MemFs fs;
+  fs.put(kLegacyCredentialPath, std::string("{\"deviceId\":\"") + kSelfId + "\",\"token\":\"plain_token\"}");
+  Store store(fs, testKey(), 6, testBox());
+  ASSERT_TRUE(store.begin());
+  EXPECT_EQ(store.creds().renewAfterEpoch, 1) << "that token is still in the old firmware's folder";
+  Store again(fs, testKey(), 6, testBox());
+  ASSERT_TRUE(again.begin());
+  EXPECT_EQ(again.creds().renewAfterEpoch, 1) << "and it says so until it happens";
 }
 
 TEST(LegacyImport, ReadsThePreviousFirmwaresCredentialOnce) {

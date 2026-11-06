@@ -136,12 +136,14 @@ TEST_F(AccountSwitchTest, TheServerStartingToSendAnIdIsNotAnotherAccount) {
 }
 
 TEST_F(AccountSwitchTest, ACredentialOfUnknownAccountProvesNothing) {
-  // Imported from the previous firmware: no id, no username.
+  // Imported from the previous firmware: no id, no username. Pairing that same reader again must
+  // not cost the person their queue, when nothing says it went to anyone else.
   copyText(d.store->creds().deviceId, sizeof(d.store->creds().deviceId), kSelfId);
   copyText(d.store->creds().token, sizeof(d.store->creds().token), "toto_OLD");
   leaveSomethingBehind();
   pairWith(claimReply("account-1"));
-  expectReset();
+  expectKept();
+  EXPECT_STREQ(d.store->creds().accountId, "account-1");
 }
 
 TEST_F(AccountSwitchTest, ItsChoiceSurvivesAReboot) {
