@@ -24,6 +24,8 @@ $Bin = "$Work\bin"
 $Build = "$Repo\.pio\build\simulator-windows"
 $SdlRoot = "$Root\crossink-tools\SDL2-2.32.10\x86_64-w64-mingw32"
 $Pio = "$Root\crossink-tools\pio.ps1"
+# Build the tree this script belongs to, not whichever checkout pio.ps1 defaults to.
+$env:BORGES_PROJECT = $Repo
 $PgCtl = "C:\Program Files\PostgreSQL\17\bin\pg_ctl.exe"
 
 $env:TMP = $Work
