@@ -12,15 +12,20 @@ namespace net {
 TimePrecision labelAtBoot(const ResetKind reset, const TimePrecision retained, const int64_t rtcEpoch,
                           const int64_t storedAnchorEpoch) {
   if (!epochInBounds(rtcEpoch)) return TimePrecision::Unknown;
-  if (reset == ResetKind::SoftwareRestart) {
-    if (retained == TimePrecision::Exact) return clockpolicy::labelAfterBoot(true, rtcEpoch, storedAnchorEpoch);
-    if (retained == TimePrecision::Approximate) return TimePrecision::Approximate;
+  if (reset == ResetKind::SoftwareRestart && retained == TimePrecision::Exact) {
+    return clockpolicy::labelAfterBoot(true, rtcEpoch, storedAnchorEpoch);
+  }
+  // A guess does not get better by sleeping on it: only a server_time clears this.
+  if ((reset == ResetKind::SoftwareRestart || reset == ResetKind::DeepSleepWake) &&
+      retained == TimePrecision::Approximate) {
+    return TimePrecision::Approximate;
   }
   return clockpolicy::labelAfterBoot(false, rtcEpoch, storedAnchorEpoch);
 }
 
 bool repairAcceptable(const int64_t epoch, const ClockTrust& trust) {
   if (!epochInBounds(epoch) || epoch < trust.buildEpoch || epoch < trust.anchorEpoch) return false;
+  if (trust.notAfterEpoch != 0 && epoch >= trust.notAfterEpoch) return false;
   if (trust.allowLongGap) return true;
   // A firmware newer than the anchor is itself proof that time has passed.
   const int64_t known = trust.anchorEpoch > trust.buildEpoch ? trust.anchorEpoch : trust.buildEpoch;
@@ -76,8 +81,10 @@ bool ensureClock(IClock& clock, const ClockTrust& trust, const uint32_t budgetMs
                  ICancel& cancel) {
   const WallTime now = clock.wallNow();
   if (now.precision != TimePrecision::Unknown && epochInBounds(now.epochSec)) return true;
+  // The last time a server was heard, with a battery that may have been dead for a week: a floor
+  // for the certificate check, and not a date anything should be filed under as if it were known.
   if (epochInBounds(trust.anchorEpoch)) {
-    clock.setWall(trust.anchorEpoch, TimePrecision::Anchored);
+    clock.setWall(trust.anchorEpoch, TimePrecision::Approximate);
     return true;
   }
   return repairClock(clock, trust, budgetMs, sources, cancel);

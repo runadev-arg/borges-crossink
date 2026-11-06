@@ -33,7 +33,8 @@ class BorgesClock : public IClock {
 
   // A handshake failed on the certificate's dates with a clock that was not exact.
   // Ignores the anchor and asks the network. BorgesHttp calls it, once per session.
-  bool repair(uint32_t budgetMs, ICancel& cancel);
+  // certificateExpired: only an earlier time can help, and only a forger offers a later one.
+  bool repair(uint32_t budgetMs, ICancel& cancel, bool certificateExpired = false);
 
   // A person asked for this session. Lets a repair move the clock more than a year past the
   // anchor: without it, a reader left in a drawer that long could never reconnect.

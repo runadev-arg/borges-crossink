@@ -351,6 +351,28 @@ TEST(ClockRule6, ApproximateStaysApproximateAcrossARestart) {
   EXPECT_EQ(labelAtBoot(ResetKind::SoftwareRestart, TimePrecision::Approximate, kNow, 0), TimePrecision::Approximate);
 }
 
+TEST(ClockRule6, ARestoredAnchorStaysApproximateThroughASleep) {
+  // The label is retained in RTC memory, and a guess does not get better by sleeping on it.
+  EXPECT_EQ(labelAtBoot(ResetKind::DeepSleepWake, TimePrecision::Approximate, kNow, kOldAnchor),
+            TimePrecision::Approximate);
+  EXPECT_EQ(labelAtBoot(ResetKind::SoftwareRestart, TimePrecision::Approximate, kNow, kOldAnchor),
+            TimePrecision::Approximate);
+  EXPECT_NE(labelAtBoot(ResetKind::PowerOn, TimePrecision::Approximate, kNow, kOldAnchor), TimePrecision::Approximate);
+}
+
+TEST(ClockRule6, AnExpiredCertificateCannotPullTheClockForward) {
+  // A proxy showing an expired certificate and a Date of its choosing: moving later never fixes
+  // "expired", so all it could do is push this clock ahead of the real time.
+  ClockTrust trust;
+  trust.anchorEpoch = kOldAnchor;
+  EXPECT_TRUE(repairAcceptable(kNow + 86400, trust));
+  trust.notAfterEpoch = kNow;
+  EXPECT_FALSE(repairAcceptable(kNow + 86400, trust));
+  EXPECT_FALSE(repairAcceptable(kNow, trust));
+  EXPECT_TRUE(repairAcceptable(kNow - 3600, trust)) << "An earlier time is what could help.";
+  EXPECT_FALSE(repairAcceptable(kOldAnchor - 1, trust)) << "and still never behind the anchor";
+}
+
 TEST(ClockRule6, AnUnauthenticatedTimeIsOnlyEverApproximate) {
   for (const ClockSource source : {ClockSource::Sntp, ClockSource::HttpDate, ClockSource::HttpsDate}) {
     FakeClock clock;
@@ -448,7 +470,7 @@ TEST(ClockChain, AnchorComesBeforeTheNetwork) {
   trust.anchorEpoch = kOldAnchor;
   EXPECT_TRUE(ensureClock(f.clock, trust, 12000, f.sources, f.cancel));
   EXPECT_TRUE(f.sources.asked.empty());
-  EXPECT_EQ(f.clock.wallNow().precision, TimePrecision::Anchored);
+  EXPECT_EQ(f.clock.wallNow().precision, TimePrecision::Approximate) << "It may be a dead battery's week old.";
 }
 
 TEST(ClockChain, ShortSessionAsksTheCheapSourcesFirst) {

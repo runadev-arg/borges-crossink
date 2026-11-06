@@ -196,7 +196,7 @@ void BorgesHttp::perform(const HttpRequest& request, IHttpSink& sink, ICancel& a
     if (isClockFailure(TransportStage::Tls, code) && clock_ != nullptr && !clockRepairUsed_ &&
         clock_->wallNow().precision != TimePrecision::Exact) {
       clockRepairUsed_ = true;
-      if (clock_->repair(kClockRepairBudgetMs, abort)) continue;
+      if (clock_->repair(kClockRepairBudgetMs, abort, code == wolfcode::kAfterDate)) continue;
     }
     return finish(TransportStage::Tls, code);
   }

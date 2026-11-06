@@ -293,9 +293,11 @@ bool BorgesClock::ensure(const uint32_t budgetMs, ICancel& cancel) {
   return ensureClock(*this, trust(), budgetMs, sources, cancel);
 }
 
-bool BorgesClock::repair(const uint32_t budgetMs, ICancel& cancel) {
+bool BorgesClock::repair(const uint32_t budgetMs, ICancel& cancel, const bool certificateExpired) {
   Sources sources(dns_, host_);
-  return repairClock(*this, trust(), budgetMs, sources, cancel);
+  ClockTrust t = trust();
+  if (certificateExpired) t.notAfterEpoch = readSystemClock();
+  return repairClock(*this, t, budgetMs, sources, cancel);
 }
 
 }  // namespace net

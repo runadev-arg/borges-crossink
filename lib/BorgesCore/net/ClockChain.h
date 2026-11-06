@@ -41,6 +41,9 @@ struct ClockTrust {
   int64_t anchorEpoch = 0;    // Last server_time seen, 0 if never.
   int64_t buildEpoch = 0;     // This firmware cannot run before it was built.
   bool allowLongGap = false;  // A person asked: a reader left in a drawer for over a year recovers.
+  // Refused from here on, when set. A certificate that reads as expired means this clock is ahead or
+  // it really is expired. A later time fixes neither, and is what a forged Date would ask for.
+  int64_t notAfterEpoch = 0;
 };
 constexpr int64_t kMaxClockGapSec = 366 * 24 * 3600;
 bool repairAcceptable(int64_t epoch, const ClockTrust& trust);
