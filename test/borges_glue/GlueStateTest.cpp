@@ -98,6 +98,23 @@ TEST(LoopGuard, TheSecondPressAfterADeadSessionOpensTheBook) {
   EXPECT_TRUE(armSession(s, PendingKind::OpenBook)) << "A later open gets a fresh chance.";
 }
 
+TEST(LoopGuard, LeavingAMidHandshakeSessionOnPurposeIsNotACrash) {
+  GlueState s;
+  EXPECT_TRUE(armSession(s, PendingKind::OpenBook));  // A button during TLS: nobody waited for it.
+  EXPECT_TRUE(armSession(s, PendingKind::OpenBook, true));
+  EXPECT_EQ(s.skipsLeft, 0);
+}
+
+TEST(LoopGuard, ACrashBuildingTheBooksMetadataIsNotTheSessions) {
+  GlueState s;
+  EXPECT_TRUE(armSession(s, PendingKind::OpenBook));
+  suspendGuard(s);  // Dies here: the book's fault, and the reader would do it as well.
+  EXPECT_TRUE(armSession(s, PendingKind::OpenBook));
+  suspendGuard(s);
+  resumeGuard(s);  // Dies past that point: the session's.
+  EXPECT_FALSE(armSession(s, PendingKind::OpenBook));
+}
+
 TEST(LoopGuard, ASessionThatAlwaysPanicsCostsLessAndLess) {
   GlueState s;
   int armed = 0;
@@ -121,6 +138,104 @@ TEST(Route, AnOpenTriesThroughBackoffEveryFewMinutes) {
   EXPECT_TRUE(openOutlastsBackoff(s, wall(1700000000 + kOpenBackoffCapSec)));
   EXPECT_TRUE(openOutlastsBackoff(s, wall(1700000000 - 10))) << "A clock that went back proves nothing.";
   EXPECT_TRUE(openOutlastsBackoff(s, wall(1700000060, TimePrecision::Unknown)));
+}
+
+TEST(Route, TheServersBackoffGivesWayToAnOpenAndALinkSkipDoesNot) {
+  GlueState s;
+  const WallTime now = wall(1700000000);
+  EXPECT_FALSE(openBackedOff(false, true, s, now)) << "Never tried: try.";
+  s.lastOpenTryEpoch = 1700000000 - 60;
+  EXPECT_TRUE(openBackedOff(false, true, s, now));
+  s.lastOpenTryEpoch = 1700000000 - kOpenBackoffCapSec;
+  EXPECT_FALSE(openBackedOff(false, true, s, now));
+  EXPECT_TRUE(openBackedOff(true, false, s, now)) << "No network in reach: seconds of radio each time.";
+  EXPECT_FALSE(openBackedOff(false, false, s, now));
+}
+
+TEST(Budget, TheFirstOpenAfterFlashingGetsTimeToDoEverything) {
+  EXPECT_EQ(openBudgetFor(true, true).totalMs, 9000u);
+  EXPECT_EQ(openBudgetFor(true, true).linkMs, 7000u);
+  for (const OpenBudget& first :
+       {openBudgetFor(false, true), openBudgetFor(true, false), openBudgetFor(false, false)}) {
+    EXPECT_EQ(first.totalMs, 20000u);
+    EXPECT_LT(first.linkMs, first.totalMs) << "Something has to be left for the server.";
+  }
+}
+
+TEST(CheckNotice, SaidOnceAndThenLeftAloneForAWhile) {
+  GlueState s;
+  EXPECT_FALSE(takeCheckNotice(s));
+  noteCheckMissed(s, 1);
+  EXPECT_TRUE(takeCheckNotice(s));
+  EXPECT_FALSE(takeCheckNotice(s)) << "One toast.";
+  int said = 0;
+  for (int wake = 0; wake < kNoticeQuietMisses; ++wake) {
+    noteCheckMissed(s, 1);
+    if (takeCheckNotice(s)) ++said;
+  }
+  EXPECT_EQ(said, 0) << "A weekend away from any network is not a toast per wake.";
+  noteCheckMissed(s, 1);
+  EXPECT_TRUE(takeCheckNotice(s)) << "But it does not go silent for ever.";
+}
+
+TEST(CheckNotice, AnotherBookIsNewsAndAnAnswerStartsOver) {
+  GlueState s;
+  noteCheckMissed(s, 1);
+  takeCheckNotice(s);
+  noteCheckMissed(s, 2);
+  EXPECT_TRUE(takeCheckNotice(s)) << "Nobody has said anything about this one.";
+  noteCheckAnswered(s);
+  noteCheckMissed(s, 2);
+  EXPECT_TRUE(takeCheckNotice(s)) << "It was working a moment ago: this is news.";
+}
+
+TEST(CheckNotice, AnAnswerTakesBackANoticeNotYetShown) {
+  GlueState s;
+  noteCheckMissed(s, 1);
+  noteCheckAnswered(s);
+  EXPECT_FALSE(takeCheckNotice(s));
+}
+
+TEST(CheckNotice, SurvivesTheRebootIntoTheReader) {
+  MemFs fs;
+  GlueStore store(fs);
+  GlueState s;
+  noteCheckMissed(s, 0xABCD1234);
+  ASSERT_TRUE(store.save(s));
+  GlueState back;
+  ASSERT_TRUE(store.load(back));
+  EXPECT_TRUE(back.checkNoticeDue);
+  EXPECT_EQ(back.noticeQuietMisses, kNoticeQuietMisses);
+  EXPECT_EQ(back.noticeBookHash, 0xABCD1234u);
+}
+
+TEST(Route, OnlyWhatKeptACheckFromHappeningCountsAsMissingIt) {
+  OpenInputs in = goodOpen();
+  EXPECT_FALSE(routeMissesCheck(in)) << "It runs.";
+  in.hasSavedWifi = false;
+  EXPECT_TRUE(routeMissesCheck(in));
+  in = goodOpen();
+  in.batteryPercent = 5;
+  EXPECT_TRUE(routeMissesCheck(in));
+  in = goodOpen();
+  in.backedOff = true;
+  EXPECT_TRUE(routeMissesCheck(in));
+  in = goodOpen();
+  in.needsRelink = true;
+  EXPECT_TRUE(routeMissesCheck(in));
+  in = goodOpen();
+  in.throttled = true;
+  EXPECT_FALSE(routeMissesCheck(in)) << "It looked two minutes ago.";
+  in = goodOpen();
+  in.autoOnOpen = false;
+  EXPECT_FALSE(routeMissesCheck(in)) << "The person switched it off.";
+  in = goodOpen();
+  in.hasPendingJump = true;
+  EXPECT_FALSE(routeMissesCheck(in)) << "They are going to a place on purpose.";
+  in = goodOpen();
+  in.paired = false;
+  in.hasSavedWifi = false;
+  EXPECT_FALSE(routeMissesCheck(in)) << "No account to look in.";
 }
 
 TEST(Route, ALowBatteryOpensWithoutASessionButHolds) {
@@ -217,7 +332,7 @@ TEST(Route, EveryReasonNotToRebootAvoidsTheReboot) {
   EXPECT_EQ(routeOpen(in), OpenRoute::DirectWithHold);
   in = goodOpen();
   in.autoOnOpen = false;
-  EXPECT_EQ(routeOpen(in), OpenRoute::DirectWithHold);
+  EXPECT_EQ(routeOpen(in), OpenRoute::Direct) << "Off: nothing will ever answer a hold.";
   in = goodOpen();
   in.needsRelink = true;
   EXPECT_EQ(routeOpen(in), OpenRoute::DirectWithHold);
@@ -388,10 +503,12 @@ class FakeDirs : public IDirLister {
  public:
   std::vector<std::string> names;
   bool fail = false;
-  bool listDirectories(const char*, size_t limit, std::vector<std::string>& out) override {
+  int visits = 0;
+  bool forEachDirectory(const char*, IDirVisitor& visitor) override {
     if (fail) return false;
     for (const auto& name : names) {
-      if (out.size() < limit) out.push_back(name);
+      ++visits;
+      if (!visitor.onDirectory(name.c_str())) break;
     }
     return true;
   }
@@ -418,8 +535,8 @@ void seedOldCard(MemFs& fs, FakeDirs& dirs) {
   fs.files["/.borges/settings.json"] = "{\"language\":\"ES\"}";
   fs.files["/.borges/wifi.json"] = "{\"credentials\":[]}";
   fs.files["/.borges/recent.json"] = "{\"books\":[]}";
-  fs.files["/.borges/epub_123/progress.bin"] = "\x02\x00\x05\x00\x10\x00";
-  fs.files["/.borges/epub_456/progress.bin.bak"] = "bak";
+  fs.files["/.borges/epub_123/progress.bin"] = std::string("\x02\x00\x05\x00\x10\x00", 6);
+  fs.files["/.borges/epub_456/progress.bin.bak"] = std::string("\x03\x00\x01\x00\x09\x00", 6);
   fs.files["/.borges/xtc_9/progress.bin"] = "xtc!";
   fs.files["/.borges/epub_123/section.bin"] = "not this";
   dirs.names = {"epub_123", "epub_456", "xtc_9", "bookmarks", "borges", "epub_nothing"};
@@ -436,7 +553,7 @@ TEST(LegacyImport, CopiesWhatMattersAndLeavesTheOldFolderAlone) {
   EXPECT_EQ(fs.files["/.crosspoint/wifi.json"], before.at("/.borges/wifi.json"));
   EXPECT_EQ(fs.files["/.crosspoint/recent.json"], before.at("/.borges/recent.json"));
   EXPECT_EQ(fs.files["/.crosspoint/epub_123/progress.bin"], before.at("/.borges/epub_123/progress.bin"));
-  EXPECT_EQ(fs.files["/.crosspoint/epub_456/progress.bin"], "bak");
+  EXPECT_EQ(fs.files["/.crosspoint/epub_456/progress.bin"], before.at("/.borges/epub_456/progress.bin.bak"));
   EXPECT_EQ(fs.files["/.crosspoint/xtc_9/progress.bin"], "xtc!");
   EXPECT_FALSE(fs.exists("/.crosspoint/epub_123/section.bin"));
   EXPECT_FALSE(fs.exists("/.crosspoint/epub_nothing"));
@@ -486,6 +603,126 @@ TEST(LegacyImport, AFailedWriteLeavesNoHalfFileAndResumes) {
     EXPECT_EQ(fs.files["/.crosspoint/epub_123/progress.bin"], fs.files["/.borges/epub_123/progress.bin"]);
     EXPECT_TRUE(fs.exists(kLegacyImportMarker));
   }
+}
+
+TEST(LegacyImport, ACardThatCannotBeWrittenCostsAFewBootsAndThenNothing) {
+  FlakyFs fs;
+  FakeDirs dirs;
+  seedOldCard(fs, dirs);
+  // A book that keeps failing: the directory for it exists as a file that cannot be replaced.
+  class NoRename : public FlakyFs {
+   public:
+    bool rename(const char* from, const char* to) override {
+      return std::string(to).find("epub_123") == std::string::npos && FlakyFs::rename(from, to);
+    }
+  } stuck;
+  seedOldCard(stuck, dirs);
+  int incomplete = 0;
+  for (int boot = 0; boot < kMaxLegacyImportRuns; ++boot) {
+    if (importLegacyData(stuck, dirs) == LegacyImport::Incomplete) ++incomplete;
+  }
+  EXPECT_EQ(incomplete, kMaxLegacyImportRuns);
+  const int walked = dirs.visits;
+  EXPECT_EQ(importLegacyData(stuck, dirs), LegacyImport::GaveUp);
+  EXPECT_EQ(dirs.visits, walked) << "No walk at all from here on.";
+  EXPECT_FALSE(stuck.exists(kLegacyImportMarker));
+}
+
+TEST(LegacyImport, NoWalkOnACardThatTakesNoWrites) {
+  FlakyFs fs;
+  FakeDirs dirs;
+  seedOldCard(fs, dirs);
+  fs.countdown = 0;
+  EXPECT_EQ(importLegacyData(fs, dirs), LegacyImport::Incomplete);
+  EXPECT_EQ(dirs.visits, 0);
+}
+
+TEST(LegacyImport, TheFirstFailedWriteEndsTheWalk) {
+  FakeDirs dirs;
+  class NoRename : public FlakyFs {
+   public:
+    bool rename(const char* from, const char* to) override {
+      return std::string(to).find("progress") == std::string::npos && FlakyFs::rename(from, to);
+    }
+  } full;
+  seedOldCard(full, dirs);
+  EXPECT_EQ(importLegacyData(full, dirs), LegacyImport::Incomplete);
+  EXPECT_EQ(dirs.visits, 1);
+}
+
+TEST(LegacyImport, NoCapOnHowManyBooksComeOver) {
+  FlakyFs fs;
+  FakeDirs dirs;
+  seedOldCard(fs, dirs);
+  dirs.names.clear();
+  for (int i = 0; i < 3000; ++i) {
+    const std::string name = "epub_" + std::to_string(i);
+    dirs.names.push_back(name);
+    fs.files["/.borges/" + name + "/progress.bin"] = std::string("\x01\x00\x01\x00\x05\x00", 6);
+  }
+  EXPECT_EQ(importLegacyData(fs, dirs), LegacyImport::Done);
+  EXPECT_TRUE(fs.exists("/.crosspoint/epub_2999/progress.bin")) << "A cap wrote the marker with books left behind.";
+}
+
+TEST(LegacyImport, SaysSoOnceWhenThereAreManyBooks) {
+  class Notice : public ILegacyNotice {
+   public:
+    int said = 0;
+    void onManyBooks() override { ++said; }
+  } notice;
+  FlakyFs fs;
+  FakeDirs dirs;
+  seedOldCard(fs, dirs);
+  EXPECT_EQ(importLegacyData(fs, dirs, &notice), LegacyImport::Done);
+  EXPECT_EQ(notice.said, 0);
+  FlakyFs many;
+  seedOldCard(many, dirs);
+  for (int i = 0; i < 100; ++i) dirs.names.push_back("epub_x" + std::to_string(i));
+  EXPECT_EQ(importLegacyData(many, dirs, &notice), LegacyImport::Done);
+  EXPECT_EQ(notice.said, 1);
+}
+
+TEST(LegacyImport, AGoodBackupBeatsAMainFileThatDoesNotHoldUp) {
+  FlakyFs fs;
+  FakeDirs dirs;
+  seedOldCard(fs, dirs);
+  fs.files["/.borges/epub_123/progress.bin"] = "garbage";
+  fs.files["/.borges/epub_123/progress.bin.bak"] = std::string("\x04\x00\x02\x00\x09\x00", 6);
+  EXPECT_EQ(importLegacyData(fs, dirs), LegacyImport::Done);
+  EXPECT_EQ(fs.files["/.crosspoint/epub_123/progress.bin"], fs.files["/.borges/epub_123/progress.bin.bak"]);
+}
+
+TEST(LegacyImport, ThePlaceComesOverAndTheTextOffsetDoesNot) {
+  // The old firmware counted that offset another way: read here, it lands somewhere else.
+  FlakyFs fs;
+  FakeDirs dirs;
+  seedOldCard(fs, dirs);
+  fs.files["/.borges/epub_123/progress.bin"] = std::string("\x02\x00\x05\x00\x10\x00\x11\x22\x33\x44", 10);
+  EXPECT_EQ(importLegacyData(fs, dirs), LegacyImport::Done);
+  EXPECT_EQ(fs.files["/.crosspoint/epub_123/progress.bin"], std::string("\x02\x00\x05\x00\x10\x00", 6));
+}
+
+TEST(LegacyImport, NothingWorthBringingIsNotAFailure) {
+  FlakyFs fs;
+  FakeDirs dirs;
+  seedOldCard(fs, dirs);
+  fs.files["/.borges/epub_123/progress.bin"] = "garbage";
+  EXPECT_EQ(importLegacyData(fs, dirs), LegacyImport::Done);
+  EXPECT_FALSE(fs.exists("/.crosspoint/epub_123/progress.bin"));
+}
+
+TEST(LegacyImport, SettingsComeOverBeforeTheyAreLoadedWithoutTheWalk) {
+  FlakyFs fs;
+  FakeDirs dirs;
+  seedOldCard(fs, dirs);
+  importLegacySettings(fs);
+  EXPECT_TRUE(fs.exists("/.crosspoint/settings.json"));
+  EXPECT_EQ(dirs.visits, 0);
+  EXPECT_FALSE(fs.exists(kLegacyImportMarker));
+}
+
+TEST(LegacyBookmarks, TheMarkerDoesNotLiveInTheCacheItOutlives) {
+  EXPECT_EQ(legacyBookmarkMarkerPath("/.crosspoint/epub_12345"), "/.crosspoint/borges/bookmarks-imported/epub_12345");
 }
 
 TEST(LegacyImport, ListingFailureKeepsItOpen) {
@@ -541,6 +778,65 @@ TEST(TrackedReading, RoundTripsOnceAndRejectsATornFile) {
   fs.files[path].resize(10);
   EXPECT_FALSE(takeTrackedReading(fs, path, out));
   EXPECT_FALSE(fs.exists(path));
+}
+
+TEST(TrackedReading, ALowMemoryRestartKeepsThePagesAndWhereItBegan) {
+  MemFs fs;
+  const char* path = "/t.bin";
+  TrackedReading in;
+  in.paged = true;
+  in.startPage = 40;
+  in.startedEpoch = 1700000000;
+  in.lastTurnEpoch = 1700000999;
+  PageStatBuffer rows;
+  rows.onLeave(40, 1700000000, 1700000100);
+  rows.onLeave(41, 1700000100, 1700000160);
+  ASSERT_TRUE(saveTrackedReading(fs, path, in, &rows));
+  TrackedReading out;
+  PageStatBuffer back;
+  ASSERT_TRUE(takeTrackedReading(fs, path, out, &back));
+  EXPECT_EQ(out.startPage, 40);
+  ASSERT_EQ(back.count(), 2);
+  EXPECT_EQ(back.at(1).page, 41);
+  EXPECT_EQ(back.at(1).seconds, 60);
+  EXPECT_EQ(back.at(0).startEpoch, 1700000000u);
+
+  // A cut anywhere in the rows is not whole, and hands back nothing.
+  ASSERT_TRUE(saveTrackedReading(fs, path, in, &rows));
+  fs.files[path].resize(fs.files[path].size() - 3);
+  PageStatBuffer none;
+  EXPECT_FALSE(takeTrackedReading(fs, path, out, &none));
+  EXPECT_EQ(none.count(), 0);
+}
+
+TEST(TrackedReading, ARecordFromBeforeThisFormatIsNotBelieved) {
+  MemFs fs;
+  fs.files["/old.bin"] = std::string("\x01\x01\x05\x00\x00\x00", 6) + std::string(17, '\x01');
+  TrackedReading out;
+  EXPECT_FALSE(takeTrackedReading(fs, "/old.bin", out));
+  EXPECT_FALSE(fs.exists("/old.bin"));
+}
+
+TEST(TrackedReading, OnlyARestartsWorthOfTimeIsStillTheSameReading) {
+  TrackedReading kept;
+  kept.lastTurnEpoch = 1700000000;
+  EXPECT_TRUE(keptReadingStillCurrent(kept, 1700000000 + 30));
+  EXPECT_TRUE(keptReadingStillCurrent(kept, 1700000000 + kKeptReadingMaxAgeSec));
+  EXPECT_FALSE(keptReadingStillCurrent(kept, 1700000000 + kKeptReadingMaxAgeSec + 1)) << "A night inside it.";
+  EXPECT_FALSE(keptReadingStillCurrent(kept, 1700000000 - 5)) << "A clock that went back proves nothing.";
+  kept.lastTurnEpoch = 0;
+  EXPECT_FALSE(keptReadingStillCurrent(kept, 1700000000));
+}
+
+TEST(TrackedReading, AfterUndoTheReadingStillCountsAndThePlaceDoesNotGoTwice) {
+  TrackedReading r;
+  EXPECT_FALSE(readingPublishesPosition(r, 10)) << "Never paged.";
+  r.paged = true;
+  EXPECT_TRUE(readingPublishesPosition(r, 10));
+  EXPECT_FALSE(readingPublishesPosition(r, -1)) << "No settled page.";
+  r.positionSettled = true;
+  EXPECT_FALSE(readingPublishesPosition(r, 10));
+  EXPECT_TRUE(r.paged) << "The session it was part of stays.";
 }
 
 namespace {

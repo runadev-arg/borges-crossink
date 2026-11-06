@@ -11,12 +11,14 @@ namespace glue {
 namespace {
 
 constexpr const char* kGlueBase = "/.crosspoint/borges/glue";
-constexpr uint8_t kFormat = 3;
-constexpr size_t kRecordBytes = 1 + 1 + 1 + 1 + 1 + 4 + 8 + 1 + 1 + 8;
-constexpr size_t kRecordBytesV1 = kRecordBytes - 10;
+constexpr uint8_t kFormat = 4;
+constexpr size_t kRecordBytes = 1 + 1 + 1 + 1 + 1 + 4 + 8 + 1 + 1 + 8 + 1 + 1 + 4;
+constexpr size_t kRecordBytesV3 = kRecordBytes - 6;
+constexpr size_t kRecordBytesV1 = kRecordBytesV3 - 10;
 constexpr size_t kStampBytes = 2 + 4 + 8 + 4;
-constexpr uint8_t kTrackedFormat = 1;
-constexpr size_t kTrackedBytes = 1 + 1 + 4 + 8 + 8 + 1;
+constexpr uint8_t kTrackedFormat = 2;
+constexpr size_t kTrackedBytes = 1 + 1 + 4 + 4 + 8 + 8 + 1 + 1;  // The last two: row count, check.
+constexpr size_t kTrackedRowBytes = 4 + 2 + 2;
 
 uint64_t fnv64(const void* data, const size_t len, uint64_t hash = 14695981039346656037ULL) {
   const auto* p = static_cast<const uint8_t*>(data);
@@ -62,7 +64,8 @@ uint32_t pathHash(const char* path) {
   return static_cast<uint32_t>(h ^ (h >> 32));
 }
 
-bool armSession(GlueState& state, const PendingKind kind) {
+bool armSession(GlueState& state, const PendingKind kind, const bool leftOnPurpose) {
+  if (leftOnPurpose) state.attempts = 0;
   if (state.skipsLeft > 0) {
     --state.skipsLeft;
     state.pending = PendingKind::None;
@@ -87,6 +90,38 @@ void finishSession(GlueState& state) {
   state.pending = PendingKind::None;
 }
 
+void noteCheckMissed(GlueState& state, const uint32_t bookPathHash) {
+  if (state.noticeQuietMisses > 0 && state.noticeBookHash == bookPathHash) {
+    --state.noticeQuietMisses;
+    return;
+  }
+  state.checkNoticeDue = true;
+  state.noticeQuietMisses = kNoticeQuietMisses;
+  state.noticeBookHash = bookPathHash;
+}
+
+void noteCheckAnswered(GlueState& state) {
+  state.checkNoticeDue = false;
+  state.noticeQuietMisses = 0;
+}
+
+bool takeCheckNotice(GlueState& state) {
+  const bool due = state.checkNoticeDue;
+  state.checkNoticeDue = false;
+  return due;
+}
+
+OpenBudget openBudgetFor(const bool hasClockAnchor, const bool hasLinkHint) {
+  // 12 s from the press to the book, less a network boot and the reboot back and half a second for
+  // an uninterruptible step. The first open gets what it takes: seen once, and never again.
+  if (hasClockAnchor && hasLinkHint) return OpenBudget{9000, 7000};
+  return OpenBudget{20000, 14000};
+}
+
+void suspendGuard(GlueState& state) { state.attempts = 0; }
+
+void resumeGuard(GlueState& state) { state.attempts = 1; }
+
 void noteOpenSuccess(GlueState& state, const uint32_t bookPathHash, const WallTime& now) {
   if (now.precision == TimePrecision::Unknown) return;
   state.lastOpenPathHash = bookPathHash;
@@ -106,13 +141,25 @@ bool openOutlastsBackoff(const GlueState& state, const WallTime& now) {
   return elapsed < 0 || elapsed >= kOpenBackoffCapSec;
 }
 
+bool openBackedOff(const bool linkSkipped, const bool serverBackedOff, const GlueState& state, const WallTime& now) {
+  return linkSkipped || (serverBackedOff && !openOutlastsBackoff(state, now));
+}
+
 OpenRoute routeOpen(const OpenInputs& in) {
   if (!in.isEpub || !in.paired) return OpenRoute::Direct;
-  if (in.hasPendingJump || !in.autoOnOpen || in.needsRelink || in.backedOff || !in.hasSavedWifi || in.throttled ||
+  // A hold waits for an answer, and with the search off nothing will ever ask. Off means this reader
+  // says where it is without asking: docs/borges-sync.md, section 5.
+  if (!in.autoOnOpen) return OpenRoute::Direct;
+  if (in.hasPendingJump || in.needsRelink || in.backedOff || !in.hasSavedWifi || in.throttled ||
       in.batteryPercent < kMinSessionBatteryPercent) {
     return OpenRoute::DirectWithHold;
   }
   return OpenRoute::NetworkSession;
+}
+
+bool routeMissesCheck(const OpenInputs& in) {
+  if (routeOpen(in) != OpenRoute::DirectWithHold) return false;
+  return !in.hasPendingJump && !in.throttled;
 }
 
 bool shouldFlushBeforeSleep(const SleepInputs& in) {
@@ -129,7 +176,8 @@ bool GlueStore::load(GlueState& out) {
   size_t len = 0;
   if (!file.load(buf, sizeof(buf), len)) return false;
   const bool v1 = buf[0] == 1 && len == kRecordBytesV1;
-  if (!v1 && (buf[0] != kFormat || len != kRecordBytes)) return false;
+  const bool v3 = buf[0] == 3 && len == kRecordBytesV3;
+  if (!v1 && !v3 && (buf[0] != kFormat || len != kRecordBytes)) return false;
   out.autoOnOpen = buf[1] != 0;
   out.syncOnSleep = buf[2] != 0;
   out.pending =
@@ -141,6 +189,11 @@ bool GlueStore::load(GlueState& out) {
     out.cooldownLevel = buf[17];
     out.skipsLeft = buf[18];
     out.lastOpenTryEpoch = getI64(buf + 19);
+  }
+  if (!v1 && !v3) {
+    out.checkNoticeDue = buf[27] != 0;
+    out.noticeQuietMisses = buf[28];
+    out.noticeBookHash = getU32(buf + 29);
   }
   return true;
 }
@@ -157,6 +210,9 @@ bool GlueStore::save(const GlueState& state) {
   buf[17] = state.cooldownLevel;
   buf[18] = state.skipsLeft;
   putI64(buf + 19, state.lastOpenTryEpoch);
+  buf[27] = state.checkNoticeDue ? 1 : 0;
+  buf[28] = state.noticeQuietMisses;
+  putU32(buf + 29, state.noticeBookHash);
   fs_.mkdir("/.crosspoint");
   fs_.mkdir("/.crosspoint/borges");
   AtomicFile file(fs_, kGlueBase);
@@ -238,34 +294,86 @@ StaySource chooseStaySource(const bool hasFinalized, const Position& finalized, 
   return delta <= kStayLedgerToleranceMicro ? StaySource::Ledger : StaySource::MapSavedPage;
 }
 
-bool saveTrackedReading(IFs& fs, const char* path, const TrackedReading& reading) {
+bool saveTrackedReading(IFs& fs, const char* path, const TrackedReading& reading, const PageStatBuffer* rows) {
+  // Header, then the rows. The header's last byte checks what comes before it and the row count
+  // and rows after it, so a file cut short anywhere is not whole.
+  const uint8_t count = rows ? rows->count() : 0;
+  const auto encode = [rows](const uint8_t i, uint8_t* row) {
+    const PageStatRow& r = rows->at(i);
+    putU32(row, r.startEpoch);
+    row[4] = static_cast<uint8_t>(r.page);
+    row[5] = static_cast<uint8_t>(r.page >> 8);
+    row[6] = static_cast<uint8_t>(r.seconds);
+    row[7] = static_cast<uint8_t>(r.seconds >> 8);
+  };
   uint8_t rec[kTrackedBytes];
   rec[0] = kTrackedFormat;
   rec[1] = reading.paged ? 1 : 0;
   putU32(rec + 2, static_cast<uint32_t>(reading.pagesRead));
-  putI64(rec + 6, reading.startedEpoch);
-  putI64(rec + 14, reading.lastTurnEpoch);
-  rec[22] = static_cast<uint8_t>(fnv64(rec, 22));
+  putU32(rec + 6, static_cast<uint32_t>(reading.startPage));
+  putI64(rec + 10, reading.startedEpoch);
+  putI64(rec + 18, reading.lastTurnEpoch);
+  rec[26] = count;
+  uint64_t hash = fnv64(rec, 27);
+  uint8_t row[kTrackedRowBytes];
+  for (uint8_t i = 0; i < count; ++i) {
+    encode(i, row);
+    hash = fnv64(row, sizeof(row), hash);
+  }
+  uint8_t check = static_cast<uint8_t>(hash);
   File f(fs, path, IFs::Mode::WriteTrunc);
-  return f && f.writeAll(rec, sizeof(rec)) && f.flush();
+  if (!f || !f.writeAll(rec, sizeof(rec) - 1) || !f.writeAll(&check, 1)) return false;
+  for (uint8_t i = 0; i < count; ++i) {
+    encode(i, row);
+    if (!f.writeAll(row, sizeof(row))) return false;
+  }
+  return f.flush();
 }
 
-bool takeTrackedReading(IFs& fs, const char* path, TrackedReading& out) {
+bool takeTrackedReading(IFs& fs, const char* path, TrackedReading& out, PageStatBuffer* rows) {
   if (!fs.exists(path)) return false;
   uint8_t rec[kTrackedBytes];
   bool whole = false;
   {
     File f(fs, path, IFs::Mode::Read);
-    whole = f && f.readExact(rec, sizeof(rec)) && rec[0] == kTrackedFormat &&
-            rec[22] == static_cast<uint8_t>(fnv64(rec, 22));
+    whole = f && f.readExact(rec, sizeof(rec)) && rec[0] == kTrackedFormat && rec[26] <= PageStatBuffer::kCapacity;
+    uint8_t row[kTrackedRowBytes];
+    if (whole) {
+      // Checked before any row is believed: this runs into the reader's own buffer.
+      uint64_t hash = fnv64(rec, 27);
+      for (uint8_t i = 0; i < rec[26] && whole; ++i) {
+        whole = f.readExact(row, sizeof(row));
+        if (whole) hash = fnv64(row, sizeof(row), hash);
+      }
+      whole = whole && rec[27] == static_cast<uint8_t>(hash);
+    }
+    if (whole && rows && f.seek(kTrackedBytes)) {
+      for (uint8_t i = 0; i < rec[26] && f.readExact(row, sizeof(row)); ++i) {
+        PageStatRow r;
+        r.startEpoch = getU32(row);
+        r.page = static_cast<uint16_t>(row[4] | (row[5] << 8));
+        r.seconds = static_cast<uint16_t>(row[6] | (row[7] << 8));
+        rows->restore(r);
+      }
+    }
   }
   fs.remove(path);
   if (!whole) return false;
   out.paged = rec[1] != 0;
   out.pagesRead = static_cast<int32_t>(getU32(rec + 2));
-  out.startedEpoch = getI64(rec + 6);
-  out.lastTurnEpoch = getI64(rec + 14);
+  out.startPage = static_cast<int32_t>(getU32(rec + 6));
+  out.startedEpoch = getI64(rec + 10);
+  out.lastTurnEpoch = getI64(rec + 18);
   return true;
+}
+
+bool keptReadingStillCurrent(const TrackedReading& kept, const int64_t nowEpoch) {
+  if (kept.lastTurnEpoch <= 0 || nowEpoch < kept.lastTurnEpoch) return false;
+  return nowEpoch - kept.lastTurnEpoch <= kKeptReadingMaxAgeSec;
+}
+
+bool readingPublishesPosition(const TrackedReading& reading, const float percent) {
+  return reading.paged && !reading.positionSettled && percent >= 0;
 }
 
 bool ClipTimes::append(const char* path, const ClipStamp& stamp) {

@@ -21,6 +21,7 @@
 #include "activities/reader/ReaderUtils.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "net/NetRecords.h"
 
 namespace borges {
 namespace glue {
@@ -30,8 +31,7 @@ namespace {
 // The contract is 12 s from the press to the book, and a network boot and the reboot back cost
 // about 1.2 s each. So this is what is left, with half a second for an uninterruptible step.
 constexpr uint32_t kOpenBudgetMs = 9000;
-constexpr uint32_t kOpenLinkBudgetMs = 7000;
-constexpr uint32_t kOpenHardDeadlineMs = kOpenBudgetMs + 500;
+constexpr uint32_t kOpenLastStepMs = 500;
 constexpr uint32_t kStayBudgetMs = 9000;
 constexpr uint32_t kChoiceLinkBudgetMs = 6000;
 // Most answers come within this, on a connection already open. After it, the choice raises
@@ -49,15 +49,20 @@ constexpr uint32_t kNoticeMs = 3000;
 constexpr uint32_t kWakeWaitMs = 600;
 constexpr int kActionGap = 8;
 
+enum class CheckOutcome : uint8_t { NotAsked, Answered, Missed };
+
 // A session came back: the guard's count starts over. Takes its own file handles, since
 // the session task may still own the stack's.
-void completeSession(const bool openSucceeded, const std::string& path, IClock* clock) {
+void completeSession(const bool openSucceeded, const std::string& path, IClock* clock,
+                     const CheckOutcome check = CheckOutcome::NotAsked) {
   net::BorgesFsHal fs;
   GlueStore store(fs);
   GlueState state;
   store.load(state);
   finishSession(state);
   if (openSucceeded && clock) noteOpenSuccess(state, pathHash(path.c_str()), clock->wallNow());
+  if (check == CheckOutcome::Answered) noteCheckAnswered(state);
+  if (check == CheckOutcome::Missed) noteCheckMissed(state, pathHash(path.c_str()));
   store.save(state);
 }
 
@@ -124,7 +129,7 @@ void BorgesOpenActivity::onEnter() {
   stack_ = makeStack();
   session_ = makeUniqueNoThrow<Session>();
   if (!stack_ || !session_) {
-    openBook();
+    openBook(false);
     return;
   }
   session_->stack = stack_.get();
@@ -132,13 +137,19 @@ void BorgesOpenActivity::onEnter() {
   session_->title = title_;
   stack_->cancel.arm(kOpenBudgetMs);
   requestUpdate(true);
-  if (!worker_.start(&BorgesOpenActivity::sessionMain, session_.get())) openBook();
+  if (!worker_.start(&BorgesOpenActivity::sessionMain, session_.get())) openBook(false);
 }
 
 void BorgesOpenActivity::sessionMain(void* context) {
   Session& session = *static_cast<Session*>(context);
   BorgesStack& stack = *session.stack;
   if (!stack.openStore() || !stack.openEngine()) return;
+  // Nothing cached yet is what the first open after flashing cannot avoid. It gets time for it,
+  // counted from the boot, which is already behind it.
+  net::LinkHint hint;
+  const OpenBudget budget =
+      openBudgetFor(stack.store.state().anchorEpoch > 0, net::loadLinkHint(stack.fs, hint) && hint.usable());
+  if (budget.totalMs > kOpenBudgetMs) stack.cancel.moveDeadlineSinceBoot(budget.totalMs);
   if (!partialMd5(stack.fs, session.path.c_str(), session.ref.id)) {
     LOG_ERR("BORGES", "No identity for %s: opening without a check", session.path.c_str());
     return;
@@ -152,12 +163,16 @@ void BorgesOpenActivity::sessionMain(void* context) {
   // turns it into a percent. Built here, once per book, and the reader would build it anyway:
   // it must not look like "never opened" to the check.
   if (percent < 0 && hasSavedPlace(session.path)) {
+    suspendGuard(stack.glue);
+    stack.glueStore.save(stack.glue);
     const float built = buildMetadataAndPercent(session.path);
     if (built >= 0) session.local.setPercent(built);
-    stack.cancel.arm(kOpenBudgetMs);
+    resumeGuard(stack.glue);
+    stack.glueStore.save(stack.glue);
+    stack.cancel.moveDeadline(budget.totalMs);
   }
 
-  const net::LinkResult link = stack.bringUp(kOpenLinkBudgetMs);
+  const net::LinkResult link = stack.bringUp(budget.linkMs);
   if (link != net::LinkResult::Connected) {
     if (link != net::LinkResult::Cancelled) stack.engine.noteLinkFailure();
     return;
@@ -172,10 +187,8 @@ void BorgesOpenActivity::sessionMain(void* context) {
 }
 
 void BorgesOpenActivity::loop() {
-  const unsigned long now = millis();
-  (void)now;
   if (mappedInput.wasAnyPressed()) {
-    openBook();
+    openBook(true);
     return;
   }
   if (worker_.finished()) {
@@ -192,24 +205,31 @@ void BorgesOpenActivity::loop() {
         }
       }
     }
-    openBook();
+    openBook(false);
     return;
   }
   if (stack_ && stack_->cancel.remainingMs() == 0) {
     // The deadline reached the session through ICancel. Give it one uninterruptible step
     // to come back, then stop waiting: a reader never waits on a socket.
-    if (!worker_.waitForExit(kOpenHardDeadlineMs - kOpenBudgetMs)) openBook();
+    if (!worker_.waitForExit(kOpenLastStepMs)) openBook(false);
   }
 }
 
-void BorgesOpenActivity::openBook() {
+void BorgesOpenActivity::openBook(const bool pressed) {
   if (stack_) stack_->cancel.request();
   // Only with the session back: a session hung inside the card would hang this too, and a reader
-  // never waits on it. Without this write the guard counts it as dead, which it is.
+  // never waits on it. Without this write the guard counts it as dead, which it is, unless it was
+  // a person who stopped waiting: then it was merely busy.
   if (worker_.waitForExit(kLeaveWaitMs)) {
     const bool ok = session_ && session_->ran && session_->report.outcome == SessionOutcome::Ok;
-    completeSession(ok, path_, ok && stack_ ? &stack_->clock : nullptr);
+    // Someone who pressed a button knows they skipped it. Nothing else explains an answer not coming.
+    const CheckOutcome check = session_ && session_->report.focusChecked ? CheckOutcome::Answered
+                               : pressed                                 ? CheckOutcome::NotAsked
+                                                                         : CheckOutcome::Missed;
+    completeSession(ok, path_, ok && stack_ ? &stack_->clock : nullptr, check);
     if (stack_) stack_->bringDown();
+  } else if (pressed) {
+    noteLeftSessionOnPurpose();
   }
   // A reboot turns the radio off and frees everything, wherever the session stands.
   silentRestartToReader(true);
@@ -303,8 +323,10 @@ void BorgesResumeActivity::stayMain(void* context) {
 }
 
 void BorgesResumeActivity::drainMain(void* context) {
-  BorgesStack& stack = *static_cast<Work*>(context)->stack;
-  if (stack.bringUp(kChoiceLinkBudgetMs) == net::LinkResult::Connected) stack.engine.runSleepSession();
+  Work& work = *static_cast<Work*>(context);
+  BorgesStack& stack = *work.stack;
+  if (stack.bringUp(kChoiceLinkBudgetMs) == net::LinkResult::Connected)
+    stack.engine.runAfterChoice(work.decision->book);
   stack.bringDown();
 }
 
@@ -316,11 +338,13 @@ void BorgesResumeActivity::loop() {
         leave(false);
       }
       return;
-    case State::Working:
-      if (mappedInput.wasAnyPressed() || worker_.finished() || (workDeadlineAt_ != 0 && millis() >= workDeadlineAt_)) {
-        leave(choiceStored_ || worker_.finished());
+    case State::Working: {
+      const bool pressed = mappedInput.wasAnyPressed();
+      if (pressed || worker_.finished() || (workDeadlineAt_ != 0 && millis() >= workDeadlineAt_)) {
+        leave(choiceStored_ || worker_.finished(), pressed);
       }
       return;
+    }
     case State::Choosing:
       break;
   }
@@ -333,7 +357,7 @@ void BorgesResumeActivity::loop() {
   // Back answers nothing: the book opens where it was, and this asks again next time.
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     stack_->engine.abandonChoice();
-    leave(false);
+    leave(false, true);
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
@@ -413,6 +437,8 @@ bool BorgesResumeActivity::applyJump() {
       mapped.hasVisibleTextOffset ? std::optional<uint32_t>(mapped.visibleTextOffset) : std::nullopt;
   if (!EpubReaderUtils::saveProgress(*epub, saved.spine, saved.page, saved.pageCount, offset)) return false;
   RecentBookProgress::saveCachedEpubPercent(*epub, saved.spine, saved.page, saved.pageCount);
+  // A reading kept from before this is over: its place must not replace the jump.
+  discardKeptReading(*epub);
 
   Position after;
   if (decision_->hasRemotePct) {
@@ -498,6 +524,7 @@ void BorgesResumeActivity::goThere() {
       return;
     }
     work_->stack = stack_.get();
+    work_->decision = decision_.get();
     stack_->cancel.arm(kStayBudgetMs);
     workDeadlineAt_ = millis() + kStayBudgetMs + kHangMarginMs;
     if (!worker_.start(&BorgesResumeActivity::drainMain, work_.get())) leave(true);
@@ -508,11 +535,15 @@ void BorgesResumeActivity::goThere() {
   requestUpdate(true);
 }
 
-void BorgesResumeActivity::leave(const bool success) {
+void BorgesResumeActivity::leave(const bool success, const bool pressed) {
   if (stack_) stack_->cancel.request();
   if (back_ == Return::Reader) {
-    if (worker_.waitForExit(kLeaveWaitMs))
-      completeSession(success, path_, success && stack_ ? &stack_->clock : nullptr);
+    if (worker_.waitForExit(kLeaveWaitMs)) {
+      // Whatever came of it, the check itself got its answer: there was a prompt.
+      completeSession(success, path_, success && stack_ ? &stack_->clock : nullptr, CheckOutcome::Answered);
+    } else if (pressed) {
+      noteLeftSessionOnPurpose();
+    }
     silentRestartToReader(true);
     return;
   }
@@ -675,6 +706,8 @@ void BorgesSleepFlushActivity::wakeNow() {
     completeSession(false, {}, nullptr);
     if (stack_) stack_->bringDown();
     stack_.reset();  // The check below builds its own, and this boot's heap is tight.
+  } else {
+    noteLeftSessionOnPurpose();
   }
   const std::string path = APP_STATE.openEpubPath;
   if (!path.empty() && APP_STATE.lastSleepFromReader) {

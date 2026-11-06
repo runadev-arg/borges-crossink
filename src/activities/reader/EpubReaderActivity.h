@@ -1,5 +1,4 @@
 #pragma once
-#include "borges/ReaderTracker.h"
 #include <Epub.h>
 #include <Epub/FootnoteEntry.h>
 #include <Epub/Section.h>
@@ -25,6 +24,7 @@
 #include "SideButtonShortcuts.h"
 #include "activities/Activity.h"
 #include "activities/reader/TouchReaderPreviewModel.h"
+#include "borges/ReaderTracker.h"
 #include "components/OptionPopup.h"
 #if CROSSINK_APP_CAP_TOUCH
 #include "activities/reader/ReaderPinchGesture.h"
@@ -111,6 +111,9 @@ class EpubReaderActivity final : public Activity {
   std::shared_ptr<Epub> epub;
   borges::glue::ReaderTracker borgesTracker;
   bool skipBorgesExitSave = false;
+  static constexpr unsigned long kBorgesCheckNoticeDelayMs = 1200;
+  bool borgesCheckNoticePending = false;
+  unsigned long borgesCheckNoticeAt = 0;
   void finalizeForBorges();
   int32_t borgesReferencePage() const;
   int32_t borgesTotalPages() const;

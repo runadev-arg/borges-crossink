@@ -554,6 +554,29 @@ TEST(NetFailureRule12, EachFailureHasItsPlainWord) {
   EXPECT_EQ(word(TransportStage::Aborted, 0), "aborted");
 }
 
+TEST(LinkWordsRule12, OutOfRangeIsNotNoNetworkSaved) {
+  EXPECT_STREQ(linkResultCode(LinkResult::NoSavedNetworks), "no_wifi");
+  EXPECT_STREQ(linkResultCode(LinkResult::NotFound), "wifi_range");
+  EXPECT_EQ(linkWordsFor(LinkResult::NoSavedNetworks), LinkWords::NoSavedWifi);
+  EXPECT_EQ(linkWordsFor(LinkResult::NotFound), LinkWords::OutOfRange);
+  EXPECT_EQ(linkResultCode(LinkResult::Connected), nullptr);
+}
+
+TEST(LinkWordsRule12, WithTheLinkUpTheRadioIsNotToBlame) {
+  // The library's server failing with no cached list used to say the Wi-Fi could not start.
+  EXPECT_EQ(linkWordsFor(LinkResult::Connected), LinkWords::ServerUnreachable);
+  EXPECT_EQ(linkWordsFor(LinkResult::RadioError), LinkWords::RadioFailed);
+}
+
+TEST(LinkWordsRule12, OnlyWhatAnotherNetworkCanFixOffersOne) {
+  EXPECT_TRUE(linkOffersNetworkPicker(LinkResult::NotFound));
+  EXPECT_TRUE(linkOffersNetworkPicker(LinkResult::AuthFailed));
+  EXPECT_FALSE(linkOffersNetworkPicker(LinkResult::NoSavedNetworks)) << "That one opens the picker by itself.";
+  EXPECT_FALSE(linkOffersNetworkPicker(LinkResult::Timeout));
+  EXPECT_FALSE(linkOffersNetworkPicker(LinkResult::RadioError));
+  EXPECT_FALSE(linkOffersNetworkPicker(LinkResult::Connected));
+}
+
 TEST(NetFailureRule12, CertificateDatesBlameTheClockOnlyWhenItCouldBeWrong) {
   EXPECT_STREQ(failureCode(TransportStage::Tls, wolfcode::kBeforeDate, TimePrecision::Anchored), "tls_clock");
   EXPECT_STREQ(failureCode(TransportStage::Tls, wolfcode::kAfterDate, TimePrecision::Unknown), "tls_clock");

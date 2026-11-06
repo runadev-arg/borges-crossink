@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "PageStats.h"
 #include "Ports.h"
 #include "Types.h"
 
@@ -30,6 +31,9 @@ struct GlueState {
   uint8_t cooldownLevel = 0;  // Times the guard has tripped since a session last came back.
   uint8_t skipsLeft = 0;      // Sessions still to go without.
   int64_t lastOpenTryEpoch = 0;
+  bool checkNoticeDue = false;  // The next reader says the last check could not happen.
+  uint8_t noticeQuietMisses = 0;
+  uint32_t noticeBookHash = 0;
 };
 
 constexpr uint8_t kMaxAttempts = 1;
@@ -45,8 +49,36 @@ uint32_t pathHash(const char* path);
 // running. The caller goes on without one. The cooldown doubles each time it trips and ends
 // with the first session that comes back, so a transient problem does not disable sync for
 // good and a panic in every session stops costing the reader two opens out of three.
-bool armSession(GlueState& state, PendingKind kind);
+//
+// leftOnPurpose: a person pressed a button and the screen did not wait for the session, which was
+// busy and alive. That is why it did not come back, and it says nothing about the next one.
+bool armSession(GlueState& state, PendingKind kind, bool leftOnPurpose = false);
 void finishSession(GlueState& state);
+// A stretch of a session that is the book's work and not the network's, like building its metadata:
+// the reader would do the same thing the same way, so a crash there must not cost the next sessions.
+void suspendGuard(GlueState& state);
+void resumeGuard(GlueState& state);
+
+// The book opened without finding out whether someone read further: no Wi-Fi, a server that did
+// not answer, too little battery. That looks exactly like nobody having read it, so the reader
+// says so once. Not every wake while away from any network: after saying it, the next few misses
+// on this book go by quietly, and a check that gets an answer starts over. No clock involved: a
+// wake from deep sleep often has none.
+constexpr uint8_t kNoticeQuietMisses = 8;
+void noteCheckMissed(GlueState& state, uint32_t bookPathHash);
+void noteCheckAnswered(GlueState& state);
+// True once per notice.
+bool takeCheckNotice(GlueState& state);
+
+// How long a press to the book may take. The usual case is a known network and a clock it can
+// trust. The first open after flashing has neither: a scan with no hint, joining, finding the time
+// with no anchor, DNS, TLS. Nothing cached yet is exactly what the first open cannot avoid, and
+// missing the offer there is the one that costs most.
+struct OpenBudget {
+  uint32_t totalMs;
+  uint32_t linkMs;
+};
+OpenBudget openBudgetFor(bool hasClockAnchor, bool hasLinkHint);
 
 void noteOpenSuccess(GlueState& state, uint32_t bookPathHash, const WallTime& now);
 // An untrustworthy or backwards clock never throttles: an extra check costs seconds, and
@@ -56,6 +88,10 @@ bool openThrottled(const GlueState& state, uint32_t bookPathHash, const WallTime
 // it runs would otherwise get no check at all even with the server back, so an open tries at
 // most every few minutes through it. An untrustworthy clock tries: seconds against a missed offer.
 bool openOutlastsBackoff(const GlueState& state, const WallTime& now);
+// Only the server's backoff gives way: it was sized for sessions nobody asked for. Skips for a
+// network that is not there are counted in attempts and heal by themselves, and letting every open
+// through would spend on each exactly the radio they exist to save.
+bool openBackedOff(bool linkSkipped, bool serverBackedOff, const GlueState& state, const WallTime& now);
 
 enum class OpenRoute : uint8_t {
   Direct,          // Not paired, an excluded file: nothing to do, no reboot.
@@ -76,6 +112,9 @@ struct OpenInputs {
 };
 
 OpenRoute routeOpen(const OpenInputs& in);
+// A session was due and something kept it from running. Not a choice (the setting is off, or a
+// person is going to a place on purpose), and not a question already answered moments ago.
+bool routeMissesCheck(const OpenInputs& in);
 
 struct SleepInputs {
   bool paired = false;
@@ -130,13 +169,24 @@ bool planJump(bool xpointerUsable, const char* xpointer, bool hasPct, uint32_t p
 // be lost: a low-memory restart skips onExit, and a finalize can fail to queue.
 struct TrackedReading {
   bool paged = false;
+  bool positionSettled = false;  // Undo already published this place: the exit must not.
   int32_t pagesRead = 0;
+  int32_t startPage = -1;
   int64_t startedEpoch = 0;
   int64_t lastTurnEpoch = 0;
 };
-bool saveTrackedReading(IFs& fs, const char* path, const TrackedReading& reading);
+// rows may be null. The time spent per page is the one thing a restart would otherwise lose outright.
+bool saveTrackedReading(IFs& fs, const char* path, const TrackedReading& reading, const PageStatBuffer* rows = nullptr);
 // Single use: the file goes once read. False when there is none, or it is not whole.
-bool takeTrackedReading(IFs& fs, const char* path, TrackedReading& out);
+bool takeTrackedReading(IFs& fs, const char* path, TrackedReading& out, PageStatBuffer* rows = nullptr);
+
+// A kept reading is for a restart, seconds long. Any later and it describes something else: the
+// time between would count as reading, with a night or a file transfer inside, and the old place
+// would replace whatever was decided since. The rows have their own times and stay honest.
+constexpr int64_t kKeptReadingMaxAgeSec = 600;
+bool keptReadingStillCurrent(const TrackedReading& kept, int64_t nowEpoch);
+// What goes out as a position at finalize.
+bool readingPublishesPosition(const TrackedReading& reading, float percent);
 
 // Where "stay here" takes its position from. The ledger already holds the xpointer of the
 // last place this device published: if the book has not moved since, reading it costs no

@@ -9,6 +9,7 @@
 
 #include "RecentBooksStore.h"
 #include "activities/reader/EpubReaderUtils.h"
+#include "activities/reader/ReaderUtils.h"
 #include "fontIds.h"
 #include "net/NetFailure.h"
 
@@ -99,6 +100,45 @@ int drawLabelValue(const GfxRenderer& renderer, const int x, const int y, const 
   return next + renderer.getLineHeight(UI_10_FONT_ID);
 }
 
+void noteNetworkPicked(IFs& fs) {
+#ifdef SIMULATOR
+  File joined(fs, "/.crosspoint/borges/sim-picker-joined", IFs::Mode::WriteTrunc);
+  joined.flush();
+#else
+  (void)fs;
+#endif
+}
+
+void drawCheckNotice(const GfxRenderer& renderer) {
+  constexpr int kPadX = 20;
+  constexpr int kPadY = 12;
+  const int width = renderer.getScreenWidth() - kSideMargin * 2;
+  // What happened on one line and what to do on the next, rather than wherever the width falls.
+  const std::string text = tr(STR_BORGES_CHECK_MISSED);
+  const size_t stop = text.find(". ");
+  auto lines = renderer.wrappedText(UI_10_FONT_ID, text.substr(0, stop == std::string::npos ? stop : stop + 1).c_str(),
+                                    width - kPadX * 2, 2, EpdFontFamily::REGULAR);
+  if (stop != std::string::npos) {
+    for (auto& line :
+         renderer.wrappedText(UI_10_FONT_ID, text.c_str() + stop + 2, width - kPadX * 2, 2, EpdFontFamily::REGULAR)) {
+      lines.push_back(std::move(line));
+    }
+  }
+  const int lineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  const int height = static_cast<int>(lines.size()) * lineHeight + kPadY * 2;
+  const int y = (renderer.getScreenHeight() - height) / 2;
+  const bool black = ReaderUtils::readerForegroundBlack();
+  renderer.fillRect(kSideMargin, y, width, height, black);
+  renderer.drawRect(kSideMargin, y, width, height, !black);
+  int lineY = y + kPadY;
+  for (const auto& line : lines) {
+    const int lineWidth = renderer.getTextWidth(UI_10_FONT_ID, line.c_str(), EpdFontFamily::REGULAR);
+    renderer.drawText(UI_10_FONT_ID, kSideMargin + (width - lineWidth) / 2, lineY, line.c_str(), !black);
+    lineY += lineHeight;
+  }
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+}
+
 void drawHairline(const GfxRenderer& renderer, const int x, const int y, const int width) {
   renderer.drawLine(x, y, x + width - 1, y, true);
 }
@@ -163,18 +203,18 @@ void formatSize(char* out, const size_t cap, const uint64_t bytes) {
 }
 
 StrId describeLink(const net::LinkResult result) {
-  switch (result) {
-    case net::LinkResult::NoSavedNetworks:
+  switch (net::linkWordsFor(result)) {
+    case net::LinkWords::NoSavedWifi:
       return StrId::STR_BORGES_ERR_NO_WIFI;
-    case net::LinkResult::NotFound:
+    case net::LinkWords::OutOfRange:
       return StrId::STR_BORGES_ERR_WIFI_RANGE;
-    case net::LinkResult::AuthFailed:
+    case net::LinkWords::WrongPassword:
       return StrId::STR_BORGES_ERR_WIFI_AUTH;
-    case net::LinkResult::Timeout:
-    case net::LinkResult::Cancelled:
+    case net::LinkWords::TookTooLong:
       return StrId::STR_BORGES_ERR_TIMEOUT;
-    case net::LinkResult::RadioError:
-    case net::LinkResult::Connected:
+    case net::LinkWords::ServerUnreachable:
+      return StrId::STR_BORGES_ERR_TRANSPORT;
+    case net::LinkWords::RadioFailed:
       break;
   }
   return StrId::STR_BORGES_ERR_RADIO;
@@ -221,6 +261,7 @@ StrId describeDiagnostics(const Diagnostics& diagnostics) {
   }
   if (strcmp(code, "low_memory") == 0) return StrId::STR_BORGES_ERR_TRANSPORT;
   if (strcmp(code, "no_wifi") == 0) return StrId::STR_BORGES_ERR_NO_WIFI;
+  if (strcmp(code, "wifi_range") == 0) return StrId::STR_BORGES_ERR_WIFI_RANGE;
   if (strcmp(code, "wifi_auth") == 0) return StrId::STR_BORGES_ERR_WIFI_AUTH;
   if (strcmp(code, "wifi_timeout") == 0) return StrId::STR_BORGES_ERR_TIMEOUT;
   if (strstr(code, "_write") || strstr(code, "_read") || strstr(code, "_io")) return StrId::STR_BORGES_ERR_LOCAL;

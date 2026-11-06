@@ -37,6 +37,10 @@ class SessionCancel : public ICancel {
   void request() { requested_.store(true, std::memory_order_relaxed); }
   // Clears the request and starts a new deadline. 0 means no deadline.
   void arm(uint32_t budgetMs);
+  // Moves the deadline and leaves a request that already came alone: a press stays pressed.
+  void moveDeadline(uint32_t budgetMs);
+  // The same, measured from the boot rather than from now.
+  void moveDeadlineSinceBoot(uint32_t budgetMs);
   bool requested() const { return requested_.load(std::memory_order_relaxed); }
   uint32_t remainingMs();
 

@@ -38,8 +38,10 @@ enum class NetPayload : uint32_t {
 
 // --- The previous firmware's data ------------------------------------------------------
 
-// Before settings load. One exists() per boot once it is done.
-void importLegacyDataAtBoot();
+// Before settings load, so they are there to load. One exists() per boot once it is done.
+void importLegacySettingsAtBoot();
+// The places in the books, with the panel ready: there can be hundreds. Normal boots only.
+void importLegacyBooksAtBoot(GfxRenderer& renderer);
 // Before the reader loads the book's bookmarks. Cheap once done, or when there were none.
 void importLegacyBookmarks(Epub& epub);
 
@@ -71,6 +73,7 @@ struct ReaderSnapshot {
   const CrossPointPosition* mapped = nullptr;  // For the xpointer. May be null.
   int32_t page = -1;                           // Stable reference pages. -1: unknown, omitted.
   int32_t totalPages = -1;
+  bool totalPagesApproximate = false;  // This device's estimate, not the book's numbering.
 };
 
 // At reader exit, with the book and its clippings still loaded. Local, never the radio.
@@ -78,10 +81,21 @@ struct ReaderSnapshot {
 // holds the render lock, and rebuilds the frame if something after it needs one.
 bool finalizeFromReader(GfxRenderer& renderer, ReaderTracker& tracker, const std::shared_ptr<Epub>& epub,
                         const ReaderSnapshot& snapshot);
-// A restart that skips onExit is coming: what this reading knows goes to the card.
-void keepReadingAcrossRestart(const ReaderTracker& tracker, const Epub& epub);
-// At reader entry. Takes back what a restart or a failed finalize left.
+// A restart that skips onExit is coming: what this reading knows goes to the card. For that restart
+// only. Any path that runs onExit finalizes instead, and leaving a copy behind invents a session.
+void keepReadingAcrossRestart(ReaderTracker& tracker, const Epub& epub);
+// A place was just decided for this book: whatever was kept describes a reading that is over.
+void discardKeptReading(const Epub& epub);
+// At reader entry. Takes back what a restart or a failed finalize left, if it is recent enough.
 void restoreReading(ReaderTracker& tracker, const Epub& epub);
+// At reader entry, with the clippings loaded. The first time this account opens this book.
+void seedClipsAtOpen(const Epub& epub);
+// At reader entry. True once: the check for this book could not happen, and the page should say so.
+bool takeReaderCheckNotice();
+// Over the page just drawn. Stays until the page turns.
+void drawCheckNotice(const GfxRenderer& renderer);
+// A button took the screen off a session that is still busy. See armSession().
+void noteLeftSessionOnPurpose();
 // "Volver a donde estaba": the place restored becomes the head, as in the plugin.
 void publishRestoredPosition(const std::shared_ptr<Epub>& epub, const Position& position);
 // A clipping was just saved: remember when, next to the book.
@@ -92,8 +106,10 @@ void stampBookmark(const std::string& cachePath, uint16_t spine, float progress,
 bool isPaired();
 // Cheap enough to call when a menu opens: one exists() each.
 bool hasUndo(const std::string& bookPath);
-// Single use. False when there is none or it cannot be read.
-bool takeUndo(const std::string& bookPath, Position& out);
+// False when there is none or it cannot be read. Stays until consumeUndo(), so that a place that
+// could not be mapped back can be tried again.
+bool peekUndo(const std::string& bookPath, Position& out);
+void consumeUndo(const std::string& bookPath);
 
 // The screen that turns a manual request into a network boot, after the current activity
 // has run its onExit(). Replace the current activity with it.

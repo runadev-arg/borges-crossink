@@ -1381,7 +1381,8 @@ void setup() {
 
   HalSystem::checkPanic();
 
-  borges::glue::importLegacyDataAtBoot();
+  // Borges: only when nothing is waiting on this boot. A restart is seconds in the middle of something.
+  if (!isSilentReboot) borges::glue::importLegacySettingsAtBoot();
   SETTINGS.loadFromFile();
   Storage.installDateTimeCallback(&SETTINGS.clockUtcOffsetQ);
   APP_STATE.loadFromFile();
@@ -1494,6 +1495,8 @@ void setup() {
   setupDisplayAndFonts(SleepWakePolicy::shouldInitializeSeamlessly(resume, isUc8279X3, hasValidSleepFrame),
                        resume != BootResume::Network, useReaderRenderStack);
   logBootHeap("display and font resolver ready");
+  // Borges: the panel can say so now if this card has hundreds of books to bring over.
+  if (!isSilentReboot && !isNetworkResume) borges::glue::importLegacyBooksAtBoot(renderer);
 
   switch (resume) {
     case BootResume::Silent:

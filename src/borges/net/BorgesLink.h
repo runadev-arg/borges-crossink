@@ -16,19 +16,6 @@
 namespace borges {
 namespace net {
 
-enum class LinkResult : uint8_t {
-  Connected,
-  NoSavedNetworks,  // Nothing in WifiCredentialStore.
-  NotFound,         // No saved network is in range.
-  AuthFailed,       // In range, and the saved password was refused.
-  Timeout,          // Budget ran out.
-  Cancelled,        // cancel.cancelled() returned true.
-  RadioError,       // The Wi-Fi driver refused station mode or the scan.
-};
-
-// no_wifi, wifi_auth, wifi_timeout, cancelled, radio_error. Null for Connected.
-const char* linkResultCode(LinkResult result);
-
 class BorgesLink {
  public:
   explicit BorgesLink(IFs& fs);

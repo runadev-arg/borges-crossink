@@ -29,7 +29,7 @@ namespace {
 constexpr uint32_t kSyncLinkBudgetMs = 20000;
 constexpr uint32_t kPairLinkBudgetMs = 20000;
 constexpr uint32_t kManualBudgetMs = 120000;
-constexpr uint32_t kDisconnectBudgetMs = 30000;
+constexpr uint32_t kDisconnectBudgetMs = 45000;  // The link, what is queued, and the credential.
 // Past a budget a session sees through ICancel, the one step it cannot be interrupted in. After
 // that it is hung, and the screen leaves without it: every way out of here ends in a reboot.
 constexpr unsigned long kHangMarginMs = 15000;
@@ -64,6 +64,7 @@ struct BorgesActivity::Shared {
   std::atomic<StrId> resultText_{StrId::STR_NONE_OPT};
   std::atomic<bool> resultOk_{false};
   std::atomic<bool> needsChoice_{false};
+  std::atomic<bool> offerNetwork_{false};  // Another network could fix what just failed.
   bool askOtherDevices_ = false;
   std::atomic<uint32_t> pairAliveAt_{0};
 };
@@ -210,6 +211,8 @@ void BorgesActivity::activate(const Row row) {
     case Row::OnOpen:
       s_->stack_->glue.autoOnOpen = !s_->stack_->glue.autoOnOpen;
       savePrefs();
+      // Off, nobody will ever answer what is waiting: it goes up at the next session.
+      if (!s_->stack_->glue.autoOnOpen) s_->stack_->engine.releaseHolds();
       requestUpdate();
       return;
     case Row::OnSleep:
@@ -239,17 +242,33 @@ void BorgesActivity::activate(const Row row) {
 // Manual sync
 // ---------------------------------------------------------------------------------
 
-void BorgesActivity::startSync() {
-  if (!hasSavedWifi() && !s_->stack_->link.connected()) {
-    // First network ever. The picker owns the connection and the password.
-    startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, true, true),
-                           [this](const ActivityResult& result) {
-                             if (result.isCancelled) {
+// The picker owns the connection and the password. What was being tried runs again on what it leaves.
+void BorgesActivity::pickNetwork(const bool thenPair) {
+  s_->offerNetwork_.store(false);
+  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, true, true),
+                         [this, thenPair](const ActivityResult& result) {
+                           fullPaint_ = true;
+                           if (result.isCancelled) {
+                             if (readerSession()) {
+                               leave();
+                             } else {
                                setView(View::Status);
+                             }
+                           } else {
+                             noteNetworkPicked(s_->stack_->fs);
+                             if (thenPair) {
+                               beginPairSession();
                              } else {
                                startSync();
                              }
-                           });
+                           }
+                         });
+}
+
+void BorgesActivity::startSync() {
+  if (!hasSavedWifi() && !s_->stack_->link.connected()) {
+    // First network ever.
+    pickNetwork(false);
     return;
   }
   s_->stack_->cancel.arm(kManualBudgetMs);
@@ -287,6 +306,7 @@ void BorgesActivity::syncMain(void* shared) {
   stack.clock.allowLongGap();
   const net::LinkResult link = stack.bringUp(kSyncLinkBudgetMs);
   if (link != net::LinkResult::Connected) {
+    s->offerNetwork_.store(net::linkOffersNetworkPicker(link));
     finish(describeLink(link), false);
     return;
   }
@@ -359,14 +379,7 @@ void BorgesActivity::disconnectMain(void* shared) {
 
 void BorgesActivity::startPair() {
   if (!hasSavedWifi() && !s_->stack_->link.connected()) {
-    startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, true, true),
-                           [this](const ActivityResult& result) {
-                             if (result.isCancelled) {
-                               setView(View::Status);
-                             } else {
-                               beginPairSession();
-                             }
-                           });
+    pickNetwork(true);
     return;
   }
   beginPairSession();
@@ -418,6 +431,7 @@ void BorgesActivity::pairMain(void* shared) {
 
   const net::LinkResult link = stack.bringUp(kPairLinkBudgetMs);
   if (link != net::LinkResult::Connected) {
+    s->offerNetwork_.store(net::linkOffersNetworkPicker(link));
     finish(describeLink(link), false);
     return;
   }
@@ -554,7 +568,14 @@ void BorgesActivity::loop() {
     }
     case View::SyncResult:
     case View::PairResult:
-      if (mappedInput.wasAnyPressed() || (autoLeaveAt_ != 0 && millis() >= autoLeaveAt_)) {
+      if (s_->offerNetwork_.load() && mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+        pickNetwork(view_ == View::PairResult);
+        return;
+      }
+      if ((s_->offerNetwork_.load() && mappedInput.wasReleased(MappedInputManager::Button::Back)) ||
+          (!s_->offerNetwork_.load() && mappedInput.wasAnyPressed()) ||
+          (autoLeaveAt_ != 0 && millis() >= autoLeaveAt_)) {
+        s_->offerNetwork_.store(false);
         if (readerSession()) {
           leave();
           return;
@@ -617,7 +638,12 @@ void BorgesActivity::renderResult() {
     snprintf(id, sizeof(id), tr(STR_BORGES_REQUEST_ID_FMT), requestId_);
     y += kBlockGap;
     y = drawWrappedCentered(renderer, area, SMALL_FONT_ID, y, id, 2);
-    drawWrappedCentered(renderer, area, SMALL_FONT_ID, y + kLineGap, tr(STR_BORGES_REPORT), 2);
+    y = drawWrappedCentered(renderer, area, SMALL_FONT_ID, y + kLineGap, tr(STR_BORGES_REPORT), 2);
+  }
+  // The way out, where the eye already is. Too long for a button hint in any language.
+  if (s_->offerNetwork_.load()) {
+    drawActionRow(renderer, area.x, y + kBlockGap, area.width, actionRowHeight(renderer), tr(STR_BORGES_CHOOSE_NETWORK),
+                  true);
   }
 }
 
@@ -737,14 +763,20 @@ void BorgesActivity::renderStatus() {
     } else {
       snprintf(value, sizeof(value), tr(STR_BORGES_PENDING_FMT), static_cast<unsigned>(status.depth));
     }
-    y = drawLabelValue(renderer, x, y, width, tr(STR_BORGES_PENDING), value) + kBlockGap;
+    y = drawLabelValue(renderer, x, y, width, tr(STR_BORGES_PENDING), value);
+    if (status.held > 0) {
+      // Nothing is wrong with these, and nothing goes up until a person answers: it says so.
+      snprintf(value, sizeof(value), tr(STR_BORGES_HELD_FMT), static_cast<unsigned>(status.held));
+      y = drawWrapped(renderer, SMALL_FONT_ID, x, y, width, value, 1);
+    }
+    y += kBlockGap;
 
     if (status.needsRelink) {
       y = drawWrapped(renderer, UI_10_FONT_ID, x, y, width, tr(STR_BORGES_ERR_RELINK), 2, EpdFontFamily::BOLD);
       y += kBlockGap;
     } else if (status.diag.hasError()) {
       y = drawWrapped(renderer, SMALL_FONT_ID, x, y, width, tr(STR_BORGES_LAST_ERROR), 1, EpdFontFamily::BOLD);
-      y = drawWrapped(renderer, UI_10_FONT_ID, x, y, width, I18N.get(describeDiagnostics(status.diag)), 2);
+      y = drawWrapped(renderer, UI_10_FONT_ID, x, y, width, I18N.get(describeDiagnostics(status.diag)), 3);
       // Literal, for a report: the words above group several failures.
       if (const char* failure =
               net::failureCode(status.diag.transportStage, status.diag.transportCode, TimePrecision::Unknown)) {
@@ -826,7 +858,9 @@ void BorgesActivity::render(RenderLock&&) {
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if ((view_ == View::SyncResult || view_ == View::PairResult) && !s_->resultOk_.load()) {
     // A failure waits to be read. The hint says what the button does.
-    const auto labels = mappedInput.mapLabels("", tr(STR_BORGES_CONTINUE), "", "");
+    const auto labels = s_->offerNetwork_.load()
+                            ? mappedInput.mapLabels(tr(STR_BORGES_CONTINUE), tr(STR_SELECT), "", "")
+                            : mappedInput.mapLabels("", tr(STR_BORGES_CONTINUE), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   }
   renderer.displayBuffer(fullPaint_ ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);

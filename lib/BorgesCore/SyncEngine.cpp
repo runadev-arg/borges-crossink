@@ -1476,6 +1476,7 @@ void SyncEngine::maybeRotate(SessionReport& report) {
   char token[sizeof(c.token)] = {0};
   bool truncated = false;
   int64_t expires = 0;
+  int64_t renew = 0;
   if (scan.enterObject()) {
     while (scan.nextMember(key, sizeof(key))) {
       if (strcmp(key, "credential") == 0 && scan.enterObject()) {
@@ -1485,6 +1486,9 @@ void SyncEngine::maybeRotate(SessionReport& report) {
           } else if (strcmp(key, "expires_at") == 0) {
             char text[40];
             if (!scan.readString(text, sizeof(text)) || !parseRfc3339(text, expires)) expires = 0;
+          } else if (strcmp(key, "renew_after") == 0) {
+            char text[40];
+            if (!scan.readString(text, sizeof(text)) || !parseRfc3339(text, renew)) renew = 0;
           } else {
             scan.skipValue();
           }
@@ -1500,7 +1504,9 @@ void SyncEngine::maybeRotate(SessionReport& report) {
   copyText(c.token, sizeof(c.token), token);
   memset(token, 0, sizeof(token));
   c.expiresAtEpoch = expires;
-  c.renewAfterEpoch = 0;
+  // Without it, only the last 14 days before expiry would rotate, and a reader left in a drawer
+  // through those needs pairing again. A server that does not say leaves that rule.
+  c.renewAfterEpoch = renew;
   store_.saveCredentials();
 }
 
@@ -1670,6 +1676,7 @@ FinalizeResult SyncEngine::finalizeBook(const FinalizeInput& input) {
       if (store_.state().holds.clearChecked(input.book.id.md5) && !store_.saveState()) ok = false;
     } else {
       ok = false;
+      result.progressFailed = true;
     }
   }
 

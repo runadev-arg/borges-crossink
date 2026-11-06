@@ -7,6 +7,7 @@
 #include <GfxRenderer.h>
 #include <HalPowerManager.h>
 #include <HalStorage.h>
+#include <I18n.h>
 #include <InflateStream.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -25,6 +26,7 @@
 #include "ProgressMapper.h"
 #include "ReaderTracker.h"
 #include "activities/ActivityManager.h"
+#include "components/UITheme.h"
 
 namespace borges {
 namespace glue {
@@ -39,11 +41,28 @@ constexpr int64_t kPlausibleEpoch = 1600000000;
 // them over a few exits instead of holding one exit for minutes.
 constexpr int kMaxXpointersPerFinalize = 6;
 constexpr uint32_t kXpointerBudgetMs = 4000;
+constexpr uint32_t kPositionBudgetMs = 8000;
 // With the framebuffer lent, inflate's 43 KB come out of it. What is left on the heap is the
 // XML parser, its string pools and the read chunk.
 constexpr uint32_t kMinFreeForXpointer = 22 * 1024;  // 18 KB peak measured on the host.
 constexpr uint32_t kMinBlockForXpointer = 8 * 1024;
 constexpr uint32_t kAllocationMargin = 2 * 1024;
+// A chapter this size takes seconds to walk even stopping early: the screen says something first.
+constexpr size_t kBigChapterBytes = 192 * 1024;
+
+#if !defined(RTC_NOINIT_ATTR)
+#define RTC_NOINIT_ATTR
+#endif
+// Survives the restart a screen leaves through, which has no time to write to the card with a
+// session still holding it. Eight bytes of RTC memory, not DRAM, and read only when one is armed.
+constexpr uint32_t kLeftOnPurposeMagic = 0x4C454654;  // "LEFT"
+RTC_NOINIT_ATTR uint32_t sLeftOnPurpose;
+
+bool takeLeftOnPurpose() {
+  const bool left = sLeftOnPurpose == kLeftOnPurposeMagic;
+  sLeftOnPurpose = 0;
+  return left;
+}
 
 std::string cachePathFor(const std::string& path) { return Epub::cachePathForFilePath(path, kCacheRoot); }
 std::string trackedPath(const Epub& epub) { return epub.getCachePath() + "/borges_reading.bin"; }
@@ -57,6 +76,8 @@ const char* fileNameOf(const std::string& path) {
 // that skips the session, a crash in that boot. The hold is what keeps stale progress from
 // quietly becoming the head at the next sleep.
 void holdBook(BorgesStack& stack, const std::string& path) {
+  // With the search off nothing will ever ask, and a hold would keep this place back for good.
+  if (!stack.glue.autoOnOpen) return;
   BookId id;
   if (!partialMd5(stack.fs, path.c_str(), id) || !stack.engine.onBookOpened(id)) {
     LOG_ERR("BORGES", "Could not hold %s", path.c_str());
@@ -71,7 +92,7 @@ OpenRoute routeBook(BorgesStack& stack, const std::string& path) {
   if (in.paired) {
     const Gate gate = stack.engine.decideAutomatic(SessionKind::Open);
     in.needsRelink = gate == Gate::NeedsRelink;
-    in.backedOff = gate == Gate::BackedOff && !openOutlastsBackoff(stack.glue, stack.clock.wallNow());
+    in.backedOff = openBackedOff(gate == Gate::LinkSkipped, gate == Gate::BackedOff, stack.glue, stack.clock.wallNow());
   }
   in.hasSavedWifi = hasSavedWifi();
   in.autoOnOpen = stack.glue.autoOnOpen;
@@ -79,14 +100,17 @@ OpenRoute routeBook(BorgesStack& stack, const std::string& path) {
   in.batteryPercent = powerManager.getBatteryPercentage();
   OpenRoute route = routeOpen(in);
   if (route != OpenRoute::Direct) holdBook(stack, path);
+  bool missed = routeMissesCheck(in);
   if (route == OpenRoute::NetworkSession) {
-    if (!armSession(stack.glue, PendingKind::OpenBook)) {
+    if (!armSession(stack.glue, PendingKind::OpenBook, takeLeftOnPurpose())) {
       LOG_INF("BORGES", "Open sessions keep failing: opening without one");
       route = OpenRoute::DirectWithHold;
+      missed = true;
     }
     stack.glue.lastOpenTryEpoch = stack.clock.wallNow().epochSec;
-    stack.glueStore.save(stack.glue);
   }
+  if (missed) noteCheckMissed(stack.glue, pathHash(path.c_str()));
+  if (missed || route == OpenRoute::NetworkSession) stack.glueStore.save(stack.glue);
   return route;
 }
 
@@ -102,12 +126,25 @@ bool mayBePaired() {
 // keep their frame. The panel keeps showing its image; the bytes in RAM do not survive.
 class XpointerBudget {
  public:
-  explicit XpointerBudget(GfxRenderer& renderer) : renderer_(renderer), startedAt_(millis()) {}
+  XpointerBudget(GfxRenderer& renderer, const Epub& epub) : renderer_(renderer), epub_(epub), startedAt_(millis()) {}
+  ~XpointerBudget() { ChapterXPathResolver::setDeadline(0); }
 
-  // False: not now. Whoever asked retries at a later finalize, or goes without.
-  bool take(const bool bounded) {
-    if (bounded && (taken_ >= kMaxXpointersPerFinalize || millis() - startedAt_ >= kXpointerBudgetMs)) return false;
-    if (!loan_) loan_ = makeUniqueNoThrow<GfxRenderer::FrameBufferLoan>(renderer_);
+  // False: not now. Whoever asked retries at a later finalize, or goes without. The clock runs for
+  // the position too, which goes first and may take longer: a chapter of megabytes can spend it all,
+  // and then the position leaves with its percentage and the clippings wait for an exit with time.
+  bool take(const bool bounded, const int spine) {
+    const uint32_t limitMs = bounded ? kXpointerBudgetMs : kPositionBudgetMs;
+    if (millis() - startedAt_ >= limitMs) return false;
+    if (bounded && taken_ >= kMaxXpointersPerFinalize) return false;
+    ChapterXPathResolver::setDeadline(startedAt_ + limitMs);
+    if (!loan_) {
+      // Before the frame goes: after that there is nothing to draw on. Going to sleep the panel
+      // already shows what it should.
+      if (chapterBytes(spine) >= kBigChapterBytes && !activityManager.isEnteringSleep()) {
+        GUI.drawPopup(renderer_, tr(STR_BORGES_ONE_MOMENT));
+      }
+      loan_ = makeUniqueNoThrow<GfxRenderer::FrameBufferLoan>(renderer_);
+    }
     if (!loan_ || !buildscratch::available(InflateStream::requiredStorageSize(true)) ||
         ESP.getFreeHeap() < kMinFreeForXpointer || ESP.getMaxAllocHeap() < kMinBlockForXpointer) {
       LOG_ERR("BORGES", "No memory for an xpointer (free=%u maxAlloc=%u)", ESP.getFreeHeap(), ESP.getMaxAllocHeap());
@@ -119,19 +156,22 @@ class XpointerBudget {
   bool frameLent() const { return loan_ != nullptr; }
 
  private:
+  size_t chapterBytes(const int spine) const {
+    const size_t upTo = epub_.getCumulativeSpineItemSize(spine);
+    const size_t before = spine > 0 ? epub_.getCumulativeSpineItemSize(spine - 1) : 0;
+    return upTo > before ? upTo - before : 0;
+  }
+
   GfxRenderer& renderer_;
+  const Epub& epub_;
   std::unique_ptr<GfxRenderer::FrameBufferLoan> loan_;
   uint32_t startedAt_;
   int taken_ = 0;
 };
 
-class ClipSource final : public IClipSource {
+// What identifies each of the book's clippings. All an opening book needs to know about them.
+class ClipKeys : public IClipSource {
  public:
-  ClipSource(BorgesStack& stack, std::shared_ptr<Epub> epub, XpointerBudget& budget)
-      : stack_(stack), epub_(std::move(epub)), budget_(budget) {
-    timesPath_ = epub_->getCachePath() + kClipTimes;
-  }
-
   bool count(size_t& out) override {
     out = CLIPPINGS.clippingCount() + BOOKMARKS.getBookmarks().size();
     return true;
@@ -153,6 +193,16 @@ class ClipSource final : public IClipSource {
     const Bookmark& mark = bookmarks[index - clips];
     out = bookmarkKey(mark.spineIndex, mark.paragraphIndex, mark.progress);
     return true;
+  }
+
+  bool detail(size_t, ClipDetail&) override { return false; }
+};
+
+class ClipSource final : public ClipKeys {
+ public:
+  ClipSource(BorgesStack& stack, std::shared_ptr<Epub> epub, XpointerBudget& budget)
+      : stack_(stack), epub_(std::move(epub)), budget_(budget) {
+    timesPath_ = epub_->getCachePath() + kClipTimes;
   }
 
   bool detail(const size_t index, ClipDetail& out) override {
@@ -209,7 +259,7 @@ class ClipSource final : public IClipSource {
     range_ = {};
     if (visibleOffset != kNoVisibleOffset || paragraph != UINT16_MAX || index < clips) {
       // Published without one it would stay without one: the ledger never asks again.
-      if (!budget_.take(true)) return false;
+      if (!budget_.take(true, spine)) return false;
       // locateText builds a second copy of the text, and a std::string aborts when it cannot grow.
       if (index < clips && ESP.getMaxAllocHeap() < text_.size() + kAllocationMargin) return false;
       // A clipping reaches KOReader as a highlight only with both ends, holding the text it is
@@ -224,11 +274,14 @@ class ClipSource final : public IClipSource {
         out.text = range_.text.c_str();
         return true;
       }
+      // Time ran out, which says nothing about the text: this one waits, whole, for the next exit.
+      if (ChapterXPathResolver::deadlineHit()) return false;
       if (visibleOffset != kNoVisibleOffset) {
         xpointer_ = ChapterXPathResolver::findXPathForVisibleTextOffset(epub_, spine, visibleOffset);
       } else if (paragraph != UINT16_MAX) {
         xpointer_ = ChapterXPathResolver::findXPathForParagraph(epub_, spine, paragraph);
       }
+      if (ChapterXPathResolver::deadlineHit()) return false;
     }
     if (!xpointer_.empty() && xpointer_.size() < kMaxXpointer) out.xpointer = xpointer_.c_str();
     return true;
@@ -324,7 +377,7 @@ bool shouldFlushBeforeSleep(const uint32_t batteryPercent, const bool inNetworkB
   in.gateGo = stack->engine.decideAutomatic(SessionKind::Sleep) == Gate::Go;
   in.batteryPercent = batteryPercent;
   if (!glue::shouldFlushBeforeSleep(in)) return false;
-  const bool armed = armSession(stack->glue, PendingKind::SleepFlush);
+  const bool armed = armSession(stack->glue, PendingKind::SleepFlush, takeLeftOnPurpose());
   stack->glueStore.save(stack->glue);
   return armed;
 }
@@ -343,22 +396,28 @@ bool finalizeFromReader(GfxRenderer& renderer, ReaderTracker& tracker, const std
   auto session = makeUniqueNoThrow<SessionSummary>();
   if (!input || !session || !stack->openEngine()) return false;
 
-  XpointerBudget budget(renderer);
+  // This exit answers for all of it: whatever an earlier restart left is in the tracker by now, or
+  // was too old to believe, and must not come back at the next open.
+  const std::string kept = trackedPath(*epub);
+  if (stack->fs.exists(kept.c_str())) stack->fs.remove(kept.c_str());
+
+  XpointerBudget budget(renderer, *epub);
 
   input->book.id = id;
   input->book.title = epub->getTitle().c_str();
   input->book.author = epub->getAuthor().c_str();
   input->book.file = fileNameOf(epub->getPath());
   input->book.totalPages = snapshot.totalPages;
+  input->book.totalPagesApproximate = snapshot.totalPagesApproximate;
 
   const WallTime now = stack->clock.wallNow();
-  input->paged = tracker.paged && snapshot.percent >= 0;
+  input->paged = readingPublishesPosition(tracker, snapshot.percent);
   if (input->paged) {
     input->position.setPercent(snapshot.percent);
     input->position.page = snapshot.page;
     input->position.totalPages = snapshot.totalPages;
-    // Unbounded by count and time: the position comes first, and is one resolve.
-    if (snapshot.mapped && budget.take(false)) {
+    // Not bound by the count: the position comes first, and is one resolve.
+    if (snapshot.mapped && budget.take(false, snapshot.mapped->spineIndex)) {
       const KOReaderPosition mapped = ProgressMapper::toKOReader(epub, *snapshot.mapped);
       if (mapped.valid && mapped.xpath.size() < kMaxXpointer) {
         strncpy(input->position.xpointer, mapped.xpath.c_str(), kMaxXpointer - 1);
@@ -386,36 +445,80 @@ bool finalizeFromReader(GfxRenderer& renderer, ReaderTracker& tracker, const std
   ClipSource clips(*stack, epub, budget);
   input->clips = &clips;
   const FinalizeResult result = stack->engine.finalizeBook(*input);
-  const bool progressLost = input->paged && !result.ok && !result.progressQueued;
-  const bool sessionLost = input->session && !result.sessionQueued && !result.ok;
-  if (progressLost || sessionLost) {
+  // Only what really failed to reach the queue. A visit too short to be a session is not one of
+  // those, however the clippings went: keeping it would bring its start time back at the next open.
+  const bool progressLost = result.progressFailed;
+  const bool sessionLost = result.sessionFailed;
+  if (progressLost || sessionLost || tracker.pageStats.count() > 0) {
     // Clippings retry by themselves at the next finalize. These live only in this reader.
     TrackedReading keep = tracker;
     keep.paged = progressLost;
-    if (!sessionLost) keep.pagesRead = 0;
-    if (!saveTrackedReading(stack->fs, trackedPath(*epub).c_str(), keep)) LOG_ERR("BORGES", "Reading state lost");
+    if (!sessionLost) {
+      keep.pagesRead = 0;
+      keep.startedEpoch = 0;
+    }
+    if (!saveTrackedReading(stack->fs, kept.c_str(), keep, &tracker.pageStats)) {
+      LOG_ERR("BORGES", "Reading state lost");
+    }
   }
   LOG_DBG("BORGES", "Finalize ok=%d progress=%d created=%u deleted=%u", result.ok ? 1 : 0,
           result.progressQueued ? 1 : 0, result.annotationsCreated, result.annotationsDeleted);
   return budget.frameLent();
 }
 
-void keepReadingAcrossRestart(const ReaderTracker& tracker, const Epub& epub) {
-  if (!tracker.paged || !mayBePaired()) return;
+void keepReadingAcrossRestart(ReaderTracker& tracker, const Epub& epub) {
+  if (!mayBePaired()) return;
+  tracker.leavePage();
+  if (!tracker.paged && tracker.pageStats.count() == 0) return;
   net::BorgesFsHal fs;
-  if (!saveTrackedReading(fs, trackedPath(epub).c_str(), tracker)) LOG_ERR("BORGES", "Reading state lost");
+  if (!saveTrackedReading(fs, trackedPath(epub).c_str(), tracker, &tracker.pageStats)) {
+    LOG_ERR("BORGES", "Reading state lost");
+  }
+}
+
+void discardKeptReading(const Epub& epub) {
+  net::BorgesFsHal fs;
+  const std::string path = trackedPath(epub);
+  if (fs.exists(path.c_str())) fs.remove(path.c_str());
 }
 
 void restoreReading(ReaderTracker& tracker, const Epub& epub) {
   if (!mayBePaired()) return;
   net::BorgesFsHal fs;
   TrackedReading kept;
-  if (!takeTrackedReading(fs, trackedPath(epub).c_str(), kept)) return;
-  tracker.paged = kept.paged;
-  tracker.pagesRead = kept.pagesRead;
-  if (kept.startedEpoch > kPlausibleEpoch) tracker.startedEpoch = kept.startedEpoch;
-  tracker.lastTurnEpoch = kept.lastTurnEpoch;
+  if (takeTrackedReading(fs, trackedPath(epub).c_str(), kept, &tracker.pageStats) &&
+      keptReadingStillCurrent(kept, static_cast<int64_t>(time(nullptr)))) {
+    tracker.paged = kept.paged;
+    tracker.pagesRead = kept.pagesRead;
+    tracker.startPage = kept.startPage;
+    if (kept.startedEpoch > kPlausibleEpoch) tracker.startedEpoch = kept.startedEpoch;
+    tracker.lastTurnEpoch = kept.lastTurnEpoch;
+  }
 }
+
+void seedClipsAtOpen(const Epub& epub) {
+  if (!Storage.exists(kAccountMovedMarkerPath)) return;
+  auto stack = makeStack();
+  if (!stack || !stack->openStore() || !stack->store.creds().paired()) return;
+  BookId id;
+  if (!partialMd5(stack->fs, epub.getPath().c_str(), id)) return;
+  ClipKeys keys;
+  // On failure the finalize does it instead, at the cost of what this reading highlights.
+  if (!stack->engine.seedClipsIfForeign(id, keys)) LOG_ERR("BORGES", "Could not adopt this book's clippings");
+}
+
+bool takeReaderCheckNotice() {
+  if (!mayBePaired()) return false;
+  net::BorgesFsHal fs;
+  GlueStore store(fs);
+  GlueState state;
+  if (!store.load(state) || !takeCheckNotice(state)) return false;
+  store.save(state);
+  LOG_INF("BORGES", "Check notice shown");
+  return true;
+}
+
+void noteLeftSessionOnPurpose() { sLeftOnPurpose = kLeftOnPurposeMagic; }
 
 void publishRestoredPosition(const std::shared_ptr<Epub>& epub, const Position& position) {
   auto stack = makeStack();
@@ -428,6 +531,8 @@ void publishRestoredPosition(const std::shared_ptr<Epub>& epub, const Position& 
   input->position = position;
   input->paged = true;
   input->lastTurn = stack->clock.wallNow();
+  // An answer for this book: a kept place from before the jump must not outrun it.
+  discardKeptReading(*epub);
   if (!stack->engine.finalizeBook(*input).ok) LOG_ERR("BORGES", "Could not queue the restored place");
 }
 
@@ -453,21 +558,29 @@ void stampBookmark(const std::string& cachePath, const uint16_t spine, const flo
   stampClip(cachePath, spine, progressBits, visibleOffset);
 }
 
-bool isPaired() { return mayBePaired(); }
+bool isPaired() { return Storage.exists(kPairedMarkerPath); }
 
 bool hasUndo(const std::string& bookPath) {
   if (bookPath.empty() || !mayBePaired()) return false;
   return Storage.exists((cachePathFor(bookPath) + kUndoFlag).c_str());
 }
 
-bool takeUndo(const std::string& bookPath, Position& out) {
+bool peekUndo(const std::string& bookPath, Position& out) {
   auto stack = makeStack();
   if (!stack || !stack->openStore() || !stack->openEngine()) return false;
   BookId id;
   if (!partialMd5(stack->fs, bookPath.c_str(), id)) return false;
-  const bool taken = stack->engine.takeUndo(id, out);
+  return stack->engine.peekUndo(id, out);
+}
+
+void consumeUndo(const std::string& bookPath) {
+  auto stack = makeStack();
+  auto position = makeUniqueNoThrow<Position>();  // Too large for the stack.
+  BookId id;
+  if (stack && position && stack->openStore() && stack->openEngine() && partialMd5(stack->fs, bookPath.c_str(), id)) {
+    stack->engine.takeUndo(id, *position);
+  }
   Storage.remove((cachePathFor(bookPath) + kUndoFlag).c_str());
-  return taken;
 }
 
 std::unique_ptr<Activity> makeHandoff(GfxRenderer& renderer, MappedInputManager& input, const NetPayload payload) {
@@ -479,8 +592,10 @@ std::unique_ptr<Activity> makeStatusActivity(GfxRenderer& renderer, MappedInputM
 }
 
 void startManualFromShortcut(GfxRenderer& renderer, MappedInputManager& input, const bool inReader) {
-  auto next = inReader && mayBePaired() ? makeHandoff(renderer, input, NetPayload::ManualFromReader)
-                                        : makeStatusActivity(renderer, input);
+  // "Sync now" does that wherever it is pressed. Only with nothing to sync with does it show why.
+  auto next = !isPaired()
+                  ? makeStatusActivity(renderer, input)
+                  : makeHandoff(renderer, input, inReader ? NetPayload::ManualFromReader : NetPayload::ManualFromHome);
   if (next) activityManager.replaceActivity(std::move(next));
 }
 

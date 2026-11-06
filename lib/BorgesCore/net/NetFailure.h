@@ -48,6 +48,29 @@ int32_t heapAwareCode(TransportStage stage, int32_t code, uint32_t freeHeap);
 // True for the failures a better clock could fix.
 bool isClockFailure(TransportStage stage, int32_t code);
 
+enum class LinkResult : uint8_t {
+  Connected,
+  NoSavedNetworks,  // Nothing in WifiCredentialStore.
+  NotFound,         // No saved network is in range.
+  AuthFailed,       // In range, and the saved password was refused.
+  Timeout,          // Budget ran out.
+  Cancelled,        // cancel.cancelled() returned true.
+  RadioError,       // The Wi-Fi driver refused station mode or the scan.
+};
+
+// no_wifi, wifi_range, wifi_auth, wifi_timeout, cancelled, radio_error. Null for Connected.
+const char* linkResultCode(LinkResult result);
+
+// What a screen says about a link. Connected is here because a screen can get to this with the link
+// up and something else having failed: the radio is then the one thing that cannot be blamed.
+enum class LinkWords : uint8_t { NoSavedWifi, OutOfRange, WrongPassword, TookTooLong, RadioFailed, ServerUnreachable };
+LinkWords linkWordsFor(LinkResult result);
+
+// The two failures choosing another network can fix.
+inline bool linkOffersNetworkPicker(const LinkResult result) {
+  return result == LinkResult::NotFound || result == LinkResult::AuthFailed;
+}
+
 // wolfSSL allocates at most ~17 KB in one block with 16 KB records, and needs far more
 // in total: below this a handshake would die in MP_MEM, or worse, half way.
 constexpr uint32_t kHandshakeMinFreeHeap = 50 * 1024;

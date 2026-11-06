@@ -43,6 +43,14 @@ void SessionCancel::arm(const uint32_t budgetMs) {
   deadlineMs_.store(budgetMs ? clock_.monotonicMs() + budgetMs : 0, std::memory_order_relaxed);
 }
 
+void SessionCancel::moveDeadline(const uint32_t budgetMs) {
+  deadlineMs_.store(clock_.monotonicMs() + budgetMs, std::memory_order_relaxed);
+}
+
+void SessionCancel::moveDeadlineSinceBoot(const uint32_t budgetMs) {
+  deadlineMs_.store(budgetMs, std::memory_order_relaxed);
+}
+
 uint32_t SessionCancel::remainingMs() {
   const uint64_t deadline = deadlineMs_.load(std::memory_order_relaxed);
   if (deadline == 0) return UINT32_MAX;

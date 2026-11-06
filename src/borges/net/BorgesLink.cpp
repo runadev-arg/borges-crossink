@@ -17,41 +17,35 @@
 namespace borges {
 namespace net {
 
-const char* linkResultCode(const LinkResult result) {
-  switch (result) {
-    case LinkResult::Connected:
-      return nullptr;
-    case LinkResult::NoSavedNetworks:
-    case LinkResult::NotFound:
-      return "no_wifi";
-    case LinkResult::AuthFailed:
-      return "wifi_auth";
-    case LinkResult::Timeout:
-      return "wifi_timeout";
-    case LinkResult::Cancelled:
-      return "cancelled";
-    case LinkResult::RadioError:
-      return "radio_error";
-  }
-  return "radio_error";
-}
-
 BorgesLink::BorgesLink(IFs& fs) : fs_(fs) {}
 
 BorgesLink::~BorgesLink() { disconnect(); }
 
 #if defined(SIMULATOR)
 
-// The simulator has the host's network. BORGES_SIM_NO_WIFI makes it behave as out of range.
+// The simulator has the host's network. BORGES_SIM_NO_WIFI makes it behave as out of range and
+// BORGES_SIM_WIFI_AUTH as a password refused, until the picker has joined something: its result is
+// what a person choosing another network would leave behind. BORGES_SIM_NO_SAVED_WIFI has no link
+// until then either, or the first-time picker could not be reached.
+namespace {
+bool simPickerJoined(IFs& fs) { return fs.exists("/.crosspoint/borges/sim-picker-joined"); }
+bool simEnv(const char* name) {
+  const char* value = getenv(name);
+  return value != nullptr && value[0] != '\0';
+}
+}  // namespace
+
 LinkResult BorgesLink::connect(uint32_t, ICancel& cancel) {
   if (cancel.cancelled()) return LinkResult::Cancelled;
-  const char* off = getenv("BORGES_SIM_NO_WIFI");
-  return off != nullptr && off[0] != '\0' ? LinkResult::NotFound : LinkResult::Connected;
+  if (simPickerJoined(fs_)) return LinkResult::Connected;
+  if (simEnv("BORGES_SIM_WIFI_AUTH")) return LinkResult::AuthFailed;
+  if (simEnv("BORGES_SIM_NO_SAVED_WIFI")) return LinkResult::NoSavedNetworks;
+  return simEnv("BORGES_SIM_NO_WIFI") ? LinkResult::NotFound : LinkResult::Connected;
 }
 void BorgesLink::disconnect() {}
 bool BorgesLink::connected() const {
-  const char* off = getenv("BORGES_SIM_NO_WIFI");
-  return off == nullptr || off[0] == '\0';
+  if (simPickerJoined(fs_)) return true;
+  return !simEnv("BORGES_SIM_NO_WIFI") && !simEnv("BORGES_SIM_WIFI_AUTH") && !simEnv("BORGES_SIM_NO_SAVED_WIFI");
 }
 
 #else

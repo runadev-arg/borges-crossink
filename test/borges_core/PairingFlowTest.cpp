@@ -420,6 +420,17 @@ TEST_F(PairingFlowTest, AuthorizationPendingAtClaimGoesBackToWaiting) {
   EXPECT_FALSE(d.store->creds().paired());
 }
 
+TEST_F(PairingFlowTest, AClaimWhoseAnswerIsLostIsNotRepeatedInTheSameBreath) {
+  ASSERT_TRUE(startFlow());
+  d.http.script.push_back(jsonReply(200, statusReply("approved")));
+  d.http.script.push_back(dropped());
+  advance(5);
+  EXPECT_EQ(flow->step(), PairingState::WaitingForApproval);
+  EXPECT_EQ(d.http.countPath("/api/devices/pairing/claim"), 1u)
+      << "the server claims once: the token went with that answer";
+  EXPECT_FALSE(d.store->creds().paired());
+}
+
 TEST_F(PairingFlowTest, LostClaimResponseIsReportedForANewCode) {
   ASSERT_TRUE(startFlow());
   d.http.script.push_back(jsonReply(200, statusReply("approved")));

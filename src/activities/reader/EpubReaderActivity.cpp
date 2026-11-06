@@ -2455,6 +2455,8 @@ void EpubReaderActivity::onEnter() {
   hasSessionStartLocalDateTime = getCurrentLocalReadingStatsDateTime(sessionStartLocalDateTime);
   borgesTracker.onOpen();
   borges::glue::restoreReading(borgesTracker, *epub);
+  borges::glue::seedClipsAtOpen(*epub);
+  borgesCheckNoticePending = borges::glue::takeReaderCheckNotice();
 
   globalStats = GlobalReadingStats::load();
 
@@ -2803,6 +2805,11 @@ bool EpubReaderActivity::transientFeedbackDismissed(const unsigned long showTime
 
 void EpubReaderActivity::loop() {
   syncStatsTrackingState();
+  if (borgesCheckNoticePending && borgesCheckNoticeAt != 0 && millis() >= borgesCheckNoticeAt) {
+    borgesCheckNoticePending = false;
+    RenderLock lock(*this);
+    borges::glue::drawCheckNotice(renderer);
+  }
   if (pendingTtfRenderRelayout && epub) {
     relayoutAfterTtfRenderChange();
     requestUpdate();
@@ -7348,6 +7355,8 @@ bool EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int fo
   bool deferQueuedTurnRendering = false;
   if (updatePanel) {
     if (section) borgesTracker.onPageShown(currentSpineIndex, section->currentPage, borgesReferencePage());
+    // After this page is up, not over it: the first page of a reader is often painted more than once.
+    if (borgesCheckNoticePending) borgesCheckNoticeAt = millis() + kBorgesCheckNoticeDelayMs;
     const bool canDeferRendering = needsTextGrayscale || pageHasImages;
     if (canDeferRendering && pendingManualPageTurns.hasPending()) {
       queuedTurnRendering.beginDecision();
@@ -8337,7 +8346,6 @@ void EpubReaderActivity::saveProgressBeforeRestart() {
   if (!saveReadingProgress()) {
     LOG_ERR("READER", "Failed to save progress before restart");
   }
-  if (epub) borges::glue::keepReadingAcrossRestart(borgesTracker, *epub);
   if (epub && !saveLinkStack()) {
     LOG_ERR("READER", "Failed to save link return stack before restart");
   }
@@ -8395,6 +8403,7 @@ void EpubReaderActivity::finalizeForBorges() {
     snapshot.mapped = &position;
     snapshot.page = borgesReferencePage();
     if (snapshot.page >= 0) snapshot.totalPages = borgesTotalPages();
+    snapshot.totalPagesApproximate = epub->getReferencePageCount() == 0;
   }
   const bool frameLent = borges::glue::finalizeFromReader(renderer, borgesTracker, epub, snapshot);
   // Quick Resume and the overlay sleep screen keep drawing on this frame after the reader is
@@ -8408,7 +8417,7 @@ void EpubReaderActivity::finalizeForBorges() {
 
 void EpubReaderActivity::undoBorgesJump() {
   auto target = makeUniqueNoThrow<borges::Position>();  // Too large for the stack.
-  if (!target || !epub || !borges::glue::takeUndo(epub->getPath(), *target)) {
+  if (!target || !epub || !borges::glue::peekUndo(epub->getPath(), *target)) {
     drawToast(renderer, tr(STR_BORGES_UNDO_FAILED));
     delay(1000);
     requestUpdate();
@@ -8429,9 +8438,11 @@ void EpubReaderActivity::undoBorgesJump() {
     return;
   }
   // The reader's exit must not write the page being left over the one just saved, nor
-  // publish it: the restored place is what goes out, with no page turn needed.
+  // publish it: the restored place is what goes out, with no page turn needed. What was read
+  // before this still happened, so the session it was part of still goes.
   skipBorgesExitSave = true;
-  borgesTracker.paged = false;
+  borgesTracker.positionSettled = true;
+  borges::glue::consumeUndo(epub->getPath());
   borges::glue::publishRestoredPosition(epub, *target);
   // The page is rebuilt from nothing after this: say it worked while that takes its time.
   drawToast(renderer, tr(STR_BORGES_UNDONE));

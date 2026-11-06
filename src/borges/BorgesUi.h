@@ -43,6 +43,10 @@ int actionRowHeight(const GfxRenderer& renderer);
 // Label on the left, value on the right on the same baseline. Returns the y below.
 int drawLabelValue(const GfxRenderer& renderer, int x, int y, int width, const char* label, const char* value);
 void drawHairline(const GfxRenderer& renderer, int x, int y, int width);
+// The picker left a connection. Nothing to do on a device, where the radio simply is up.
+void noteNetworkPicked(IFs& fs);
+// The book opened without learning whether someone read further. Over the page, until it turns.
+void drawCheckNotice(const GfxRenderer& renderer);
 // Drawn, not typed: no UI font is guaranteed to carry the glyph.
 void drawCheckMark(const GfxRenderer& renderer, int x, int y, int size, bool black);
 void drawProgressBar(const GfxRenderer& renderer, int x, int y, int width, int height, uint32_t percent);

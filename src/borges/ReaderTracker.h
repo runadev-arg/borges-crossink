@@ -20,7 +20,6 @@ struct ReaderTracker : TrackedReading {
   uint32_t lastTurnMs = 0;  // 0: unknown, as after a restart.
   int32_t shownSpine = -1;
   int32_t shownPage = -1;
-  int32_t startPage = -1;      // Reference page the reading began on.
   int32_t referencePage = -1;  // Reference page on the panel now.
   int64_t enteredEpoch = 0;    // When that page went up.
   PageStatBuffer pageStats;    // Heap-free: it lives in the activity, 800 bytes while reading.

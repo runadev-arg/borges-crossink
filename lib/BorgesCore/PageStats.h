@@ -36,6 +36,11 @@ class PageStatBuffer {
     row.seconds = static_cast<uint16_t>(spent > kMaxSeconds ? kMaxSeconds : spent);
   }
 
+  // A row that was already measured, back from the card. Past capacity it goes.
+  void restore(const PageStatRow& row) {
+    if (count_ < kCapacity) rows_[count_++] = row;
+  }
+
   uint8_t count() const { return count_; }
   const PageStatRow& at(uint8_t index) const { return rows_[index]; }
   void clear() { count_ = 0; }

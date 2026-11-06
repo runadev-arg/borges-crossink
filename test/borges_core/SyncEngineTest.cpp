@@ -1634,6 +1634,24 @@ TEST_F(SyncEngineTest, RotatesAfterRenewAfterAndKeepsTheNewToken) {
   EXPECT_STREQ(d.store->creds().token, "toto_NEW");
 }
 
+TEST_F(SyncEngineTest, TheNextRotationIsWhenTheServerSays) {
+  d.store->creds().renewAfterEpoch = kNow - 10;
+  d.http.handler = [this](const RecordedRequest& r) {
+    if (r.path == "/api/devices/self/credentials/rotate") {
+      return jsonReply(200,
+                       "{\"credential\":{\"token\":\"toto_NEW\",\"expires_at\":\"2027-11-01T00:00:00.000Z\","
+                       "\"renew_after\":\"2027-05-01T00:00:00.000Z\"},\"grace_seconds\":300}");
+    }
+    return d.server.handle(r);
+  };
+  EXPECT_EQ(manual().outcome, SessionOutcome::Ok);
+  int64_t expected = 0;
+  ASSERT_TRUE(parseRfc3339("2027-05-01T00:00:00.000Z", expected));
+  EXPECT_EQ(d.store->creds().renewAfterEpoch, expected);
+  d.crashAndBoot();
+  EXPECT_EQ(d.store->creds().renewAfterEpoch, expected);
+}
+
 TEST_F(SyncEngineTest, NoRotationWithoutADateOrWithAnUntrustedClock) {
   manual();
   EXPECT_EQ(d.http.countPath("/api/devices/self/credentials/rotate"), 0u);

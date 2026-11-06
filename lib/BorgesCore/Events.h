@@ -80,12 +80,12 @@ void writeProgress(JsonWriter& w, const BookId& book, const EventTime& time, con
 
 bool writeAnnotation(JsonWriter& w, const BookRef& book, const EventTime& time, const ClipKey& key,
                      const ClipDetail& detail, const uint8_t syncId[16]);
-
-// baseRevision: the revision this device last saw of it, so that deleting a highlight that
-// was edited on the web is a delete and not a conflict.
 // Why writeAnnotation can refuse. True: a highlight of nothing, and it never will be valid. False:
 // nothing locates it, which a later exit with the book's page counts can fix.
 bool hasNoText(const ClipKey& key, const ClipDetail& detail);
+
+// baseRevision: the revision this device last saw of it, so that deleting a highlight that
+// was edited on the web is a delete and not a conflict.
 void writeAnnotationDeleted(JsonWriter& w, const BookRef& book, const EventTime& time, bool bookmark,
                             const uint8_t syncId[16], uint32_t baseRevision);
 

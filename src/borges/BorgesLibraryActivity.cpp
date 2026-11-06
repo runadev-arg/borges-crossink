@@ -79,6 +79,7 @@ struct BorgesLibraryActivity::Shared {
   std::atomic<bool> viewChanged_{false};
   std::atomic<StrId> note_{StrId::STR_NONE_OPT};
   std::atomic<bool> hasNote_{false};
+  std::atomic<bool> offerNetwork_{false};  // Another network could fix what just failed.
   std::atomic<uint32_t> downloadPercent_{0};
   std::atomic<bool> linked_{false};  // The radio is up: what the screen says moves on from "connecting".
 };
@@ -127,18 +128,35 @@ void BorgesLibraryActivity::onEnter() {
   s_->entries_.reserve(pageSize());
   s_->onSd_.reserve(pageSize());
   if (!hasSavedWifi() && !s_->stack_->link.connected()) {
-    // First network ever: the picker owns the connection and the password, as it does for a sync.
-    startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, true, true),
-                           [this](const ActivityResult& result) {
-                             if (result.isCancelled) {
-                               leave();
-                             } else {
-                               startLoad(1);
-                             }
-                           });
+    pickNetwork();  // First network ever.
     return;
   }
   startLoad(1);
+}
+
+// The picker owns the connection and the password, as it does for a sync. Back from it with no list
+// to go back to leaves the library; with one, it stays where it was.
+void BorgesLibraryActivity::pickNetwork() {
+  s_->offerNetwork_.store(false);
+  const bool wasDownload = view_ == View::DownloadFailed;
+  startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, true, true),
+                         [this, wasDownload](const ActivityResult& result) {
+                           fullPaint_ = true;
+                           if (result.isCancelled) {
+                             if (s_->entries_.empty()) {
+                               leave();
+                             } else {
+                               setView(View::List);
+                             }
+                             return;
+                           }
+                           noteNetworkPicked(s_->stack_->fs);
+                           if (wasDownload) {
+                             startDownload();
+                           } else {
+                             startLoad(s_->page_ ? s_->page_ : 1);
+                           }
+                         });
 }
 
 void BorgesLibraryActivity::onExit() {
@@ -220,6 +238,7 @@ void BorgesLibraryActivity::loadMain(void* shared) {
     case CatalogResult::Offline:
     case CatalogResult::Cancelled:
       note(loaded ? StrId::STR_BORGES_LIB_OFFLINE : describeLink(link));
+      s->offerNetwork_.store(!loaded && net::linkOffersNetworkPicker(link));
       break;
     case CatalogResult::ServerError:
     case CatalogResult::Malformed:
@@ -268,6 +287,7 @@ void BorgesLibraryActivity::downloadMain(void* shared) {
   }
   const net::LinkResult link = stack.bringUp(kLoadLinkBudgetMs);
   if (link != net::LinkResult::Connected) {
+    s->offerNetwork_.store(net::linkOffersNetworkPicker(link));
     fail(describeLink(link));
     return;
   }
@@ -422,7 +442,9 @@ void BorgesLibraryActivity::loop() {
       if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
         setView(View::List);
       } else if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-        if (s_->note_.load() == StrId::STR_BORGES_ERR_RELINK) {
+        if (s_->offerNetwork_.load()) {
+          pickNetwork();
+        } else if (s_->note_.load() == StrId::STR_BORGES_ERR_RELINK) {
           setView(View::List);  // Trying again cannot help: the reader has to be linked again.
         } else {
           startDownload();  // Picks up the .part where it stopped.
@@ -439,7 +461,13 @@ void BorgesLibraryActivity::loop() {
   }
   const int count = static_cast<int>(s_->entries_.size());
   if (count == 0) {
-    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) startLoad(s_->page_);
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      if (s_->offerNetwork_.load()) {
+        pickNetwork();
+      } else {
+        startLoad(s_->page_);
+      }
+    }
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
@@ -484,7 +512,12 @@ void BorgesLibraryActivity::renderList() {
     text.x += padding;
     text.width -= padding * 2;
     const StrId message = s_->hasNote_.load() ? s_->note_.load() : StrId::STR_BORGES_LIB_EMPTY;
-    drawWrappedCentered(renderer, text, UI_10_FONT_ID, area.y + area.height / 3, I18N.get(message), 3);
+    const int below =
+        drawWrappedCentered(renderer, text, UI_10_FONT_ID, area.y + area.height / 3, I18N.get(message), 3);
+    if (s_->offerNetwork_.load()) {
+      drawActionRow(renderer, text.x, below + kBlockGap, text.width, actionRowHeight(renderer),
+                    tr(STR_BORGES_CHOOSE_NETWORK), true);
+    }
     return;
   }
 
@@ -553,7 +586,11 @@ void BorgesLibraryActivity::renderDownload() {
                   downloadFocus_ == 1);
   } else {
     // The button's own label says what it does now: there is no sentence to explain it.
-    drawWrapped(renderer, UI_10_FONT_ID, area.x, y, area.width, I18N.get(s_->note_.load()), 4);
+    y = drawWrapped(renderer, UI_10_FONT_ID, area.x, y, area.width, I18N.get(s_->note_.load()), 4);
+    if (s_->offerNetwork_.load()) {
+      drawActionRow(renderer, area.x, y + kBlockGap, area.width, actionRowHeight(renderer),
+                    tr(STR_BORGES_CHOOSE_NETWORK), true);
+    }
   }
 }
 
@@ -586,7 +623,7 @@ void BorgesLibraryActivity::render(RenderLock&&) {
       renderList();
       listPainted_ = true;
       if (s_->entries_.empty()) {
-        confirm = tr(STR_BORGES_TRY);
+        confirm = s_->offerNetwork_.load() ? tr(STR_SELECT) : tr(STR_BORGES_TRY);
       } else {
         // The button names what it does to the book under the focus.
         confirm = s_->onSd_[focus_] ? tr(STR_OPEN) : tr(STR_BORGES_GET);
@@ -606,7 +643,9 @@ void BorgesLibraryActivity::render(RenderLock&&) {
       break;
     case View::DownloadFailed:
       renderDownload();
-      confirm = s_->note_.load() == StrId::STR_BORGES_ERR_RELINK ? tr(STR_BORGES_CONTINUE) : tr(STR_BORGES_TRY);
+      confirm = s_->offerNetwork_.load()                           ? tr(STR_SELECT)
+                : s_->note_.load() == StrId::STR_BORGES_ERR_RELINK ? tr(STR_BORGES_CONTINUE)
+                                                                   : tr(STR_BORGES_TRY);
       break;
   }
   const auto labels = mappedInput.mapLabels(

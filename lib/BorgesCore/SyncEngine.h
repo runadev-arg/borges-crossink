@@ -144,6 +144,7 @@ struct FinalizeInput {
 struct FinalizeResult {
   bool ok = false;  // False: try again at the next finalize, nothing was lost.
   bool progressQueued = false;
+  bool progressFailed = false;  // There was a new place and it did not reach the queue.
   bool sessionQueued = false;
   bool sessionFailed = false;  // There was a valid session and it did not reach the queue.
   uint16_t annotationsCreated = 0;

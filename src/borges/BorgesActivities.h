@@ -48,7 +48,7 @@ class BorgesOpenActivity final : public Activity {
  private:
   struct Session;
   static void sessionMain(void* session);
-  void openBook();
+  void openBook(bool pressed);
 
   std::string path_;
   std::string title_;
@@ -81,7 +81,7 @@ class BorgesResumeActivity final : public Activity {
   bool applyJump();
   // What the saved page maps to, for a book the ledger cannot answer for. Radio already off.
   void mapSavedPage(Position& out);
-  void leave(bool success);
+  void leave(bool success, bool pressed = false);
   void leaveWorkBehind();
 
   // All the session task touches. See SessionWorker.
@@ -161,6 +161,7 @@ class BorgesActivity final : public Activity {
   void activate(Row row);
   void startSync();
   void startPair();
+  void pickNetwork(bool thenPair);
   void startDisconnect();
   void beginPairSession();
   void showStatus();
@@ -209,6 +210,7 @@ class BorgesLibraryActivity final : public Activity {
   static void downloadMain(void* shared);
   void startLoad(uint16_t page);
   void startDownload();
+  void pickNetwork();
   void cancelAndLeave();
   void noteLink(bool up);
   void openDownloaded();

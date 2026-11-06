@@ -274,6 +274,36 @@ TEST_F(FinalizeTest, ALongReadingIsSplitIntoSessionsTheServerAccepts) {
   EXPECT_NE(sessions[0]["aggregate_id"].as<std::string>(), sessions[1]["aggregate_id"].as<std::string>());
 }
 
+TEST_F(FinalizeTest, EverySplitSessionsDurationIsExactlyItsOwnTimesAndItsIdIsItsOwn) {
+  // The server clamps duration to ended_at - started_at, refuses under a minute after that, and
+  // dedupes on device + aggregate_id. A piece has to survive all three as it is.
+  SessionSummary s;
+  s.started = WallTime{kNow - 2 * events::kMaxSessionSec - 90, TimePrecision::Exact};
+  s.ended = WallTime{kNow, TimePrecision::Exact};
+  s.pagesRead = 9;
+  FinalizeInput input = d.finalizeInput(30);
+  input.session = &s;
+  ASSERT_TRUE(d.engine->finalizeBook(input).sessionQueued);
+  ASSERT_EQ(d.engine->runManualSession(nullptr, nullptr, nullptr).outcome, SessionOutcome::Ok);
+  std::set<std::string> ids;
+  size_t pieces = 0;
+  for (const auto& e : d.server.recorded) {
+    if (e.type != "session.ended") continue;
+    ++pieces;
+    JsonDocument doc;
+    ASSERT_FALSE(deserializeJson(doc, e.body));
+    int64_t started = 0;
+    int64_t ended = 0;
+    ASSERT_TRUE(parseRfc3339(doc["payload"]["started_at"].as<const char*>(), started));
+    ASSERT_TRUE(parseRfc3339(doc["payload"]["ended_at"].as<const char*>(), ended));
+    EXPECT_EQ(doc["payload"]["duration_seconds"].as<int64_t>(), ended - started);
+    EXPECT_GE(ended - started, events::kMinSessionSec);
+    ids.insert(doc["aggregate_id"].as<std::string>());
+  }
+  EXPECT_EQ(pieces, 3u);
+  EXPECT_EQ(ids.size(), pieces);
+}
+
 TEST_F(FinalizeTest, ALastPieceUnderAMinuteIsNotASession) {
   SessionSummary s;
   s.started = WallTime{kNow - events::kMaxSessionSec - 30, TimePrecision::Exact};
