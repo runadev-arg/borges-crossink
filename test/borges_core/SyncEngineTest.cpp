@@ -949,7 +949,11 @@ TEST_F(SyncEngineTest, ReplayedProgressNeverPrompts) {
   d.server.addFeedEvent(10, remoteProgress(10, kOtherId, kMd5A, 80, "/body/p[8].0", "", "suggest_resume"));
   ResumeDecision decision;
   // A book with no focus event, even though a pull will carry its progress.
-  const SessionReport report = open(decision);
+  EXPECT_EQ(open(decision).outcome, SessionOutcome::Ok);
+  EXPECT_FALSE(decision.ask);
+  const BookRef book = Device::bookRef();
+  const Position local = Device::position(20);
+  const SessionReport report = d.engine->runManualSession(&book, &local, &decision);
   EXPECT_EQ(report.outcome, SessionOutcome::Ok);
   EXPECT_FALSE(decision.ask);
   RemoteHead head;
@@ -1079,21 +1083,6 @@ TEST_F(SyncEngineTest, OwnHeadIsOfferedWhenThisDeviceHasNoPlace) {
   EXPECT_EQ(d.store->state().holds.size(), 1);
 }
 
-TEST_F(SyncEngineTest, FocusOtherAsksAndHoldsBackProgress) {
-  ASSERT_EQ(d.appendRaw("mine", nullptr, kMd5A, 0, EventKind::Progress), Outbox::AppendResult::Ok);
-  d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
-  ResumeDecision decision;
-  const SessionReport report = open(decision);
-  EXPECT_EQ(report.outcome, SessionOutcome::AwaitingChoice);
-  EXPECT_TRUE(decision.ask);
-  EXPECT_STREQ(decision.remoteDeviceName, "Kobo Clara");
-  EXPECT_EQ(decision.remotePct, 60000000u);
-  EXPECT_TRUE(decision.xpointerUsable);
-  EXPECT_STREQ(decision.remoteXpointer, "/body/p[9].0");
-  EXPECT_TRUE(decision.showDate);
-  EXPECT_STREQ(decision.occurredAt, "2026-11-05T10:00:00.000Z");
-  EXPECT_EQ(decision.warnings, 0);
-  // The prompt does not wait on history, and nothing went up.
 TEST_F(SyncEngineTest, OwnHeadIsOfferedWhenThePlaceHereIsFromAnotherAccount) {
   // The owner's reader, borrowed: the same device id, and a page on the card somebody else left.
   copyText(d.store->creds().accountId, sizeof(d.store->creds().accountId), "owner");
@@ -1148,6 +1137,21 @@ TEST_F(SyncEngineTest, FocusRequestIsReadOnlyAndExact) {
   d.store->state().cursor = 7;
   d.server.delivered = 7;
   ResumeDecision decision;
+TEST_F(SyncEngineTest, FocusOtherAsksAndHoldsBackProgress) {
+  ASSERT_EQ(d.appendRaw("mine", nullptr, kMd5A, 0, EventKind::Progress), Outbox::AppendResult::Ok);
+  d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
+  ResumeDecision decision;
+  const SessionReport report = open(decision);
+  EXPECT_EQ(report.outcome, SessionOutcome::AwaitingChoice);
+  EXPECT_TRUE(decision.ask);
+  EXPECT_STREQ(decision.remoteDeviceName, "Kobo Clara");
+  EXPECT_EQ(decision.remotePct, 60000000u);
+  EXPECT_TRUE(decision.xpointerUsable);
+  EXPECT_STREQ(decision.remoteXpointer, "/body/p[9].0");
+  EXPECT_TRUE(decision.showDate);
+  EXPECT_STREQ(decision.occurredAt, "2026-11-05T10:00:00.000Z");
+  EXPECT_EQ(decision.warnings, 0);
+  // The prompt does not wait on history, and nothing went up.
   open(decision);
   JsonDocument doc;
   ASSERT_FALSE(deserializeJson(doc, d.http.log[0].body));
@@ -1203,7 +1207,6 @@ TEST_F(SyncEngineTest, InvalidFocusIsAReportedErrorWithNoPrompt) {
     EXPECT_TRUE(d.store->state().holds.contains(Device::book().md5)) << focus;
     // The rest of the session still runs.
     EXPECT_EQ(report.outcome, SessionOutcome::Ok) << focus;
-    EXPECT_GE(d.http.countPath("/api/sync/v2/pull"), 2u) << focus;
   }
 }
 
@@ -1420,6 +1423,45 @@ TEST_F(SyncEngineTest, SuggestionSurvivesAFailedResolveAndIsDismissedOnStay) {
   ASSERT_EQ(open(decision).outcome, SessionOutcome::AwaitingChoice);
   d.http.log.clear();
   d.http.handler = [this, suggestion](const RecordedRequest& r) {
+TEST_F(SyncEngineTest, SuggestionAnsweredWithTheRadioOffIsResolvedAfterwards) {
+  const std::string suggestion = "40000000-0000-4000-8000-000000000003";
+  d.server.addFeedEvent(
+      10, remoteProgress(10, kOtherId, kMd5A, 60, "", "{\"suggestion\":{\"id\":\"" + suggestion + "\"}}"));
+  ASSERT_EQ(manual().outcome, SessionOutcome::Ok);
+  d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
+  ResumeDecision decision;
+  ASSERT_EQ(open(decision).outcome, SessionOutcome::AwaitingChoice);
+  const Position here = Device::position(20);
+  // What Go does: the radio goes down for the book to load.
+  d.engine->applyChoice(decision, ResumeChoice::GoThere, here, here, false);
+  EXPECT_EQ(d.http.countPath("/api/sync/v2/suggestions/" + suggestion + "/accept"), 0u);
+
+  EXPECT_EQ(d.engine->runAfterChoice(Device::book()).outcome, SessionOutcome::Ok);
+  EXPECT_EQ(d.http.countPath("/api/sync/v2/suggestions/" + suggestion + "/accept"), 1u);
+  EXPECT_EQ(d.server.recorded.size(), 1u) << "the choice itself went too";
+  BookLedger ledger;
+  ASSERT_TRUE(d.store->loadBook(Device::book(), ledger));
+  EXPECT_EQ(ledger.suggestionId[0], '\0');
+}
+
+TEST_F(SyncEngineTest, ASuggestionAnsweredWithNoLinkIsResolvedAtTheNextOpen) {
+  const std::string suggestion = "40000000-0000-4000-8000-000000000004";
+  d.server.addFeedEvent(
+      10, remoteProgress(10, kOtherId, kMd5A, 60, "", "{\"suggestion\":{\"id\":\"" + suggestion + "\"}}"));
+  ASSERT_EQ(manual().outcome, SessionOutcome::Ok);
+  d.server.focusEvent = focusEventJson(kOtherId, kMd5A, 60);
+  ResumeDecision decision;
+  ASSERT_EQ(open(decision).outcome, SessionOutcome::AwaitingChoice);
+  const Position here = Device::position(20);
+  d.engine->applyChoice(decision, ResumeChoice::StayHere, here, here, false);
+
+  d.http.log.clear();
+  d.server.focusEvent = "null";
+  ResumeDecision next;
+  EXPECT_EQ(open(next).outcome, SessionOutcome::Ok);
+  EXPECT_EQ(d.http.countPath("/api/sync/v2/suggestions/" + suggestion + "/dismiss"), 1u);
+}
+
     if (r.path.find("/suggestions/") != std::string::npos) return apiError(503, "sync_service_unavailable");
     return d.server.handle(r);
   };

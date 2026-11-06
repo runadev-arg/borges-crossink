@@ -227,7 +227,11 @@ class SyncEngine {
   // The reader pressed something else. The book stays held and will ask again.
   SessionReport abandonChoice();
 
-  // "Volver a donde estaba". Single use.
+  // After a choice made with the radio off for the book's sake: tells the server what it was
+  // asked (a suggestion, an answer), then what any session does.
+  SessionReport runAfterChoice(const BookId& book);
+
+  // "Volver a donde estaba". Single use: consumed only when the place is safely back.
   bool hasUndo(const BookId& book);
   bool takeUndo(const BookId& book, Position& out);
 

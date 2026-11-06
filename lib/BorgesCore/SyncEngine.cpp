@@ -345,7 +345,11 @@ SessionReport SyncEngine::runOpenSession(const BookRef& book, const Position& lo
     store_.saveState();
     return report;
   }
-  pullAndDrain(report);
+  // The book is waiting on this session, and it has the answer it came for. An answer decided
+  // earlier is the only thing owed; catching up on history can wait for a session nobody is
+  // waiting on, or the first open after flashing spends its budget on 80 old events.
+  resolveSuggestion(book.id);
+  if (outbox_.sendableDepth(&store_.state().holds) > 0) pullAndDrain(report);
   return finish(report, SessionKind::Open);
 }
 
@@ -356,6 +360,15 @@ SessionReport SyncEngine::runSleepSession() {
   if (checkHeldBooks(nullptr, report)) pullAndDrain(report);
   return finish(report, SessionKind::Sleep);
 }
+SessionReport SyncEngine::runAfterChoice(const BookId& book) {
+  SessionReport report;
+  pendingChoice_ = false;
+  if (!startSession(SessionKind::Sleep, report)) return report;
+  resolveSuggestion(book);
+  if (checkHeldBooks(nullptr, report)) pullAndDrain(report);
+  return finish(report, SessionKind::Sleep);
+}
+
 
 SessionReport SyncEngine::runManualSession(const BookRef* book, const Position* local, ResumeDecision* out) {
   SessionReport report;
