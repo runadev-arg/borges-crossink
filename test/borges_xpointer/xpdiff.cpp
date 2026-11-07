@@ -22,7 +22,9 @@
 #include "Epub/htmlEntities.h"
 #include "Epub/parsers/VisibleOffsetRules.h"
 #include "ProgressMapper.h"
+#include "Underlines.h"
 #include "Utf8.h"
+using namespace borges;
 
 extern "C" {
 size_t g_live = 0, g_peak = 0;
@@ -427,6 +429,125 @@ __attribute__((noinline)) size_t measureStack(const size_t low) {
 }
 }  // namespace
 
+// ---- For the underlines -------------------------------------------------------------------------
+struct UnderlineCase {
+  int spine;
+  std::string pos0;
+  std::string text;
+};
+
+struct UnderlineWord {
+  std::string text;
+  bool hyphen;
+  bool firstOfLine;
+};
+
+class PlanWalk final : public ChapterXPathResolver::BatchListener {
+ public:
+  explicit PlanWalk(UnderlinePlanner& planner) : planner_(planner) {}
+  void onHit(const uint16_t id, const uint32_t at) override {
+    if (!hit) hitAt = at;
+    hit = true;
+    planner_.onHit(id, at);
+  }
+  bool onChar(const uint32_t cp, const uint32_t at) override { return planner_.onChar(cp, at); }
+  bool hit = false;
+  uint32_t hitAt = 0;
+
+ private:
+  UnderlinePlanner& planner_;
+};
+
+// What the log keeps of a long text: 479 bytes, cut on a character.
+std::string wireText(const std::string& text) {
+  if (text.size() < kInboundTextMax) return text;
+  size_t n = kInboundTextMax - 1;
+  while (n > 0 && (static_cast<unsigned char>(text[n]) & 0xC0) == 0x80) n--;
+  return text.substr(0, n);
+}
+
+bool readPages(const std::string& tool, const std::string& dir, const std::string& outPath, const int spine,
+               const char* layout, std::vector<uint32_t>& lut, std::vector<std::vector<UnderlineWord>>& pages) {
+  char spinePath[32];
+  snprintf(spinePath, sizeof(spinePath), "/spine/%04d.xhtml", spine);
+  std::string command = "\"\"" + tool + "\" \"" + dir + spinePath + "\" \"" + outPath + "\"";
+  for (int i = 0;; i++) {
+    char cssPath[32];
+    snprintf(cssPath, sizeof(cssPath), "/css/%04d.css", i);
+    if (!std::ifstream(dir + cssPath)) break;
+    command += " \"" + dir + cssPath + "\"";
+  }
+  command += "\"";
+  _putenv_s("XPPAGES_LAYOUT", layout);
+  _putenv_s("XPPAGES_WORDS", "1");
+  const std::string selections = getenv("XPPAGES_SELECTIONS") ? getenv("XPPAGES_SELECTIONS") : "";
+  _putenv_s("XPPAGES_SELECTIONS", "");
+  const int status = system(command.c_str());
+  _putenv_s("XPPAGES_LAYOUT", "");
+  _putenv_s("XPPAGES_WORDS", "");
+  _putenv_s("XPPAGES_SELECTIONS", selections.c_str());
+  if (status != 0) return false;
+  std::ifstream in(outPath, std::ios::binary);
+  std::string line;
+  while (std::getline(in, line)) {
+    const auto fields = split(line);
+    if (fields[0] == "P") {
+      lut.push_back(strtoul(fields[2].c_str(), nullptr, 10));
+      pages.emplace_back();
+    } else if (fields[0] == "W" && fields.size() > 4) {
+      const size_t page = strtoul(fields[1].c_str(), nullptr, 10);
+      if (page < pages.size()) pages[page].push_back({unescape(fields[4]), fields[2] == "1", fields[3] == "1"});
+    }
+  }
+  return !lut.empty();
+}
+
+std::string underlinedOnPage(const std::vector<UnderlineWord>& words, const std::vector<UnderlineSegment>& all,
+                             const uint16_t page) {
+  UnderlineSegment here[kUnderlinePageMax];
+  uint8_t count = 0;
+  for (const auto& s : all) {
+    if (s.page == page && count < kUnderlinePageMax) here[count++] = s;
+  }
+  if (count == 0) return "";
+  UnderlinePageMatch match(here, count);
+  for (const auto& w : words) {
+    match.feedWord(w.text.c_str(), w.text.size(), w.hyphen,
+                   w.firstOfLine && UnderlinePageMatch::looksLikeListMarker(w.text.c_str(), w.text.size()));
+  }
+  match.finish();
+  std::string out;
+  uint32_t position = 0;
+  for (const auto& w : words) {
+    const uint32_t chars = UnderlinePageMatch::wordChars(w.text.c_str(), w.text.size(), w.hyphen);
+    uint32_t from = 0, to = 0;
+    const bool pageOnly = w.firstOfLine && UnderlinePageMatch::looksLikeListMarker(w.text.c_str(), w.text.size());
+    if (match.spanOf(position, chars, pageOnly, from, to)) {
+      const size_t a = UnderlinePageMatch::byteOfChar(w.text.c_str(), w.text.size(), from);
+      const size_t b = UnderlinePageMatch::byteOfChar(w.text.c_str(), w.text.size(), to);
+      out += w.text.substr(a, b - a);
+    }
+    position += chars;
+  }
+  return out;
+}
+
+// Whether what was drawn is a run of the text, once what does not count is out of both.
+bool isPartOf(const std::string& drawn, const std::string& text) {
+  const auto counted = [](const std::string& in) {
+    std::vector<uint32_t> out;
+    const auto* p = reinterpret_cast<const unsigned char*>(in.c_str());
+    while (*p) {
+      const uint32_t cp = utf8NextCodepoint(&p);
+      if (underlineCounts(cp)) out.push_back(underlineFold(cp));
+    }
+    return out;
+  };
+  const auto a = counted(drawn);
+  const auto b = counted(text);
+  return std::search(b.begin(), b.end(), a.begin(), a.end()) != b.end();
+}
+
 int main(int argc, char** argv) {
   if (argc < 4) {
     fprintf(stderr, "usage: xpdiff bookdir oracle workdir [max]\n");
@@ -813,11 +934,13 @@ int main(int argc, char** argv) {
   // A selection made by the real parser and builder, located, and read back the way KOReader
   // reads the range. Only shapes and counts are ever printed: this text is the book's.
   int clipTotal = 0, clipRefused = 0, clipRejected = 0, clipExact = 0, clipOtherText = 0, clipSentAsIs = 0;
+  std::vector<UnderlineCase> underlineCases;
   size_t clipPeakHeap = 0;
   if (!clips.empty()) {
     struct Located {
       size_t clip;
       std::string text;
+      std::string pos0;
     };
     std::vector<Located> located;
     const std::string rangesIn = work + "/" + name + ".ranges";
@@ -843,7 +966,7 @@ int main(int argc, char** argv) {
           continue;
         }
         out << range.pos0 << "\t" << range.pos1 << "\n";
-        located.push_back({i, range.text});
+        located.push_back({i, range.text, range.pos0});
       }
     }
     cmd = "\"\"" + oracle + "\" \"" + dir + "/book.epub\"" + extra + " --ranges \"" + rangesIn + "\" --out \"" +
@@ -861,6 +984,7 @@ int main(int argc, char** argv) {
           continue;
         }
         const std::string crengine = unescape(f[2]);
+        underlineCases.push_back({clips[l.clip].spine, l.pos0, crengine});
         // comparableText() in borges.koplugin/annotationadapter.lua decides this on the device.
         const std::string read = comparable(crengine);
         if (read == comparable(l.text))
@@ -884,6 +1008,120 @@ int main(int argc, char** argv) {
     }
     printf("  clips total=%d exact=%d refused=%d rejected=%d otherText=%d matchedWithoutRewriting=%d peakHeap=%zu\n",
            clipTotal, clipExact, clipRefused, clipRejected, clipOtherText, clipSentAsIs, clipPeakHeap);
+  }
+
+  // ---- Underlines ---------------------------------------------------------------------------------
+  // Each of those ranges as KOReader would hold it, xpointer and crengine's text, through the walk
+  // and onto the real parser's pages, in three layouts. Whatever a page underlines has to be the
+  // highlight's text: a highlight that is not drawn is a loss, one drawn elsewhere is a failure.
+  if (!underlineCases.empty() && getenv("XPDIFF_PAGES_TOOL")) {
+    int cases = 0, whole = 0, partial = 0, none = 0, wrong = 0, offsetDiffers = 0;
+    size_t walkPeak = 0;
+    uint16_t mostInChapter = 0;
+    for (const char* layout : {"480x800x9", "800x480x9", "480x800x16"}) {
+      for (size_t s = 0; s < scans.size(); s++) {
+        std::vector<const UnderlineCase*> here;
+        for (const auto& c : underlineCases) {
+          if (c.spine == static_cast<int>(s)) here.push_back(&c);
+        }
+        if (here.empty()) continue;
+        std::vector<uint32_t> lut;
+        std::vector<std::vector<UnderlineWord>> pages;
+        if (!readPages(getenv("XPDIFF_PAGES_TOOL"), dir, work + "/" + name + ".ul", static_cast<int>(s), layout, lut,
+                       pages))
+          continue;
+
+        // All of a chapter's at once, the way the reader asks: each lands where one walk says.
+        {
+          std::vector<UnderlineTarget> targets;
+          for (const auto* c : here) {
+            UnderlineTarget t;
+            if (!ChapterXPathResolver::pointerKey(c->pos0.c_str(), t.key, t.offset)) continue;
+            if (!underlineTextSignature(wireText(c->text).c_str(), t.hash, t.chars)) continue;
+            targets.push_back(t);
+          }
+          mostInChapter = std::max(mostInChapter, static_cast<uint16_t>(targets.size()));
+          std::vector<size_t> order(targets.size());
+          for (size_t i = 0; i < order.size(); i++) order[i] = i;
+          std::sort(order.begin(), order.end(), [&](const size_t a, const size_t b) {
+            return targets[a].key != targets[b].key ? targets[a].key < targets[b].key
+                                                    : targets[a].offset < targets[b].offset;
+          });
+          std::vector<ChapterXPathResolver::BatchPointer> pointers(order.size());
+          std::vector<UnderlineTarget> sorted(order.size());
+          for (size_t i = 0; i < order.size(); i++) {
+            sorted[i] = targets[order[i]];
+            pointers[i].key = sorted[i].key;
+            pointers[i].offset = sorted[i].offset;
+            pointers[i].id = static_cast<uint16_t>(i);
+          }
+          std::vector<UnderlineSegment> segments(kUnderlineMaxSegments);
+          UnderlinePlanner planner(sorted.data(), static_cast<uint16_t>(sorted.size()), lut.data(),
+                                   static_cast<uint16_t>(lut.size()), segments.data(), kUnderlineMaxSegments);
+          PlanWalk walk(planner);
+          const size_t liveBefore = g_live;
+          g_peak = g_live;
+          if (!pointers.empty()) {
+            ChapterXPathResolver::walkPointers(epub, static_cast<int>(s), pointers.data(),
+                                               static_cast<uint16_t>(pointers.size()), walk);
+          }
+          walkPeak = std::max(walkPeak, g_peak - liveBefore);
+          planner.finish();
+        }
+
+        for (const auto* c : here) {
+          cases++;
+          const std::string text = wireText(c->text);
+          UnderlineTarget target;
+          ChapterXPathResolver::BatchPointer pointer;
+          if (!ChapterXPathResolver::pointerKey(c->pos0.c_str(), pointer.key, pointer.offset) ||
+              !underlineTextSignature(text.c_str(), target.hash, target.chars)) {
+            none++;
+            continue;
+          }
+          std::vector<UnderlineSegment> segments(kUnderlineMaxSegments);
+          UnderlinePlanner planner(&target, 1, lut.data(), static_cast<uint16_t>(lut.size()), segments.data(),
+                                   kUnderlineMaxSegments);
+          PlanWalk walk(planner);
+          ChapterXPathResolver::walkPointers(epub, static_cast<int>(s), &pointer, 1, walk);
+          segments.resize(planner.finish());
+          if (walk.hit) {
+            ChapterXPathResolver::Resolved resolved;
+            if (!ChapterXPathResolver::resolve(epub, static_cast<int>(s), c->pos0, resolved) ||
+                resolved.visibleOffset != walk.hitAt) {
+              offsetDiffers++;
+              if (shown++ < 400) examples += "  underline offset differs " + c->pos0 + "\n";
+            }
+          }
+          std::string drawn;
+          for (size_t p = 0; p < pages.size(); p++)
+            drawn += underlinedOnPage(pages[p], segments, static_cast<uint16_t>(p));
+          uint32_t wantHash = 0, drawnHash = 0;
+          uint16_t wantChars = 0, drawnChars = 0;
+          underlineTextSignature(text.c_str(), wantHash, wantChars);
+          underlineTextSignature(drawn.c_str(), drawnHash, drawnChars);
+          if (drawn.empty()) {
+            none++;
+            if (shown++ < 400) examples += "  underline not drawn layout=" + std::string(layout) + " " + c->pos0 + "\n";
+          } else if (drawnChars == wantChars && drawnHash == wantHash) {
+            whole++;
+          } else if (drawnChars < wantChars && isPartOf(drawn, text)) {
+            partial++;
+            if (shown++ < 400) examples += "  underline partial layout=" + std::string(layout) + " " + c->pos0 + "\n";
+          } else {
+            wrong++;
+            if (shown++ < 400) {
+              examples += "  underline WRONG layout=" + std::string(layout) + " " + c->pos0 +
+                          (getenv("XPDIFF_SHOW_TEXT") ? " [" + drawn + "] vs [" + text + "]" : std::string()) + "\n";
+            }
+          }
+        }
+      }
+    }
+    printf(
+        "  underlines total=%d whole=%d partial=%d notDrawn=%d wrong=%d offsetDiffers=%d walkPeakHeap=%zu "
+        "mostInChapter=%u\n",
+        cases, whole, partial, none, wrong, offsetDiffers, walkPeak, mostInChapter);
   }
 
   // book  k2d: total exact notfound wrong maxdelta  d2k: total exact empty wrong canonical maxdelta  rt: total bad

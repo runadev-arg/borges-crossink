@@ -112,6 +112,18 @@ size_t localName(const char* raw, char* out, const size_t outSize) {
   return s[n] ? 0 : n;
 }
 
+// What a batch compares instead of a whole path: a walker keeps one of these per open element.
+constexpr uint32_t kBodyPathHash = 0x811C9DC5u;
+constexpr uint32_t kTextNodeMark = 0x7E87u;
+constexpr uint32_t kElementMark = 0x0E1Eu;
+
+uint32_t mixPath(const uint32_t path, const uint32_t what, const uint32_t index) {
+  uint32_t h = path;
+  h = (h ^ what) * 16777619u;
+  h = (h ^ index) * 16777619u;
+  return h ^ (h >> 15);
+}
+
 // A parsed "/body/DocFragment[N]/body/a[2]/b/text()[3].45". Boxing elements only appear in
 // xpointers from DOM versions before 20200223, and are skipped: their children count in the
 // unboxed parent.
@@ -214,7 +226,8 @@ class CreWalker final : public Print {
     EmitElement,     // Nth <p> or <li> to xpointer
     ResolvePointer,  // Xpointer to offset
     LocateText,      // A clipping's text to the offsets of its ends
-    CollectText      // What crengine reads between two offsets
+    CollectText,     // What crengine reads between two offsets
+    Batch            // Many pointers to offsets, and the text as it goes by
   };
 
   CreWalker(const Mode mode, const int spineIndex, const int spineCount)
@@ -257,11 +270,18 @@ class CreWalker final : public Print {
     collectLast_ = last;
     collectOut_ = out;
   }
+  void setBatch(const ChapterXPathResolver::BatchPointer* pointers, const uint16_t count,
+                ChapterXPathResolver::BatchListener* listener) {
+    batchPointers_ = pointers;
+    batchCount_ = count;
+    batchListener_ = listener;
+  }
   bool located() const { return locateMatches_ > 0 && (locateAnchored_ || locateMatches_ == 1); }
   uint32_t locatedFirst() const { return locateBestFirst_; }
   uint32_t locatedLast() const { return locateBestLast_; }
 
   bool ok() const { return parser_ != nullptr && parseOk_; }
+  bool stoppedEarly() const { return stopped_; }
 
   size_t write(uint8_t c) override { return write(&c, 1); }
 
@@ -340,6 +360,7 @@ class CreWalker final : public Print {
     uint16_t index;  // 1-based among same-named siblings
     uint16_t texts;  // Text nodes of this element that survive so far
     uint16_t kids;   // Children of any kind that survive so far
+    uint32_t pathHash;
     uint8_t nameLen;
     uint8_t counterBase;  // First sibling counter that belongs to this element's children
     bool block : 1;
@@ -364,6 +385,7 @@ class CreWalker final : public Print {
     uint16_t count;
   };
 
+  static constexpr uint8_t kBatchHeld = 8;
   static constexpr int kMaxAttempts = 12;
   static constexpr uint32_t kLocateSlackWords = 64;
   struct Attempt {
@@ -743,6 +765,7 @@ class CreWalker final : public Print {
     memcpy(names_ + usedName_, name, nameLen);
     usedName_ = static_cast<uint16_t>(usedName_ + nameLen);
     frame.index = index;
+    frame.pathHash = mixPath(parent.pathHash, hash, index);
     frame.counterBase = usedCounters_;
     frame.block = display == Display::Block;
     frame.hidden = parent.hidden || display == Display::None;
@@ -763,6 +786,10 @@ class CreWalker final : public Print {
                            leftOutByReader(atts);
 
     noteLaterSibling(hash);
+    if (mode_ == Mode::Batch) {
+      batchArmElement(frame.pathHash);
+      return;
+    }
     if (found_) return;
 
     switch (mode_) {
@@ -793,6 +820,7 @@ class CreWalker final : public Print {
     Frame& frame = frames_[0];
     memset(&frame, 0, sizeof(frame));
     frame.index = 1;
+    frame.pathHash = kBodyPathHash;
     frame.block = true;
     frame.allowText = true;
     frame.runLeading = true;
@@ -802,6 +830,7 @@ class CreWalker final : public Print {
     frame.pre = pre;
     frame.hidden = display == Display::None;
     if (mode_ == Mode::ResolvePointer) armPointerIfComplete();
+    if (mode_ == Mode::Batch) batchArmElement(frame.pathHash);
   }
 
   // What a new child does to the text nodes its parent has so far (see autoboxChildren() and
@@ -1020,6 +1049,7 @@ class CreWalker final : public Print {
     chunkSplitRaw_ = 0;
     chunkSplitStored_ = 0;
     chunkExtraNodes_ = 0;
+    if (mode_ == Mode::Batch) batchFindNode();
   }
 
   // TEXT_SPLIT_SIZE source characters without a '<': crengine gives what it has up to the last
@@ -1069,6 +1099,8 @@ class CreWalker final : public Print {
     chunkColumn_ = 0;
     chunkHasContent_ = chunkStored_ > 0;
     chunkExtraNodes_++;
+    // What already went by of the next node is not named again: a pointer into it does not hit.
+    if (mode_ == Mode::Batch) batchFindNode();
   }
 
   // A text node ends at any markup. It may be dropped: see ldomElementWriter::onText() and the
@@ -1137,6 +1169,11 @@ class CreWalker final : public Print {
     const Frame& frame = frames_[depth_];
     const bool content = stored > 0 && !isSpaceCp(cp);
 
+    if (mode_ == Mode::Batch) {
+      const bool shown = !excluded && stored > 0 && !frame.hidden && !frame.absentFromClip && !frame.opaque;
+      batchChar(cp, at, stored, shown, content);
+      return;
+    }
     if (mode_ == Mode::LocateText) {
       if (at >= targetOffset_ && !excluded && stored > 0 && !frame.hidden && !frame.absentFromClip && !frame.opaque) {
         if (ignoredInClip(cp)) {
@@ -1193,6 +1230,69 @@ class CreWalker final : public Print {
     matchOffset_ = targetOffset_;
     liveDepth_ = depth_;
     armNeeds();
+  }
+
+  // ---- many pointers ---------------------------------------------------------------------------
+  // The first pointer of a node, or -1. Pointers are sorted, so a node's are together.
+  int batchFirstOf(const uint32_t key) const {
+    int low = 0;
+    int high = batchCount_;
+    while (low < high) {
+      const int middle = (low + high) / 2;
+      if (batchPointers_[middle].key < key) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    return low < batchCount_ && batchPointers_[low].key == key ? low : -1;
+  }
+
+  bool batchCursorInNode() const {
+    return batchCursor_ >= 0 && batchCursor_ < batchCount_ && batchPointers_[batchCursor_].key == batchKey_;
+  }
+
+  void batchFindNode() {
+    const Frame& frame = frames_[depth_];
+    batchKey_ = mixPath(frame.pathHash, kTextNodeMark, static_cast<uint32_t>(frame.texts) + 1);
+    batchCursor_ = batchFirstOf(batchKey_);
+    while (batchCursorInNode() && static_cast<int>(batchPointers_[batchCursor_].offset) < chunkStored_) batchCursor_++;
+    if (!batchCursorInNode()) batchCursor_ = -1;
+  }
+
+  void batchHold(const uint16_t id) {
+    if (batchHeldCount_ < kBatchHeld) batchHeld_[batchHeldCount_++] = id;
+  }
+
+  void batchArmElement(const uint32_t pathHash) {
+    const uint32_t key = mixPath(pathHash, kElementMark, 0);
+    const int first = batchFirstOf(key);
+    if (first < 0) return;
+    for (int i = first; i < batchCount_ && batchPointers_[i].key == key; i++) batchHold(batchPointers_[i].id);
+  }
+
+  void batchChar(const uint32_t cp, const uint32_t at, const int stored, const bool shown, const bool content) {
+    // A pointer on a space, or at an element's start, means the next thing a page shows.
+    while (batchCursor_ >= 0 && stored > 0) {
+      const auto& pointer = batchPointers_[batchCursor_];
+      if (static_cast<int>(pointer.offset) >= chunkStored_ + stored) break;
+      if (shown && content) {
+        batchListener_->onHit(pointer.id, at);
+      } else {
+        batchHold(pointer.id);
+      }
+      batchCursor_++;
+      if (!batchCursorInNode()) batchCursor_ = -1;
+    }
+    if (!shown) return;
+    if (content && batchHeldCount_ > 0) {
+      for (uint8_t i = 0; i < batchHeldCount_; i++) batchListener_->onHit(batchHeld_[i], at);
+      batchHeldCount_ = 0;
+    }
+    if (batchListener_->onChar(cp, at)) {
+      tracking_ = false;
+      stop();
+    }
   }
 
   // ---- matching ------------------------------------------------------------------------------
@@ -1342,6 +1442,13 @@ class CreWalker final : public Print {
   int snapTextOffset_ = 0;
   int snapTextTotal_ = 0;
 
+  const ChapterXPathResolver::BatchPointer* batchPointers_ = nullptr;
+  ChapterXPathResolver::BatchListener* batchListener_ = nullptr;
+  uint16_t batchCount_ = 0;
+  uint32_t batchKey_ = 0;
+  int batchCursor_ = -1;
+  uint8_t batchHeldCount_ = 0;
+  uint16_t batchHeld_[kBatchHeld] = {0};
   const char* locateText_ = "";
   std::string* collectOut_ = nullptr;
   uint32_t collectLast_ = 0;
@@ -1493,6 +1600,34 @@ bool ChapterXPathResolver::resolve(const std::shared_ptr<Epub>& epub, const int 
   out.listItemIndex = walker->listItems();
   out.targetIsListItem = pointer->targetIsListItem;
   return true;
+}
+
+bool ChapterXPathResolver::pointerKey(const char* xpointer, uint32_t& key, uint32_t& offset) {
+  if (!xpointer) return false;
+  std::unique_ptr<ParsedPointer> pointer(new (std::nothrow) ParsedPointer());
+  if (!pointer || !pointer->parse(xpointer)) return false;
+  uint32_t path = kBodyPathHash;
+  for (int i = 0; i < pointer->stepCount; i++) path = mixPath(path, pointer->steps[i].hash, pointer->steps[i].index);
+  if (pointer->textIndex > 0) {
+    key = mixPath(path, kTextNodeMark, static_cast<uint32_t>(pointer->textIndex));
+    offset = pointer->offset < 0 ? 0 : static_cast<uint32_t>(pointer->offset);
+    return true;
+  }
+  if (pointer->offset > 0) return false;  // After that many children: a walk of one can say, a batch not.
+  key = mixPath(path, kElementMark, 0);
+  offset = 0;
+  return true;
+}
+
+bool ChapterXPathResolver::walkPointers(const std::shared_ptr<Epub>& epub, const int spineIndex,
+                                        const BatchPointer* pointers, const uint16_t count, BatchListener& listener) {
+  if (!validSpine(epub, spineIndex) || !pointers || count == 0) return false;
+  auto walker = makeWalker(CreWalker::Mode::Batch, epub, spineIndex);
+  if (!walker) return false;
+  walker->setBatch(pointers, count, &listener);
+  ScopedCss css(epub);
+  walker->setCssParser(css.get());
+  return stream(epub, spineIndex, *walker) && (walker->ok() || walker->stoppedEarly());
 }
 
 std::string ChapterXPathResolver::bodyXPath(const std::shared_ptr<Epub>& epub, const int spineIndex) {

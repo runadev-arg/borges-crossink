@@ -5,6 +5,9 @@
 //   T <visible text length> <parse ok>
 //   P <page> <visible offset of its first word>
 //   C <anchor offset> <first word on its page> <text>
+//   W <page> <inserted hyphen> <first of its line> <word>     (XPPAGES_WORDS only)
+//
+// XPPAGES_LAYOUT=<width>x<height>x<advance per char> picks another layout than portrait at 9 px.
 //
 // C lines are selections over the page's words, made by the real ClipTextBuilder, the same way
 // the reader builds its word store. Their text is the book's: this output stays in scratch.
@@ -125,6 +128,21 @@ int main(int argc, char** argv) {
     HalFile file(ss.str());
     css.loadFromStream(file);
   }
+  int viewportWidth = 480;
+  int viewportHeight = 800;
+  if (const char* layout = getenv("XPPAGES_LAYOUT")) {
+    int advance = 9;
+    if (sscanf(layout, "%dx%dx%d", &viewportWidth, &viewportHeight, &advance) == 3)
+      renderer.textAdvancePerChar = advance;
+  }
+  const bool wantWords = getenv("XPPAGES_WORDS") != nullptr;
+  struct ListedWord {
+    size_t page;
+    bool hyphen;
+    bool firstOfLine;
+    std::string text;
+  };
+  std::vector<ListedWord> listed;
   std::vector<PageWords> pageWords;
   parserTextBlockHook = [](const TextBlock* block, const std::vector<std::string>& words, const std::vector<int16_t>& x,
                            const std::vector<uint8_t>& flags) { g_lines[block] = LineWords{words, x, flags}; };
@@ -154,18 +172,42 @@ int main(int argc, char** argv) {
         const bool hyphen =
             i < found->second.flags.size() && (found->second.flags[i] & TextBlock::WORD_FLAG_INSERTED_HYPHEN) != 0;
         collected.words.push_back({text, x, line->yPos, hyphen, index++});
+        if (wantWords) listed.push_back({pages.size() - 1, hyphen, i == 0, text});
       }
     }
     pageWords.push_back(std::move(collected));
   };
-  ChapterHtmlSlimParser parser{epub,  path,  renderer, 0,      1.0f, false, false,    0, 480, 800,     false,
-                               false, false, 0,        onPage, true, "",    "unused", 0, {},  nullptr, &css};
+  ChapterHtmlSlimParser parser{epub,
+                               path,
+                               renderer,
+                               0,
+                               1.0f,
+                               false,
+                               false,
+                               0,
+                               static_cast<uint16_t>(viewportWidth),
+                               static_cast<uint16_t>(viewportHeight),
+                               false,
+                               false,
+                               false,
+                               0,
+                               onPage,
+                               true,
+                               "",
+                               "unused",
+                               0,
+                               {},
+                               nullptr,
+                               &css};
   const bool ok = parser.parseAndBuildPages();
   FILE* out = fopen(argv[2], "wb");
   if (!out) return 3;
   fprintf(out, "T\t%u\t%d\n", parser.getVisibleTextLength(), ok ? 1 : 0);
   for (size_t i = 0; i < pages.size(); i++) fprintf(out, "P\t%zu\t%u\n", i, pages[i]);
   if (const char* selections = getenv("XPPAGES_SELECTIONS")) writeSelections(out, pageWords, atoi(selections));
+  for (const auto& w : listed) {
+    fprintf(out, "W\t%zu\t%d\t%d\t%s\n", w.page, w.hyphen ? 1 : 0, w.firstOfLine ? 1 : 0, escape(w.text).c_str());
+  }
   fclose(out);
   return 0;
 }

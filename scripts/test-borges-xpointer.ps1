@@ -26,7 +26,7 @@ if ($LASTEXITCODE) { exit $LASTEXITCODE }
 $diffObj = Join-Path $Build 'xpdiff'
 New-Item -ItemType Directory -Force $diffObj | Out-Null
 $lib = Join-Path $repo 'lib'
-$inc = @("-I$here\stubs", "-I$repo\test\chapter_html_slim_parser\stubs", "-I$lib\KOReaderSync", "-I$lib\Epub", "-I$lib\Memory", "-I$lib\MemoryBudget", "-I$lib\Utf8", "-I$lib\XmlParserUtils", "-I$lib\expat")
+$inc = @("-I$here\stubs", "-I$repo\test\chapter_html_slim_parser\stubs", "-I$lib\BorgesCore", "-I$lib\KOReaderSync", "-I$lib\Epub", "-I$lib\Memory", "-I$lib\MemoryBudget", "-I$lib\Utf8", "-I$lib\XmlParserUtils", "-I$lib\expat")
 $cflags = @('-O1', '-g', '-w', '-DXML_CONTEXT_BYTES=1024', '-DXML_GE=0', '-Dmalloc=hmalloc', '-Drealloc=hrealloc', '-Dfree=hfree',
   '-include', "$here\stubs\host_heap.h") + $inc
 foreach ($c in 'xmlparse', 'xmlrole', 'xmltok') {
@@ -35,7 +35,7 @@ foreach ($c in 'xmlparse', 'xmlrole', 'xmltok') {
 }
 $objs = @("$diffObj\xmlparse.o", "$diffObj\xmlrole.o", "$diffObj\xmltok.o")
 $cxx = @('-std=c++20', '-O1', '-g', '-w', '-DXML_CONTEXT_BYTES=1024', '-DXML_GE=0', '-include', "$here\stubs\host_compat.h") + $inc
-foreach ($s in @("$here\xpdiff.cpp", "$lib\KOReaderSync\ChapterXPathResolver.cpp", "$lib\KOReaderSync\ProgressMapper.cpp", "$lib\Utf8\Utf8.cpp", "$lib\Epub\Epub\htmlEntities.cpp", "$lib\Epub\Epub\css\CssParser.cpp")) {
+foreach ($s in @("$here\xpdiff.cpp", "$lib\KOReaderSync\ChapterXPathResolver.cpp", "$lib\KOReaderSync\ProgressMapper.cpp", "$lib\Utf8\Utf8.cpp", "$lib\Epub\Epub\htmlEntities.cpp", "$lib\Epub\Epub\css\CssParser.cpp", "$lib\BorgesCore\Underlines.cpp", "$lib\BorgesCore\Inbound.cpp", "$lib\BorgesCore\Codec.cpp", "$lib\BorgesCore\AtomicFile.cpp", "$lib\BorgesCore\Spool.cpp")) {
   $o = "$diffObj\$([IO.Path]::GetFileNameWithoutExtension($s)).o"
   if (-not (Test-Path $o) -or (Get-Item $s).LastWriteTime -gt (Get-Item $o).LastWriteTime -or (Get-Item "$lib\KOReaderSync\ChapterXPathResolver.h").LastWriteTime -gt (Get-Item $o).LastWriteTime) {
     & clang++ @cxx -c $s -o $o
@@ -87,7 +87,7 @@ $pageLines = @()
 foreach ($dir in Get-ChildItem $corpus -Directory) {
   $lines = & $xpdiff $dir.FullName $oracle $work $Points
   foreach ($l in $lines) {
-    if ($l -match '^  (pages|clips|earlystop) ') { $pageLines += "$($dir.Name)$l"; continue }
+    if ($l -match '^  (pages|clips|earlystop|underlines) ') { $pageLines += "$($dir.Name)$l"; continue }
     if ($l -notmatch "`t") { Write-Output $l; continue }
     $f = $l -split "`t"
     if ($f.Count -lt 18) { Write-Output $l; continue }
@@ -124,6 +124,7 @@ $knownLimitBad = 202
 $knownOtherText = 88
 $otherText = 0
 $earlyStopChecked = 0
+$ulTotal = 0; $ulWhole = 0; $ulPartial = 0; $ulNone = 0; $ulWrong = 0; $ulOffsets = 0
 $earlyStopSeen = 0
 foreach ($l in $pageLines) {
   if ($l -match 'otherText=(\d+)') { $otherText += [int]$Matches[1] }
@@ -131,8 +132,15 @@ foreach ($l in $pageLines) {
     $earlyStopChecked += [int]$Matches[1]
     $earlyStopSeen += [int]$Matches[2]
   }
+  if ($l -match 'underlines total=(\d+) whole=(\d+) partial=(\d+) notDrawn=(\d+) wrong=(\d+) offsetDiffers=(\d+)') {
+    $ulTotal += [int]$Matches[1]; $ulWhole += [int]$Matches[2]; $ulPartial += [int]$Matches[3]
+    $ulNone += [int]$Matches[4]; $ulWrong += [int]$Matches[5]; $ulOffsets += [int]$Matches[6]
+  }
 }
 "Corpus: $($realRows.Count) books, mismatches $realBad. Known limits: $($limitRows.Count) fixtures, mismatches $limitBad (ceiling $knownLimitBad). Other text $otherText (ceiling $knownOtherText). Early stop: $earlyStopSeen of $earlyStopChecked big chapters stopped early."
+"Underlines: $ulTotal highlights over three layouts: whole $ulWhole, partial $ulPartial, not drawn $ulNone, WRONG $ulWrong, batch offset differs from one walk $ulOffsets."
+if ($ulWrong -or $ulOffsets) { exit 1 }
+if ($ulTotal -eq 0) { "No highlight went through the underlines."; exit 1 }
 if ($rows.Count -eq 0) { "No book went through: nothing was compared."; exit 1 }
 if ($earlyStopSeen -eq 0) { "No chapter stopped early."; exit 1 }
 if ($realBad -or $limitBad -gt $knownLimitBad -or $otherText -gt $knownOtherText) { exit 1 }

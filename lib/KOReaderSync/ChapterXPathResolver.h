@@ -57,6 +57,32 @@ class ChapterXPathResolver {
    */
   static bool resolve(const std::shared_ptr<Epub>& epub, int spineIndex, const std::string& xpointer, Resolved& out);
 
+  /**
+   * Several pointers at once, in one walk of a spine item: mapping them one by one would inflate the
+   * chapter once each. Only pointers to a text node, or to an element with no point in it, and only
+   * what lands on text a page can show: anything else simply does not hit.
+   */
+  struct BatchPointer {
+    uint32_t key = 0;     // pointerKey()
+    uint32_t offset = 0;  // In the text node.
+    uint16_t id = 0;
+  };
+  class BatchListener {
+   public:
+    virtual ~BatchListener() = default;
+    virtual void onHit(uint16_t id, uint32_t visibleOffset) = 0;
+    // Every character of the chapter a page can show, in order. True: seen enough, stop.
+    virtual bool onChar(uint32_t codepoint, uint32_t visibleOffset) = 0;
+  };
+  /** False: not a pointer a batch can follow. */
+  static bool pointerKey(const char* xpointer, uint32_t& key, uint32_t& offset);
+  /**
+   * pointers sorted by (key, offset). False when the chapter could not be read to the end of what was
+   * asked (or the deadline passed, which deadlineHit() says).
+   */
+  static bool walkPointers(const std::shared_ptr<Epub>& epub, int spineIndex, const BatchPointer* pointers,
+                           uint16_t count, BatchListener& listener);
+
   /** The start of a chapter: "/body/DocFragment[N]/body". */
   static std::string bodyXPath(const std::shared_ptr<Epub>& epub, int spineIndex);
 
