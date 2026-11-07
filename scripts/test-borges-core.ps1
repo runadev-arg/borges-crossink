@@ -69,7 +69,7 @@ if ($RiscV) {
   foreach ($src in Get-ChildItem "$Repo\lib\BorgesCore\*.cpp") {
     $obj = "$ObjDir\$($src.BaseName).o"
     & $Gpp -c -std=gnu++2a -fno-exceptions -fno-rtti -Os -ffunction-sections -fdata-sections -Wall -Wextra `
-      -march=rv32imc_zicsr_zifencei -mabi=ilp32 "-I$Repo\lib\BorgesCore" $src.FullName -o $obj
+      -march=rv32imc_zicsr_zifencei -mabi=ilp32 "-I$Repo\lib\BorgesCore" "-I$Repo\lib\Utf8" $src.FullName -o $obj
     if ($LASTEXITCODE -ne 0) { throw "RISC-V compile failed: $($src.Name)" }
     $Objects += $obj
   }
