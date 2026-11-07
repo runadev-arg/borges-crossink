@@ -1668,6 +1668,23 @@ std::optional<uint16_t> Section::getPageForListItemIndex(const uint16_t liIndex)
   return resultPage;
 }
 
+bool Section::readVisibleOffsets(uint32_t* out, const uint16_t count) const {
+  FsFile f;
+  if (!Storage.openFileForRead("SCT", filePath, f)) return false;
+  const uint32_t fileSize = f.size();
+  if (!f.seek(HEADER_SIZE - sizeof(uint32_t) * 6 - sizeof(uint16_t))) return false;
+  uint16_t stored = 0;
+  if (!serialization::tryReadPod(f, stored) || count > stored) return false;
+  if (!f.seek(HEADER_SIZE - sizeof(uint32_t))) return false;
+  uint32_t lutOffset = 0;
+  if (!serialization::tryReadPod(f, lutOffset) || lutOffset < HEADER_SIZE ||
+      lutOffset + static_cast<uint32_t>(count) * sizeof(uint32_t) > fileSize || !f.seek(lutOffset)) {
+    return false;
+  }
+  const size_t bytes = static_cast<size_t>(count) * sizeof(uint32_t);
+  return f.read(reinterpret_cast<uint8_t*>(out), bytes) == static_cast<int>(bytes);
+}
+
 std::optional<uint32_t> Section::getVisibleTextOffsetForPage(const uint16_t page) const {
   if (build_ && page < build_->pageIndex.size()) {
     return build_->pageIndex[page].visibleTextOffset;

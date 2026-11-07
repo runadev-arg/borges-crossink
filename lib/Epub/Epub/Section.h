@@ -182,5 +182,7 @@ class Section {
   // Content coordinate recorded at the start of each rendered page. Available
   // for finalized sections and the readable prefix of incremental sections.
   std::optional<uint32_t> getVisibleTextOffsetForPage(uint16_t page) const;
+  // The first count of them at once, from a committed section file: one read, however many pages.
+  bool readVisibleOffsets(uint32_t* out, uint16_t count) const;
   std::optional<uint16_t> getPageForVisibleTextOffset(uint32_t offset, bool preferFirstAtOffset = false) const;
 };

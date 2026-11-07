@@ -12,11 +12,14 @@ class Activity;
 class Epub;
 class GfxRenderer;
 class MappedInputManager;
+class Section;
 struct CrossPointPosition;
 
 namespace borges {
 
 struct Position;
+struct UnderlineBook;
+struct UnderlineSegment;
 
 namespace glue {
 
@@ -116,6 +119,23 @@ void consumeUndo(const std::string& bookPath);
 bool hasInboundHighlights(const std::string& bookPath);
 std::unique_ptr<Activity> makeInboundActivity(GfxRenderer& renderer, MappedInputManager& input,
                                               const std::string& bookPath);
+
+// Other readers' highlights underlined in the page. Null: this book has none, and from here to the
+// last page of it nothing else is asked or kept. One or two lookups, and what identifies the book only
+// when the card has highlights of some book. See lib/BorgesCore/Underlines.h for what each step keeps.
+std::unique_ptr<UnderlineBook> openUnderlines(const Epub& epub);
+// A chapter that has one wants its whole layout now, while the reader waits for it anyway: where a
+// highlight falls can only be said with every page known. Not for a chapter of megabytes.
+bool underlinesWantWholeSection(const UnderlineBook& book, const Epub& epub, int spine);
+// Entering a chapter. May lend the frame to walk it (the caller draws the page from scratch after
+// this) and only when no saved plan is true for this log, layout and these clippings. A chapter still
+// being laid out waits for the next time it is entered: a page turn is not when to do this.
+void prepareUnderlines(UnderlineBook& book, GfxRenderer& renderer, const std::shared_ptr<Epub>& epub,
+                       const Section& section, int spine, uint32_t layoutSignature);
+// The segments of a page, into book.window. No file touched for a page without any, nor for one the
+// last read already answered for. False: nothing to draw.
+bool underlinesForPage(UnderlineBook& book, const Epub& epub, int spine, uint32_t layoutSignature, int page,
+                       const UnderlineSegment*& segments, uint8_t& count);
 
 enum class HighlightJumpOutcome : uint8_t { Exact, Approximate, Failed };
 // Saves the place in the book and the way back, and says where this reader now is. The frame on the

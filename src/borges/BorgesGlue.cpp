@@ -3,6 +3,7 @@
 #include <BookmarkStore.h>
 #include <BuildScratch.h>
 #include <Epub.h>
+#include <Epub/Section.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalPowerManager.h>
@@ -27,6 +28,7 @@
 #include "Inbound.h"
 #include "ProgressMapper.h"
 #include "ReaderTracker.h"
+#include "Underlines.h"
 #include "activities/ActivityManager.h"
 #include "activities/home/RecentBookProgress.h"
 #include "activities/reader/EpubReaderUtils.h"
@@ -670,6 +672,223 @@ bool hasInboundHighlights(const std::string& bookPath) {
   knownAnswer = InboundList::hasAny(stack->fs, id, stack->store.state().accountEpoch, own.get());
   LOG_INF("BORGES", "Highlights of other readers in this book: %d", knownAnswer ? 1 : 0);
   return knownAnswer;
+}
+
+namespace {
+
+constexpr size_t kUnderlineWholeSectionBytes = 384 * 1024;
+
+std::string underlineSpinesPath(const Epub& epub) { return epub.getCachePath() + "/ulb.bin"; }
+
+std::string underlinePlanPath(const Epub& epub, const int spine) {
+  return epub.getCachePath() + "/ulp" + std::to_string(spine) + ".bin";
+}
+
+// What this reader has highlighted in a chapter, from what is already in RAM.
+uint32_t ownClipsSignature(const int spine) {
+  uint32_t signature = 2166136261u;
+  const size_t clips = CLIPPINGS.clippingCount();
+  for (size_t i = 0; i < clips; ++i) {
+    const Clipping* clip = CLIPPINGS.clippingAt(i);
+    if (!clip || clip->spineIndex != spine) continue;
+    signature = (signature ^ clip->textOffset) * 16777619u;
+    signature = (signature ^ clip->textLength) * 16777619u;
+    signature = (signature ^ clip->timestamp) * 16777619u;
+  }
+  return signature;
+}
+
+class UnderlineWalk final : public ChapterXPathResolver::BatchListener {
+ public:
+  explicit UnderlineWalk(UnderlinePlanner& planner) : planner_(planner) {}
+  void onHit(const uint16_t id, const uint32_t at) override { planner_.onHit(id, at); }
+  bool onChar(const uint32_t cp, const uint32_t at) override { return planner_.onChar(cp, at); }
+
+ private:
+  UnderlinePlanner& planner_;
+};
+
+}  // namespace
+
+std::unique_ptr<UnderlineBook> openUnderlines(const Epub& epub) {
+  net::BorgesFsHal fs;
+  if (!InboundList::anyOnCard(fs)) return nullptr;
+  BookId id;
+  if (!partialMd5(fs, epub.getPath().c_str(), id) || !InboundList::present(fs, id)) return nullptr;
+  // An optimized copy numbers its spine items its own way, and a highlight names the original's.
+  if (epub.requiresSourceSpineMap()) return nullptr;
+  uint16_t epoch = 0;
+  {
+    auto stack = makeStack();
+    if (!stack || !stack->openStore()) return nullptr;
+    epoch = stack->store.state().accountEpoch;
+  }
+  uint32_t identity = 0;
+  if (!InboundList::identity(fs, id, epoch, identity)) return nullptr;
+  auto book = makeUniqueNoThrow<UnderlineBook>();
+  if (!book) {
+    LOG_ERR("BORGES", "No memory to underline this book");
+    return nullptr;
+  }
+  book->book = id;
+  book->epoch = epoch;
+  book->logIdentity = identity;
+  const std::string path = underlineSpinesPath(epub);
+  if (!loadUnderlineSpines(fs, path.c_str(), identity, book->spineBits)) {
+    if (!collectUnderlineSpines(fs, id, epoch, book->spineBits)) {
+      LOG_ERR("BORGES", "Could not read this book's highlights to underline them");
+      return nullptr;
+    }
+    // Only time is lost if this does not stay: it is done again at the next open.
+    if (!saveUnderlineSpines(fs, path.c_str(), identity, book->spineBits))
+      LOG_ERR("BORGES", "Could not keep %s", path.c_str());
+  }
+  bool any = false;
+  for (const uint8_t bits : book->spineBits) any = any || bits != 0;
+  LOG_INF("BORGES", "Underlines for this book: %d", any ? 1 : 0);
+  if (!any) return nullptr;
+  return book;
+}
+
+bool underlinesWantWholeSection(const UnderlineBook& book, const Epub& epub, const int spine) {
+  if (!underlineSpineBit(book.spineBits, spine)) return false;
+  const size_t upTo = epub.getCumulativeSpineItemSize(spine);
+  const size_t before = spine > 0 ? epub.getCumulativeSpineItemSize(spine - 1) : 0;
+  return upTo - before <= kUnderlineWholeSectionBytes;
+}
+
+void prepareUnderlines(UnderlineBook& book, GfxRenderer& renderer, const std::shared_ptr<Epub>& epub,
+                       const Section& section, const int spine, const uint32_t layoutSignature) {
+  if (book.planTried && book.planSpine == spine && book.planLayout == layoutSignature) return;
+  book.planSpine = spine;
+  book.planLayout = layoutSignature;
+  book.planTried = true;
+  book.planSegments = 0;
+  book.windowFirst = 1;
+  book.windowEnd = 0;
+  book.windowCount = 0;
+  memset(book.pageBits, 0, sizeof(book.pageBits));
+  if (!underlineSpineBit(book.spineBits, spine)) return;
+  if (section.isBuilding() || section.isPartial() || section.pageCount == 0) return;
+
+  UnderlinePlanKey key;
+  key.log = book.logIdentity;
+  key.own = ownClipsSignature(spine);
+  key.layout = layoutSignature;
+  key.pages = section.pageCount;
+  const std::string path = underlinePlanPath(*epub, spine);
+  net::BorgesFsHal fs;
+  if (loadUnderlinePlan(fs, path.c_str(), key, book.planSegments, book.pageBits)) return;
+  if (section.pageCount > kUnderlineMaxPages) {
+    LOG_ERR("BORGES", "Spine %d has %u pages, more than can be underlined", spine, section.pageCount);
+    return;
+  }
+
+  const uint32_t startedAt = millis();
+  XpointerBudget budget(renderer, *epub);
+  if (!budget.take(false, spine)) return;
+
+  // Room for all of them only until it is known how many there are: most chapters hold a few, and the
+  // walk needs the heap.
+  auto targets = makeUniqueNoThrow<UnderlineTarget[]>(kUnderlineMaxTargets);
+  if (!targets) {
+    LOG_ERR("BORGES", "No memory to find this chapter's highlights");
+    return;
+  }
+  uint16_t targetCount = 0;
+  {
+    auto own = makeOwnPassages();
+    if (!collectUnderlineTargets(fs, book.book, book.epoch, spine, own.get(), &ChapterXPathResolver::pointerKey,
+                                 targets.get(), kUnderlineMaxTargets, targetCount)) {
+      LOG_ERR("BORGES", "Could not read this chapter's highlights");
+      return;
+    }
+  }
+  if (targetCount > 0 && targetCount < kUnderlineMaxTargets) {
+    auto exact = makeUniqueNoThrow<UnderlineTarget[]>(targetCount);
+    if (exact) {
+      memcpy(static_cast<void*>(exact.get()), targets.get(), targetCount * sizeof(UnderlineTarget));
+      targets = std::move(exact);
+    }
+  }
+  uint16_t segmentCount = 0;
+  bool walked = true;
+  uint16_t verified = 0;
+  uint16_t refused = 0;
+  std::unique_ptr<UnderlineSegment[]> segments;
+  if (targetCount > 0) {
+    const uint16_t segmentCap = targetCount >= kUnderlineMaxSegments / 3 ? kUnderlineMaxSegments : targetCount * 3;
+    const auto pages = makeUniqueNoThrow<uint32_t[]>(section.pageCount);
+    const auto pointers = makeUniqueNoThrow<ChapterXPathResolver::BatchPointer[]>(targetCount);
+    segments = makeUniqueNoThrow<UnderlineSegment[]>(segmentCap);
+    // What the walk itself needs has to be left after these.
+    if (!pages || !pointers || !segments || ESP.getFreeHeap() < kMinFreeForXpointer ||
+        ESP.getMaxAllocHeap() < kMinBlockForXpointer) {
+      LOG_ERR("BORGES", "No memory to underline this chapter (free=%u maxAlloc=%u)", ESP.getFreeHeap(),
+              ESP.getMaxAllocHeap());
+      return;
+    }
+    if (!section.readVisibleOffsets(pages.get(), section.pageCount)) {
+      LOG_ERR("BORGES", "Could not read where this chapter's pages start");
+      return;
+    }
+    for (uint16_t i = 0; i < targetCount; ++i) {
+      pointers[i].key = targets[i].key;
+      pointers[i].offset = targets[i].offset;
+      pointers[i].id = i;
+    }
+    UnderlinePlanner planner(targets.get(), targetCount, pages.get(), section.pageCount, segments.get(), segmentCap);
+    UnderlineWalk walk(planner);
+    walked = ChapterXPathResolver::walkPointers(epub, spine, pointers.get(), targetCount, walk);
+    segmentCount = planner.finish();
+    verified = planner.verified();
+    refused = planner.refused();
+  }
+  const bool timedOut = ChapterXPathResolver::deadlineHit();
+  // A chapter too long to walk in time would be walked again at every entry: it stays without, until
+  // the log or the layout changes. One that could not be read says nothing and is tried again.
+  if (timedOut) segmentCount = 0;
+  if (!walked && !timedOut) return;
+  if (!saveUnderlinePlan(fs, path.c_str(), key, segments.get(), segmentCount)) {
+    LOG_ERR("BORGES", "Could not keep %s", path.c_str());
+  }
+  book.planSegments = segmentCount;
+  for (uint16_t i = 0; i < segmentCount; ++i) {
+    const uint32_t bit = segments[i].page % (kUnderlinePageBytes * 8);
+    book.pageBits[bit / 8] = static_cast<uint8_t>(book.pageBits[bit / 8] | (1u << (bit % 8)));
+  }
+  LOG_INF("BORGES",
+          "Underline plan spine=%d targets=%u verified=%u refused=%u segments=%u timedOut=%d in %lu ms free=%u", spine,
+          targetCount, verified, refused, segmentCount, timedOut ? 1 : 0,
+          static_cast<unsigned long>(millis() - startedAt), ESP.getFreeHeap());
+}
+
+bool underlinesForPage(UnderlineBook& book, const Epub& epub, const int spine, const uint32_t layoutSignature,
+                       const int page, const UnderlineSegment*& segments, uint8_t& count) {
+  if (book.planSpine != spine || book.planLayout != layoutSignature || book.planSegments == 0 || page < 0) return false;
+  const auto at = static_cast<uint32_t>(page);
+  const uint32_t bit = at % (kUnderlinePageBytes * 8);
+  if ((book.pageBits[bit / 8] & (1u << (bit % 8))) == 0) return false;
+  if (at < book.windowFirst || at >= book.windowEnd) {
+    book.windowFirst = at;
+    book.windowEnd = at + 1;
+    book.windowCount = 0;
+    // On the stack: this is on the way to a page, where what the heap has left is not to be spent.
+    char path[160];
+    const int length = snprintf(path, sizeof(path), "%s/ulp%d.bin", epub.getCachePath().c_str(), spine);
+    if (length <= 0 || length >= static_cast<int>(sizeof(path))) return false;
+    net::BorgesFsHal fs;
+    book.windowCount = readUnderlineWindow(fs, path, book.planSegments, static_cast<uint16_t>(page), book.window,
+                                           kUnderlinePageMax, book.windowEnd);
+  }
+  count = 0;
+  segments = nullptr;
+  for (uint8_t i = 0; i < book.windowCount; ++i) {
+    if (book.window[i].page != at) continue;
+    if (!segments) segments = &book.window[i];
+    ++count;
+  }
+  return count > 0;
 }
 
 std::unique_ptr<Activity> makeInboundActivity(GfxRenderer& renderer, MappedInputManager& input,

@@ -852,6 +852,7 @@ STR_BORGES_NO_OTHER_DEVICE: "Ningún otro lector tiene una posición en este lib
 STR_BORGES_UNDO: "Volver a donde estaba"
 STR_BORGES_INBOUND: "Subrayados de otros lectores"
 STR_BORGES_INBOUND_GO: "Ir"
+STR_INBOUND_UNDERLINES: "Marcar subrayados de otros"
 STR_BORGES_INBOUND_PARTIAL: "Están los más recientes de este libro."
 STR_BORGES_INBOUND_EMPTY: "No hay subrayados de otros lectores en este libro."
 STR_BORGES_INBOUND_FAILED: "No pude ir a ese subrayado."

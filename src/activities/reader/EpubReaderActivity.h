@@ -22,6 +22,7 @@
 #include "ManualPageTurnQueue.h"
 #include "ReaderProgressSaveDebouncer.h"
 #include "SideButtonShortcuts.h"
+#include "Underlines.h"
 #include "activities/Activity.h"
 #include "activities/reader/TouchReaderPreviewModel.h"
 #include "borges/ReaderTracker.h"
@@ -110,6 +111,10 @@ class EpubReaderActivity final : public Activity {
 
   std::shared_ptr<Epub> epub;
   borges::glue::ReaderTracker borgesTracker;
+  // Null in a book without other readers' highlights, which is what keeps its page turns as they were.
+  std::unique_ptr<borges::UnderlineBook> inboundUnderlines;
+  bool inboundUnderlinesAsked = false;
+  mutable uint32_t inboundUnderlinesUs = 0;  // For the log: how long the last page's took.
   bool skipBorgesExitSave = false;
   static constexpr unsigned long kBorgesCheckNoticeDelayMs = 1200;
   bool borgesCheckNoticePending = false;
@@ -336,6 +341,7 @@ class EpubReaderActivity final : public Activity {
   bool ensureGrayscaleStripScratch();
   void releaseGrayscaleStripScratch(bool force = false);
   void drawClippingHighlights(const Page& page, int fontId, int orientedMarginTop, int orientedMarginLeft) const;
+  void drawInboundUnderlines(const Page& page, int fontId, int orientedMarginTop, int orientedMarginLeft) const;
   void renderStatusBar() const;
   void refreshChapterGroupEstimate(uint16_t viewportWidth, uint16_t viewportHeight);
   bool resolveChapterGroupPageProgress(int& currentPage, int& pageCount, float& chapterProgress,

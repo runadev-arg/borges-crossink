@@ -6174,7 +6174,17 @@ void EpubReaderActivity::render(RenderLock&& lock) {
             ESP.getFreeHeap(), ESP.getMaxAllocHeap());
     const int readerFontId = SETTINGS.getReaderFontId();
     const EpubRenderMode selectedRenderMode = normalizeRenderMode(SETTINGS.epubRenderMode);
-    const bool fullSectionIndexing = SETTINGS.indexingMethod == CrossPointSettings::INDEXING_FULL_SECTION;
+    // Asked once per book, while it opens, and again only if the setting is turned back on.
+    if (!SETTINGS.inboundUnderlines) {
+      inboundUnderlines.reset();
+      inboundUnderlinesAsked = false;
+    } else if (!inboundUnderlinesAsked) {
+      inboundUnderlinesAsked = true;
+      inboundUnderlines = borges::glue::openUnderlines(*epub);
+    }
+    const bool fullSectionIndexing =
+        SETTINGS.indexingMethod == CrossPointSettings::INDEXING_FULL_SECTION ||
+        (inboundUnderlines && borges::glue::underlinesWantWholeSection(*inboundUnderlines, *epub, currentSpineIndex));
     EpubRenderMode usedRenderMode = selectedRenderMode;
     const bool buildingFootnotePreview = !pendingFootnotePreviewAnchor.empty();
     bool loadedSection = false;
@@ -6733,6 +6743,18 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     refreshChapterGroupEstimate(viewportWidth, viewportHeight);
   }
 
+  if (inboundUnderlines && !activeFootnotePreview) {
+    if (!SETTINGS.inboundUnderlines) {
+      inboundUnderlines.reset();
+      inboundUnderlinesAsked = false;
+    } else {
+      // Lends the frame only when a chapter has to be walked. It is filled from scratch just below.
+      releaseGrayscaleStripScratch();
+      borges::glue::prepareUnderlines(*inboundUnderlines, renderer, epub, *section, currentSpineIndex,
+                                      activeSectionLayoutSignature);
+    }
+  }
+
   renderer.clearScreen(ReaderUtils::readerBackgroundColor());
 
   if (section->pageCount == 0) {
@@ -6795,6 +6817,8 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     }
 
     const int renderFontId = activeSectionFontId != 0 ? activeSectionFontId : SETTINGS.getReaderFontId();
+    const uint32_t composeStartedUs = micros();
+    inboundUnderlinesUs = 0;
     if (!renderContents(std::move(p), renderFontId, layout.marginTop, layout.marginRight, layout.marginBottom,
                         layout.marginLeft, /*updatePanel=*/true)) {
       currentPageFootnotes.clear();
@@ -6808,6 +6832,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       showPendingSyncSaveError();
       return;
     }
+    // One line and after the fact: a line printed in the middle of it would be part of what it says.
+    LOG_DBG("ERS", "Page composed in %lu us (underlines %lu us)", static_cast<unsigned long>(micros() - composeStartedUs),
+            static_cast<unsigned long>(inboundUnderlinesUs));
     lastRenderCompleteMs = millis();
     const uint8_t heapShapeRedrawStages = pendingHeapShapeReaderRedrawStages.exchange(0, std::memory_order_relaxed);
     if (heapShapeRedrawStages & HEAP_SHAPE_REDRAW_CLIP) {
@@ -7394,6 +7421,7 @@ bool EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int fo
 
   const auto finalizeBufferComposition = [&]() {
     drawClippingHighlights(*page, fontId, orientedMarginTop, orientedMarginLeft);
+    if (inboundUnderlines) drawInboundUnderlines(*page, fontId, orientedMarginTop, orientedMarginLeft);
     drawPublisherPageMarkers(renderer, *page, orientedMarginTop, contentBottom, foregroundBlack);
 #if CROSSINK_APP_CAP_TOUCH
     if (activeFootnotePreview) {
@@ -7789,6 +7817,115 @@ void EpubReaderActivity::drawClippingHighlights(const Page& page, const int font
     }
     return true;
   });
+}
+
+void EpubReaderActivity::drawInboundUnderlines(const Page& page, const int fontId, const int orientedMarginTop,
+                                               const int orientedMarginLeft) const {
+  // In the frame every refresh starts from, and only there: a gray plane has no business with a line
+  // that is one solid color, and the panel's next differential update is computed from this frame.
+  const uint32_t startedUs = micros();
+  const borges::UnderlineSegment* segments = nullptr;
+  uint8_t segmentCount = 0;
+  if (!section || activeFootnotePreview || renderer.getRenderMode() != GfxRenderer::BW ||
+      !borges::glue::underlinesForPage(*inboundUnderlines, *epub, currentSpineIndex, activeSectionLayoutSignature,
+                                       section->currentPage, segments, segmentCount)) {
+    return;
+  }
+
+  const auto wordIsTheReaders = [](const size_t i, const char* text, const size_t length) {
+    return i == 0 && borges::UnderlinePageMatch::looksLikeListMarker(text, length);
+  };
+
+  // About 700 B, for the moment this takes: as much as the matches of the highlights above it.
+  borges::UnderlinePageMatch match(segments, segmentCount);
+  forEachVisiblePageWord(page, [&](const uint16_t, const PageTextLine&, const TextBlock& block, const size_t i) {
+    const auto word = static_cast<uint16_t>(i);
+    const char* text = block.wordText(word);
+    const size_t length = block.wordTextLen(word);
+    match.feedWord(text, length, block.wordEndsWithInsertedHyphen(word), wordIsTheReaders(i, text, length));
+    return true;
+  });
+  match.finish();
+  if (match.acceptedCount() == 0) return;
+
+  // Solid and two pixels: dither would ghost on the fast updates most pages get, and one pixel falls
+  // apart on them. Below where a book's own <u> sits, and thinner, so the two can be told apart.
+  constexpr int kThickness = 2;
+  constexpr int kGap = 3;
+  const bool ink = ReaderUtils::readerForegroundBlack();
+  const TextBlock* runBlock = nullptr;
+  int runY = 0;
+  int runLeft = 0;
+  int runRight = 0;
+  const auto flush = [&]() {
+    if (runBlock && runRight > runLeft) renderer.drawLine(runLeft, runY, runRight - 1, runY, kThickness, ink);
+    runBlock = nullptr;
+  };
+
+  uint32_t position = 0;
+  forEachVisiblePageWord(page, [&](const uint16_t, const PageTextLine& line, const TextBlock& block, const size_t i) {
+    const auto word = static_cast<uint16_t>(i);
+    const char* text = block.wordText(word);
+    const size_t length = block.wordTextLen(word);
+    const bool hyphen = block.wordEndsWithInsertedHyphen(word);
+    const uint32_t chars = borges::UnderlinePageMatch::wordChars(text, length, hyphen);
+    uint32_t from = 0;
+    uint32_t to = 0;
+    const bool marked = match.spanOf(position, chars, wordIsTheReaders(i, text, length), from, to);
+    position += chars;
+    if (!marked) {
+      if (chars > 0) flush();
+      return true;
+    }
+
+    const int lineFontId = block.resolvedFontId(renderer, fontId);
+    const auto style = static_cast<EpdFontFamily::Style>(block.wordStyle(word) & ~EpdFontFamily::UNDERLINE);
+    const PageWordGeometry geometry = pageWordGeometry(renderer, fontId, line, block, word);
+    int left = orientedMarginLeft + line.xPos + geometry.xOffset;
+    int right = left + geometry.width;
+    const bool rtl = BidiUtils::detectParagraphLevel(text, block.getBlockStyle().isRtl ? 1 : 0) != 0;
+    // Part of a word, as a highlight that leaves out the comma after it. Not in right-to-left text,
+    // where the first character is not the leftmost, nor in a word too long to copy.
+    const auto advanceTo = [&](const size_t bytes) {
+      char prefix[64];
+      if (bytes >= sizeof(prefix)) return -1;
+      memcpy(prefix, text, bytes);
+      prefix[bytes] = '\0';
+      return renderer.getTextAdvanceX(lineFontId, prefix, style);
+    };
+    if (!rtl) {
+      if (from > 0) {
+        const int advance = advanceTo(borges::UnderlinePageMatch::byteOfChar(text, length, from));
+        if (advance >= 0) left = orientedMarginLeft + line.xPos + block.wordXpos(word) + advance;
+      } else if (hasEmSpacePrefix(text)) {
+        left += renderer.getTextAdvanceX(lineFontId, "\xe2\x80\x83", style);
+      }
+      if (to < chars) {
+        const int advance = advanceTo(borges::UnderlinePageMatch::byteOfChar(text, length, to));
+        if (advance >= 0) right = orientedMarginLeft + line.xPos + block.wordXpos(word) + advance;
+      }
+    }
+    if (line.clipWidth > 0) {
+      left = std::max(left, orientedMarginLeft + line.clipX);
+      right = std::min(right, orientedMarginLeft + line.clipX + line.clipWidth);
+    }
+    if (right <= left) return true;
+    const int ascender = renderer.getFontAscenderSize(lineFontId);
+    const int y = orientedMarginTop + line.yPos + block.getRubyShift(ascender) + ascender + kGap;
+    // Across the space between two marked words of a line, as one stroke.
+    if (runBlock == &block && runY == y && !rtl) {
+      runRight = std::max(runRight, right);
+    } else {
+      flush();
+      runBlock = &block;
+      runY = y;
+      runLeft = left;
+      runRight = right;
+    }
+    return true;
+  });
+  flush();
+  inboundUnderlinesUs = micros() - startedUs;
 }
 
 void EpubReaderActivity::renderStatusBar() const {

@@ -493,6 +493,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t extraParagraphSpacing = 1;
   uint8_t forceParagraphIndents = 0;
   uint8_t textAntiAliasing = 1;
+  // Other readers' highlights, underlined in the page.
+  uint8_t inboundUnderlines = 1;
   // Touch screen reader zones/gestures on boards with a touch controller.
   uint8_t touchReaderControls = TOUCH_READER_ON;
   // Page-turn gestures remain independently configurable while touch reader controls stay enabled.

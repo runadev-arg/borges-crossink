@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <fstream>
 #include <regex>
 #include <sstream>
@@ -23,6 +24,33 @@ std::string source(const std::string& relative) {
 }
 
 }  // namespace
+
+// A book with no highlights of other readers keeps the page turn it had: each of the reader's calls is
+// behind the one pointer that says this book has some, and nothing here is left unguarded by a rebase.
+TEST(InboundUnderlines, ABookWithoutThemOnlyPaysABranch) {
+  const std::string reader = source("src/activities/reader/EpubReaderActivity.cpp");
+  EXPECT_NE(reader.find("if (inboundUnderlines) drawInboundUnderlines("), std::string::npos);
+  EXPECT_NE(reader.find("(inboundUnderlines && borges::glue::underlinesWantWholeSection("), std::string::npos);
+  EXPECT_NE(reader.find("if (inboundUnderlines && !activeFootnotePreview) {"), std::string::npos);
+  EXPECT_EQ(reader.find("drawInboundUnderlines(", reader.find("if (inboundUnderlines) drawInboundUnderlines(") + 50),
+            reader.find("void EpubReaderActivity::drawInboundUnderlines(") + strlen("void EpubReaderActivity::"));
+  // The only other place that asks, once per book.
+  EXPECT_NE(reader.find("} else if (!inboundUnderlinesAsked) {"), std::string::npos);
+  const std::string settings = source("src/CrossPointSettings.h");
+  EXPECT_NE(settings.find("uint8_t inboundUnderlines = 1;"), std::string::npos);
+}
+
+TEST(InboundUnderlines, NeverInAGrayPlaneAndAlwaysSolid) {
+  const std::string reader = source("src/activities/reader/EpubReaderActivity.cpp");
+  const size_t at = reader.find("void EpubReaderActivity::drawInboundUnderlines(");
+  ASSERT_NE(at, std::string::npos);
+  const std::string body = reader.substr(at, reader.find("void EpubReaderActivity::renderStatusBar", at) - at);
+  EXPECT_NE(body.find("renderer.getRenderMode() != GfxRenderer::BW"), std::string::npos);
+  EXPECT_EQ(body.find("fillRectDither"), std::string::npos);
+  EXPECT_EQ(body.find("new "), std::string::npos) << "the page path does not allocate";
+  EXPECT_EQ(body.find("make_unique"), std::string::npos);
+  EXPECT_EQ(body.find("std::string"), std::string::npos);
+}
 
 TEST(PrivatePaths, NeverServedWhateverTheCaseOrTheSpelling) {
   for (const char* path : {"/.crosspoint/borges", "/.crosspoint/borges/cred.a", "/.CrossPoint/BORGES/state.b",

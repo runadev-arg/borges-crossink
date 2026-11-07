@@ -776,11 +776,12 @@ inline void addSettingByName(std::vector<SettingInfo>& target, const std::vector
 
 inline std::vector<SettingInfo> buildReaderSettingsParentList(const std::vector<SettingInfo>& allSettings) {
   std::vector<SettingInfo> readerSettings;
-  readerSettings.reserve(12);
+  readerSettings.reserve(13);
   readerSettings.push_back(SettingInfo::Submenu(StrId::STR_READER_FONT_OPTIONS, SettingAction::ReaderFontOptions));
   readerSettings.push_back(SettingInfo::Submenu(StrId::STR_READER_PAGE_LAYOUT, SettingAction::ReaderPageLayout));
   readerSettings.push_back(SettingInfo::Action(StrId::STR_STATUS_BARS, SettingAction::CustomiseStatusBar));
   addSettingByName(readerSettings, allSettings, StrId::STR_PUBLISHER_PAGE_NUMBERS);
+  addSettingByName(readerSettings, allSettings, StrId::STR_INBOUND_UNDERLINES);
   addSettingByName(readerSettings, allSettings, StrId::STR_DISABLE_TOUCHSCREEN);
   addSettingByName(readerSettings, allSettings, StrId::STR_EMBEDDED_STYLE);
   addSettingByName(readerSettings, allSettings, StrId::STR_IMAGES);
@@ -793,10 +794,13 @@ inline std::vector<SettingInfo> buildReaderSettingsParentList(const std::vector<
 
 inline std::vector<SettingInfo> buildBookReaderSettingsParentList(const std::vector<SettingInfo>& allSettings) {
   auto settings = buildReaderSettingsParentList(allSettings);
-  settings.erase(
-      std::remove_if(settings.begin(), settings.end(),
-                     [](const SettingInfo& setting) { return setting.nameId == StrId::STR_DISABLE_TOUCHSCREEN; }),
-      settings.end());
+  settings.erase(std::remove_if(settings.begin(), settings.end(),
+                                // Both are for the device, not for one book's own settings.
+                                [](const SettingInfo& setting) {
+                                  return setting.nameId == StrId::STR_DISABLE_TOUCHSCREEN ||
+                                         setting.nameId == StrId::STR_INBOUND_UNDERLINES;
+                                }),
+                 settings.end());
   return settings;
 }
 
