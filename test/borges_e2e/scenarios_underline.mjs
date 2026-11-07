@@ -365,7 +365,67 @@ async function scenario17({ h, t, makeDevice }) {
   await d.kill();
 }
 
+// A walk that kills the reader can do it once, not at every entry to that chapter.
+async function scenario18({ h, t, makeDevice }) {
+  const { account, book, d } = await deviceWithBook(h, makeDevice, "x4", { prefix: "caida" });
+  const kr = await h.koreader(account, { name: "Kobo Libra" });
+  const walkMarks = () => d.allFiles().filter((f) => /[\\/]ulw\d+\.bin$/.test(f));
+  const push = async (item) => {
+    kr.enqueueAnnotation(item);
+    t.ok((await kr.syncAll()).acks.every((a) => a.status === "accepted"), "KOReader's highlight is accepted");
+    ui.letThrottleExpire(d);
+    await syncFromHome(h, d);
+  };
+
+  // The book left in chapter 2, whose lines are known.
+  await push(phrase(book, 2, 1, "biblioteca"));
+  await openAndSettle(d);
+  let mark = await jumpToFirstHighlight(d);
+  await until("the first walk", () => /Underline plan spine=1 /.test(d.logSince(mark)), 40000);
+  t.eq(walkMarks().length, 0, "a walk that came back leaves no mark");
+  await ui.readerToHome(d);
+
+  // A new highlight means a new walk, and this one dies.
+  await push(phrase(book, 2, 2, "el corredor"));
+  await d.kill();
+  const boots = d.helloCount;
+  await d.start({ env: { BORGES_SIM_DIE_IN_WALK: "1" } });
+  await d.waitBoot(boots);
+  await d.waitLog(/Entering activity: Home/);
+  await d.waitStable(600);
+  await d.press("CONFIRM");
+  await until("the reader to die in the walk", () => !d.running, 40000);
+  t.eq(walkMarks().length, 1, "it died with the mark on the card");
+  await d.kill();
+
+  // Back: the same chapter opens, without lines and without a second walk.
+  await bootAndGoHome(d);
+  let open = await openAndSettle(d);
+  t.eq(open.reached, "EpubReader", "the book opens after the crash");
+  t.ok(/The last walk of spine 1 did not finish/.test(d.logSince(open.mark)), "it knows what happened");
+  t.ok(!/Underline plan/.test(d.logSince(open.mark)), "and does not walk again");
+  t.eq(walkMarks().length, 0, "the mark is gone");
+  t.eq((await linesOnScreen(d)).length, 0, "that chapter has no lines");
+  await d.shot("after-the-crash");
+  await ui.readerToHome(d);
+
+  open = await openAndSettle(d);
+  t.ok(!/did not finish|Underline plan/.test(d.logSince(open.mark)), "the next entry is quiet");
+  await ui.readerToHome(d);
+
+  // Something new on the log: it is tried again, and here it comes back.
+  await push(phrase(book, 2, 3, "Las"));
+  open = await openAndSettle(d);
+  await until("the walk after the log moved", () => /Underline plan spine=1 /.test(d.logSince(open.mark)), 40000);
+  await d.waitStable(1500);
+  t.ok((await linesOnScreen(d)).length >= 1, "the lines are back");
+  await d.shot("lines-back");
+  await ui.readerToHome(d);
+  await d.kill();
+}
+
 export const UNDERLINE_SCENARIOS = [
   { id: 16, name: "Other readers' highlights underlined in the page", run: scenario16 },
   { id: 17, name: "Underlines at the bound: 256 records in one chapter", run: scenario17 },
+  { id: 18, name: "A walk that crashes the reader does it once", run: scenario18 },
 ];

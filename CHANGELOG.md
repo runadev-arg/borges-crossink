@@ -2,7 +2,7 @@
 
 ### Added
 
-- What you highlighted in KOReader or on the web is now underlined on the page where it sits, across lines and pages, in any font size and orientation. A highlight whose place or words cannot be matched exactly in this book is simply not drawn, and a passage you also highlighted here keeps your own marker. Reader settings: Underline Others' Highlights, on by default.
+- What you highlighted in KOReader or on the web is now underlined on the page where it sits, across lines and pages, in any font size and orientation. A highlight whose place or words cannot be matched exactly in this book is simply not drawn, and a passage you also highlighted here keeps your own marker. Reader settings: Underline Others' Highlights, on by default. If working out a chapter's lines ever crashes the reader, that chapter stays without lines rather than crashing again.
 
 ## [v1.6.1-borges.3] - Unreleased
 

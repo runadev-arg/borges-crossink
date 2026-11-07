@@ -319,6 +319,11 @@ layout's render signature and the page count: another font or orientation means 
 is already waiting for that chapter's layout. Both files are one write with a CRC: a tear or a stale key
 reads as not there and is walked again. A write that fails only loses time.
 
+A walk is the one heavy step here, and what it costs on the chip has not been measured. So `ulw<spine>.bin`
+is written before it and removed when it comes back, whichever way. Finding that file means the last walk
+never came back, by a crash or a power cut: the chapter gets an empty plan and stays without lines until
+the log or the layout changes, so a walk that kills the device can do it once per state, not at every entry.
+
 **Memory.** Nothing at all for a book with no highlights. In a book that has them, `UnderlineBook` (fixed,
 about 370 B) stays while it is open. During a walk, with the framebuffer lent as for an exit: 32 B per
 highlight in the chapter (5 KB more for a moment, until it is known how many), 12 B per segment (at most

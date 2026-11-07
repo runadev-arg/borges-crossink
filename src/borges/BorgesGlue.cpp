@@ -684,6 +684,23 @@ std::string underlinePlanPath(const Epub& epub, const int spine) {
   return epub.getCachePath() + "/ulp" + std::to_string(spine) + ".bin";
 }
 
+std::string underlineWalkMarkPath(const Epub& epub, const int spine) {
+  return epub.getCachePath() + "/ulw" + std::to_string(spine) + ".bin";
+}
+
+// Goes when the walk comes back, whichever way. A crash skips this, and that is the point.
+class UnderlineWalkMark {
+ public:
+  UnderlineWalkMark(IFs& fs, const std::string& path) : fs_(fs), path_(path) {}
+  ~UnderlineWalkMark() { fs_.remove(path_.c_str()); }
+  UnderlineWalkMark(const UnderlineWalkMark&) = delete;
+  UnderlineWalkMark& operator=(const UnderlineWalkMark&) = delete;
+
+ private:
+  IFs& fs_;
+  const std::string& path_;
+};
+
 // What this reader has highlighted in a chapter, from what is already in RAM.
 uint32_t ownClipsSignature(const int spine) {
   uint32_t signature = 2166136261u;
@@ -783,6 +800,33 @@ void prepareUnderlines(UnderlineBook& book, GfxRenderer& renderer, const std::sh
     LOG_ERR("BORGES", "Spine %d has %u pages, more than can be underlined", spine, section.pageCount);
     return;
   }
+
+  // The one heavy thing here, and its real cost on this chip is unmeasured. A mark found means the last
+  // walk of this chapter never came back: without this, every entry to it would reboot the reader. It
+  // stays without lines until the log or the layout changes. A power cut mid-walk costs the same.
+  const std::string mark = underlineWalkMarkPath(*epub, spine);
+  if (fs.exists(mark.c_str())) {
+    LOG_ERR("BORGES", "The last walk of spine %d did not finish: no lines in this chapter", spine);
+    if (saveUnderlinePlan(fs, path.c_str(), key, nullptr, 0)) fs.remove(mark.c_str());
+    return;
+  }
+  const IFs::Handle markFile = fs.open(mark.c_str(), IFs::Mode::WriteTrunc);
+  if (markFile == IFs::kInvalid) {
+    LOG_ERR("BORGES", "Could not mark %s", mark.c_str());
+    return;
+  }
+  const uint8_t markByte = 1;
+  const bool marked = fs.write(markFile, &markByte, 1) == 1 && fs.flush(markFile);
+  fs.close(markFile);
+  // Every way out of what follows is a walk that came back, including the ones that gave up.
+  const UnderlineWalkMark markGuard(fs, mark);
+  if (!marked) {
+    LOG_ERR("BORGES", "Could not mark %s", mark.c_str());
+    return;
+  }
+#ifdef SIMULATOR
+  if (getenv("BORGES_SIM_DIE_IN_WALK")) _Exit(1);
+#endif
 
   const uint32_t startedAt = millis();
   XpointerBudget budget(renderer, *epub);
