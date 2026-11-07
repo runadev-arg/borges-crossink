@@ -230,6 +230,23 @@ export class Device {
     return {
       width: result.width,
       height: result.height,
+      // Runs of solid black at least this long, row by row.
+      solidRuns: (minimum, light = false) => {
+        const runs = [];
+        for (let y = 0; y < result.height; y += 1) {
+          let start = -1;
+          for (let x = 0; x <= result.width; x += 1) {
+            const value = x < result.width ? bytes[(y * result.width + x) * 4 + 1] : -1;
+            const dark = value >= 0 && (light ? value > 215 : value < 40);
+            if (dark && start < 0) start = x;
+            if (!dark && start >= 0) {
+              if (x - start >= minimum) runs.push({ y, x0: start, x1: x });
+              start = -1;
+            }
+          }
+        }
+        return runs;
+      },
       // Not white: covers both a solid fill and a dither averaged by the window's scaling.
       inkFraction: (x0, y0, x1, y1) => {
         let ink = 0;

@@ -14,8 +14,8 @@ export const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 // Shared steps
 // ---------------------------------------------------------------------------------
 
-function bookFixture(title = "Ficciones grandes", author = "Jorge Luis Borges", fileName = "ficciones.epub", padBytes = 1500000) {
-  const bytes = B.buildBook({ title, author, padBytes });
+export function bookFixture(title = "Ficciones grandes", author = "Jorge Luis Borges", fileName = "ficciones.epub", padBytes = 1500000, shape = {}) {
+  const bytes = B.buildBook({ title, author, padBytes, ...shape });
   return { title, author, fileName, bytes, md5: koreaderPartialMd5(bytes), sha: sha256(bytes) };
 }
 
