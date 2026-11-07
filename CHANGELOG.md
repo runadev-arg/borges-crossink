@@ -1,3 +1,9 @@
+## [v1.6.1-borges.5] - Unreleased
+
+### Fixed
+
+- Going to where another reader left off now opens the page you were on. Before, on the X4 it often opened at the start of that chapter, several pages back: the reader could not find the exact place for lack of memory, and fell back on KOReader's percentage, which counts pages and not the book's bytes. Back to where I was had the same problem and is fixed too.
+
 ## [v1.6.1-borges.4] - Unreleased
 
 ### Added

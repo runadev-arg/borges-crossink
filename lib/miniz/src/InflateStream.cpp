@@ -46,6 +46,14 @@ bool InflateStream::init(const bool streaming) {
     state = reinterpret_cast<tinfl_decompressor*>(arenaBase);
     window = streaming ? arenaBase + STATE_ALIGNED : nullptr;
   } else {
+#ifdef SIMULATOR
+    // The C3's heap, as it is right after the radio: no 32 KB block for a window outside a
+    // framebuffer loan. The host always has one, so without this the e2e cannot see the miss.
+    if (streaming && getenv("BORGES_SIM_TIGHT_HEAP")) {
+      LOG_ERR("INF", "No admitted storage for inflate window (%u bytes): tight heap", unsigned(WINDOW_SIZE));
+      return false;
+    }
+#endif
     // Runtime-sized transient byte storage; tinfl's POD state remains on the
     // default heap. Owned separately so partial initialization frees it now.
     stateOwner = makeDefaultByteBufferNoThrow(sizeof(tinfl_decompressor));

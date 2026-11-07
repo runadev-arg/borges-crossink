@@ -396,6 +396,13 @@ bool BorgesResumeActivity::applyJump() {
   const bool hasLocal = EpubReaderUtils::loadProgress(*epub, progress, "BORGES");
   const int pageCount = progress.hasPageCount ? std::max(1, progress.pageCount) : 1;
 
+  // An xpointer is found by streaming its chapter through inflate, whose 32 KB window a C3 just
+  // off Wi-Fi has no block for. Without the frame's storage the xpointer goes unresolved and
+  // the jump falls to the percentage: KOReader's counts laid out pages, sits before the chapter
+  // in bytes, and lands on its first page, as the first real X4 did (page 229 for 239). The panel
+  // keeps the prompt; render() repaints from nothing after this.
+  GfxRenderer::FrameBufferLoan loan(renderer);
+
   before_ = makeUniqueNoThrow<Position>(decision_->local);
   if (!before_) return false;
   if (hasLocal) {
@@ -426,6 +433,11 @@ bool BorgesResumeActivity::applyJump() {
         mapped.pageNumber = *page;
       }
     }
+  }
+  loan.end();
+  if (!mapped.hasVisibleTextOffset && request.xpointer[0] != '\0') {
+    LOG_ERR("BORGES", "The xpointer was not found here, going by the percentage (free=%u maxAlloc=%u)",
+            ESP.getFreeHeap(), ESP.getMaxAllocHeap());
   }
   SavedPosition saved;
   if (!mapped.valid ||
@@ -502,7 +514,10 @@ void BorgesResumeActivity::mapSavedPage(Position& out) {
     local.visibleTextOffset = progress.visibleTextOffset;
     local.hasVisibleTextOffset = true;
   }
+  // The same inflate as a jump: on the frame's storage, or the xpointer is lost.
+  GfxRenderer::FrameBufferLoan loan(renderer);
   const KOReaderPosition mapped = ProgressMapper::toKOReader(epub, local);
+  loan.end();
   if (!mapped.valid) return;
   out.setPercent(mapped.percentage * 100.0);
   out.xpointer[0] = '\0';

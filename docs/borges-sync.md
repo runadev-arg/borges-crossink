@@ -124,6 +124,12 @@ unresolved, that book's `progress.changed` is held back from upload.
 - Invalid event (wrong book, missing `event_id`, missing `reading_head`) is a reported error, no prompt.
 - **Ir al 62%** (**Ir a esa posición** with no percent): save an undo point (single use), resolve the position locally (xpointer, else
   percentage), navigate, enqueue own progress with `explicit_jump:true`.
+  The xpointer is resolved on the framebuffer's storage (`FrameBufferLoan`), as every other
+  xpointer is: streaming its chapter takes inflate's 32 KB window, and a C3 just off Wi-Fi has no
+  such block. Without it the xpointer goes unresolved, and KOReader's percentage (which counts
+  laid out pages, so in a book with pictures it sits before the chapter in bytes) is clamped to
+  the chapter's first page. That was the first real X4: page 229 for 239. e2e scenario 19 holds it
+  with a compressed book and `BORGES_SIM_TIGHT_HEAP`, which denies that block outside a loan.
 - **Seguir en el 10%** (**Seguir acá** with no percent): stay, stamp local reading activity now, enqueue own progress: this device becomes
   the head.
 - Both remember the choice, release the hold and drain. Pending `suggestion_id` is resolved, in that

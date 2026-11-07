@@ -8585,7 +8585,15 @@ void EpubReaderActivity::undoBorgesJump() {
   remote.xpath = target->xpointer;
   remote.percentage = static_cast<float>(target->pctMicro) / 100000000.0f;
   const int spinePages = section ? section->estimatedTotalPages() : std::max<int>(1, cachedChapterTotalPageCount);
-  const CrossPointPosition mapped = ProgressMapper::toCrossPoint(epub, remote, currentSpineIndex, spinePages);
+  // The xpointer's chapter goes through inflate, which a loaded reader has no 32 KB block for:
+  // only the frame's storage holds its window, or the way back lands on the chapter's first page.
+  // The frame is drawn again from nothing for the toast and then by the reader.
+  CrossPointPosition mapped;
+  {
+    GfxRenderer::FrameBufferLoan loan(renderer);
+    mapped = ProgressMapper::toCrossPoint(epub, remote, currentSpineIndex, spinePages);
+  }
+  renderer.clearScreen(ReaderUtils::readerBackgroundColor());
   const std::optional<uint32_t> offset =
       mapped.hasVisibleTextOffset ? std::optional<uint32_t>(mapped.visibleTextOffset) : std::nullopt;
   if (!mapped.valid || !EpubReaderUtils::saveProgress(*epub, mapped.spineIndex, mapped.pageNumber,

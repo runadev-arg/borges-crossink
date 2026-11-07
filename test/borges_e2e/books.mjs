@@ -7,34 +7,40 @@ import zlib from "node:zlib";
 
 const xml = (text) => String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-function zip(entries) {
+// deflate: every entry but mimetype compressed, as a real EPUB is. Then reading a chapter takes
+// inflate and its 32 KB window, which a stored book never asks for.
+function zip(entries, { deflate = false } = {}) {
   const locals = [];
   const centrals = [];
   let offset = 0;
   for (const { name, data } of entries) {
     const nameBytes = Buffer.from(name, "utf8");
     const crc = zlib.crc32(data);
+    const packed = deflate && name !== "mimetype";
+    const body = packed ? zlib.deflateRawSync(data) : data;
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
     local.writeUInt16LE(0x0800, 6);
+    local.writeUInt16LE(packed ? 8 : 0, 8);
     local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(body.length, 18);
     local.writeUInt32LE(data.length, 22);
     local.writeUInt16LE(nameBytes.length, 26);
-    locals.push(local, nameBytes, data);
+    locals.push(local, nameBytes, body);
     const central = Buffer.alloc(46);
     central.writeUInt32LE(0x02014b50, 0);
     central.writeUInt16LE(20, 4);
     central.writeUInt16LE(20, 6);
     central.writeUInt16LE(0x0800, 8);
+    central.writeUInt16LE(packed ? 8 : 0, 10);
     central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(body.length, 20);
     central.writeUInt32LE(data.length, 24);
     central.writeUInt16LE(nameBytes.length, 28);
     central.writeUInt32LE(offset, 42);
     centrals.push(central, nameBytes);
-    offset += local.length + nameBytes.length + data.length;
+    offset += local.length + nameBytes.length + body.length;
   }
   const centralBytes = Buffer.concat(centrals);
   const end = Buffer.alloc(22);
@@ -49,7 +55,7 @@ function zip(entries) {
 const FILLER = "Las palabras siguen y siguen por el corredor de la biblioteca, hexagono tras hexagono, para que cada pagina tenga texto de verdad y el lector tenga que pasarla entera.";
 
 // chapters are the same length, so spine index i of n sits at about i/n of the book.
-export function buildBook({ title, author = "Autor de Prueba", chapters = 10, paragraphs = 40, padBytes = 0 }) {
+export function buildBook({ title, author = "Autor de Prueba", chapters = 10, paragraphs = 40, padBytes = 0, deflate = false }) {
   const uid = crypto.randomUUID();
   const entries = [{ name: "mimetype", data: Buffer.from("application/epub+zip") }];
   entries.push({
@@ -105,7 +111,7 @@ ${body.join("\n")}
     });
   }
   if (padBytes) entries.push({ name: "OEBPS/pad.bin", data: crypto.randomBytes(padBytes) });
-  return zip(entries);
+  return zip(entries, { deflate });
 }
 
 // DocFragment is 1-based over the spine, as crengine writes it. The h1 is a sibling of the
