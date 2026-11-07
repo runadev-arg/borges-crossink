@@ -709,16 +709,7 @@ void InboundStore::purge(IFs& fs) {
 
 namespace {
 
-class LiveVisitor {
- public:
-  virtual ~LiveVisitor() = default;
-  // How many there can be. False: no memory for them.
-  virtual bool prepare(uint16_t) { return true; }
-  // False stops the walk.
-  virtual bool onLive(uint32_t offset, const InboundHighlight& highlight) = 0;
-};
-
-bool visitLive(IFs& fs, const BookId& book, const uint16_t epoch, LiveVisitor& visitor, bool* partial) {
+bool visitLive(IFs& fs, const BookId& book, const uint16_t epoch, InboundVisitor& visitor, bool* partial) {
   if (!InboundList::present(fs, book)) return true;  // Most books: no allocation at all.
   char path[kPathCap];
   logPath(book, path);
@@ -769,6 +760,16 @@ bool visitLive(IFs& fs, const BookId& book, const uint16_t epoch, LiveVisitor& v
 
 InboundList::~InboundList() { delete[] items_; }
 
+bool InboundList::anyOnCard(IFs& fs) {
+  char path[kPathCap];
+  const size_t n = strlen(kIndexPath);
+  memcpy(path, kIndexPath, n);
+  memcpy(path + n, ".a", 3);
+  if (fs.exists(path)) return true;
+  path[n + 1] = 'b';
+  return fs.exists(path);
+}
+
 bool InboundList::present(IFs& fs, const BookId& book) {
   char path[kPathCap];
   logPath(book, path);
@@ -778,6 +779,35 @@ bool InboundList::present(IFs& fs, const BookId& book) {
   return fs.exists(aside);
 }
 
+bool InboundList::visit(IFs& fs, const BookId& book, const uint16_t epoch, InboundVisitor& visitor) {
+  return visitLive(fs, book, epoch, visitor, nullptr);
+}
+
+bool InboundList::identity(IFs& fs, const BookId& book, const uint16_t epoch, uint32_t& out) {
+  char path[kPathCap];
+  logPath(book, path);
+  char aside[kPathCap + 3];
+  asidePath(path, aside);
+  if (fs.exists(aside)) {
+    auto* buffer = new (std::nothrow) uint8_t[kMaxRecordBytes];
+    if (!buffer) return false;
+    const bool recovered = recoverAside(fs, path, epoch, buffer);
+    delete[] buffer;
+    if (!recovered) return false;
+  }
+  File f(fs, path, IFs::Mode::Read);
+  if (!f) return false;
+  const int64_t size = f.size();
+  uint8_t header[kLogHeaderBytes];
+  if (size < static_cast<int64_t>(sizeof(header)) || !f.readExact(header, sizeof(header))) return false;
+  if (memcmp(header, kLogMagic, 4) != 0) return false;
+  ByteReader r(header + 4, sizeof(header) - 4);
+  if (r.u16() != epoch) return false;
+  const auto bytes = static_cast<uint32_t>(size);
+  out = crc32(header, sizeof(header)) ^ (bytes * 2654435761u);
+  return true;
+}
+
 bool InboundList::load(const BookId& book, const uint16_t epoch, IOwnPassages* own) {
   delete[] items_;
   items_ = nullptr;
@@ -785,7 +815,7 @@ bool InboundList::load(const BookId& book, const uint16_t epoch, IOwnPassages* o
   partial_ = false;
   book_ = book;
 
-  class Collect final : public LiveVisitor {
+  class Collect final : public InboundVisitor {
    public:
     explicit Collect(IOwnPassages* own) : own_(own) {}
     ~Collect() override { delete[] items_; }
@@ -862,7 +892,7 @@ bool InboundList::read(const uint16_t index, InboundHighlight& out) {
 }
 
 bool InboundList::hasAny(IFs& fs, const BookId& book, const uint16_t epoch, IOwnPassages* own) {
-  class First final : public LiveVisitor {
+  class First final : public InboundVisitor {
    public:
     explicit First(IOwnPassages* own) : own_(own) {}
     bool onLive(uint32_t, const InboundHighlight& h) override {

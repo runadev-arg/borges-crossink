@@ -22,8 +22,10 @@ add_library(borges_core_lib STATIC
   ${BORGES_CORE_DIR}/Spool.cpp
   ${BORGES_CORE_DIR}/Store.cpp
   ${BORGES_CORE_DIR}/SyncEngine.cpp
+  ${BORGES_CORE_DIR}/Underlines.cpp
+  ${REPO_ROOT}/lib/Utf8/Utf8.cpp
 )
-target_include_directories(borges_core_lib PUBLIC ${BORGES_CORE_DIR})
+target_include_directories(borges_core_lib PUBLIC ${BORGES_CORE_DIR} ${REPO_ROOT}/lib/Utf8)
 target_compile_options(borges_core_lib PRIVATE -Wall -Wextra -pedantic)
 if(BORGES_CORE_WERROR)
   target_compile_options(borges_core_lib PRIVATE -Werror)
@@ -44,6 +46,7 @@ add_executable(borges_core
   ResumePolicyTest.cpp
   StoreTest.cpp
   SyncEngineTest.cpp
+  UnderlinesTest.cpp
 )
 target_include_directories(borges_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${arduinojson_SOURCE_DIR}/src)
 target_link_libraries(borges_core PRIVATE borges_core_lib GTest::gtest_main)

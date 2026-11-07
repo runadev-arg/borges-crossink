@@ -8,12 +8,12 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Debug)
 endif()
 
-# lib/BorgesCore is compiled as is: the only thing this target adds is host ports.
+# lib/BorgesCore is compiled as is: what this target adds is host ports, and the UTF-8 helpers the core reads text with.
 set(BORGES_CORE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/BorgesCore)
 file(GLOB BORGES_CORE_SOURCES CONFIGURE_DEPENDS ${BORGES_CORE_DIR}/*.cpp)
 
-add_executable(borges-cli borges_cli.cpp ${BORGES_CORE_SOURCES})
-target_include_directories(borges-cli PRIVATE ${BORGES_CORE_DIR})
+add_executable(borges-cli borges_cli.cpp ${BORGES_CORE_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/Utf8/Utf8.cpp)
+target_include_directories(borges-cli PRIVATE ${BORGES_CORE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../../lib/Utf8)
 target_compile_options(borges-cli PRIVATE -Wall -Wextra)
 target_link_libraries(borges-cli PRIVATE ws2_32 bcrypt shell32)
 target_link_options(borges-cli PRIVATE -static)

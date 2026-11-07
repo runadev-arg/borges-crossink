@@ -114,6 +114,16 @@ class InboundStore {
   uint64_t watermark_ = 0;
 };
 
+// Every highlight a log says is live, in the order they arrived.
+class InboundVisitor {
+ public:
+  virtual ~InboundVisitor() = default;
+  // How many there can be. False: no memory for them.
+  virtual bool prepare(uint16_t) { return true; }
+  // False stops the walk.
+  virtual bool onLive(uint32_t offset, const InboundHighlight& highlight) = 0;
+};
+
 // The reading side. Open for as long as a screen shows it.
 class InboundList {
  public:
@@ -132,8 +142,16 @@ class InboundList {
 
   // Without a list: stops at the first one that would be a row.
   static bool hasAny(IFs& fs, const BookId& book, uint16_t epoch, IOwnPassages* own);
+  // Two lookups, no memory. False: no book on this card has one, not even whose it is needs asking.
+  static bool anyOnCard(IFs& fs);
   // One or two lookups, no memory. False: this book has none, and there is no need to ask more.
   static bool present(IFs& fs, const BookId& book);
+  // Holds up to 4 KB and a record while it runs. True with nothing visited when the book has no log.
+  static bool visit(IFs& fs, const BookId& book, uint16_t epoch, InboundVisitor& visitor);
+  // Changes whenever what the log holds changes: an append moves its size, a compaction its header.
+  // Two small reads and no allocation, unless a crash left a compaction to finish. False: no usable
+  // log of this epoch.
+  static bool identity(IFs& fs, const BookId& book, uint16_t epoch, uint32_t& out);
 
  private:
   struct Item {
