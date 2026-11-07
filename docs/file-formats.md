@@ -5,6 +5,12 @@ All POD fields are written in the ESP32 little-endian representation used by
 `Serialization.h`; strings are length-prefixed UTF-8 unless a format notes a
 fixed-size char buffer.
 
+## `epub_<hash>/ulb.bin` and `epub_<hash>/ulp<spine>.bin`
+
+Where other readers' highlights fall, so a chapter is walked only once for a layout. Layout and
+meaning in `lib/BorgesCore/Underlines.h`; each is one write ending in a CRC, and anything that does
+not check out reads as not there and is made again. No record of the section cache depends on them.
+
 ## `epub_<hash>/links.bin`
 
 The EPUB reader writes followed-link Back history on clean exit (Home, sleep,

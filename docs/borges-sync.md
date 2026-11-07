@@ -216,8 +216,8 @@ card is whoever had it last.
 
 ### Highlights from other readers
 
-KOReader applies what another reader or the web highlighted to the book. The firmware cannot draw
-one in the page (section 10), so it keeps them per book and lists them: reader drawer
+KOReader applies what another reader or the web highlighted to the book. The firmware keeps them per
+book, underlines them in the page (below) and lists them: reader drawer
 **Subrayados de otros lectores** / **Highlights from other readers**, read-only, and only in a book
 that has one. Each row: the text (up to three lines across a portrait screen, two across a landscape one,
 ending in an ellipsis when there is more), then chapter, source device and how long ago, each when
@@ -285,15 +285,71 @@ reader's (not as `explicit_jump`, since nobody asked for it to win over another 
 estaba` publishes the way back. Everything else about the reader is untouched: it reopens the book at that
 place, as after `Volver a donde estaba`.
 
+### Underlined in the page
+
+A highlight of another reader is underlined on the page where it sits, with a solid line two pixels thick
+in the frame every refresh starts from. **Marcar subrayados de otros** / **Underline Others' Highlights**
+in the reader settings turns it off; it is on by default. The firmware's reader has no dark mode today
+(`readerForegroundBlack()` is always true); the line takes the text's color, so it would follow one.
+
+**What decides where.** Only the xpointer and the text, both from the log. The xpointer gives a position in
+the chapter, the same `visibleOffset` as `resolve()`, and from there the highlight's text is compared
+against the chapter, a counted character at a time (white space, soft hyphens and combining marks do not
+count; composed letters count as their base; ASCII without case, for a stylesheet in capitals). If the whole
+text is not there, nothing is drawn. On the page, a segment is a place (how many counted characters from the
+page's first word), a length and a hash of those characters, and the page's words have to hash the same. So
+a miscount costs a missing line, never a line under other words. A word the reader adds, the `1.` or bullet
+of a list item, does not push the count off and is not underlined. The same `IOwnPassages` as the list
+decides what this reader has highlighted itself: that passage is not underlined and keeps its own marker.
+The same place from two other devices is one line, and the same words in two places of a chapter are two.
+
+**When the work happens.** Mapping is one walk of the chapter however many highlights it holds
+(`ChapterXPathResolver::walkPointers`, a batch of the same walker, held to `resolve()` in
+`test/borges_xpointer`), and its result stays on the card:
+
+| When | What | Cost |
+|---|---|---|
+| A book opens | Is there an inbound index on the card? Then the book's id, and does it have a log? | Two lookups. With highlights of other books on the card: the partial MD5 and two lookups more. No allocation |
+| A book with a log opens | `ulb.bin`, which spine items have one | One small read; if the log moved, a walk over the log |
+| A chapter with one is entered | `ulp<spine>.bin` still true? Else one walk, with the frame lent, and it is saved | Read of the file; if stale, what a walk of that chapter takes. The chapter is laid out whole first, as with full indexing, up to 384 KB of source. Past that it stays without lines until entered with the layout finished |
+| A page | Is this page's bit set in RAM? Then its segments, and match them against the words it already has | A page without any: one bit test. With: one file open and a binary search, for it and the next few pages (a window of 16 segments), and matching is allocation free |
+
+The plan is valid for one state of the log (its size and header), this reader's clippings in that chapter, the
+layout's render signature and the page count: another font or orientation means a new walk, when the reader
+is already waiting for that chapter's layout. Both files are one write with a CRC: a tear or a stale key
+reads as not there and is walked again. A write that fails only loses time.
+
+**Memory.** Nothing at all for a book with no highlights. In a book that has them, `UnderlineBook` (fixed,
+about 370 B) stays while it is open. During a walk, with the framebuffer lent as for an exit: 32 B per
+highlight in the chapter (5 KB more for a moment, until it is known how many), 12 B per segment (at most
+512), 4 B per page (at most 2048), up to 4 KB + a record while reading the log, and what a walk takes
+itself. If it does not fit, this chapter has no lines this time, and the page is drawn. Matching and drawing a
+page takes under 1 KB of stack and nothing from the heap but the handle of that one read. A page holds at
+most 16 segments, and a chapter's walk follows 8 highlights open at once: past that they are refused, not drawn
+badly.
+
+**Not drawn, on purpose.** A text longer than the 480 bytes the log keeps is underlined up to what was
+kept. An xpointer into the rest of a word cut by crengine's 8 KB text split, or an element xpointer with a
+child offset, does not hit. A chapter that does not walk within 8 s stays without lines until the log or the
+layout changes, and that is written down so it is not walked again at every entry. Inside a table, lines are
+only drawn when the text order on the page matches the book's, which the hash decides. An optimized copy of
+a book (`requiresSourceSpineMap`) has none. A footnote preview has none.
+
 ## 8. Testing
 
 1. Host unit tests of `lib/BorgesCore` (GoogleTest, CMake) with an in-memory FS that injects crashes at
    every write and torn writes, plus a scripted HTTP fake.
-2. Contract tests: the same core, compiled as a CLI, against the real Borges server on a throwaway
+2. Accuracy of the underlines against crengine (`test/borges_xpointer`): the ranges crengine reads, as KOReader
+   would keep them, walked and matched against the real parser's pages in three layouts. A page must underline
+   what crengine read, or nothing. Any other text fails the gate.
+3. Contract tests: the same core, compiled as a CLI, against the real Borges server on a throwaway
    PostgreSQL 17, with a second client behaving as KOReader.
-3. Simulator end to end: the real firmware on Windows, scripted buttons, screenshots.
-4. TLS probe: wolfSSL built with the device's exact configuration and anchors, against production.
-5. Firmware build with the size gate. Not covered without hardware: real radio, real heap, panel.
+4. Simulator end to end: the real firmware on Windows, scripted buttons, screenshots. Scenarios 16 and 17
+   look at the underlines, and 17 measures them at the bound. The simulator models no heap, so what memory they
+   take comes from the host counters of `test/borges_xpointer` (the walk) and from `test/borges_qemu`
+   (env `underline-bench`: the two hot paths compiled for RISC-V, on the device's allocator).
+5. TLS probe: wolfSSL built with the device's exact configuration and anchors, against production.
+6. Firmware build with the size gate. Not covered without hardware: real radio, real heap, panel.
 
 ## 9. Accepted risks
 
@@ -321,6 +377,6 @@ at most 2.5 s. A page, a redirect anywhere but `https://<host>` or a 511 means t
 the network wants a login, instead of blaming the server. A portal that answers nothing on port 80, or
 that blocks DNS, still reads as the server being unreachable.
 
-Rendering highlights inside the page is out of scope, both this device's and other readers'. Other
-readers' are reachable from the reader drawer (section 7), and that list is read-only: nothing can be
-edited, deleted or adopted from it, and it has no touch handling beyond what the drawer has.
+Other readers' highlights are underlined in the page and listed in the reader drawer (section 7). Both
+are read-only: nothing can be edited, deleted or adopted from them, and the list has no touch handling
+beyond what the drawer has. A note on one of them is not shown.
